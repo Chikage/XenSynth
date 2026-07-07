@@ -881,7 +881,8 @@ public final class MsczToMidx {
     }
 
     private static void parseVoice(Element voice, ScoreData score, TrackData track, VoiceState state, int voiceIndex) {
-        for (Element element : voice.children) {
+        for (int childIndex = 0; childIndex < voice.children.size(); childIndex++) {
+            Element element = voice.children.get(childIndex);
             String tag = element.getTagName();
             if ("Tempo".equals(tag)) {
                 double tempo = doubleText(firstDirectChild(element, "tempo"), -1.0);
@@ -937,11 +938,36 @@ public final class MsczToMidx {
                 if (isGraceChord(element)) {
                     state.pendingGraceChords.add(element);
                 } else {
-                    long playedDuration = applyAndConsumeFermata(state, nominalDuration);
-                    appendChordWithGraceNotes(element, score, track, state, voiceIndex, Math.max(1, playedDuration));
-                    state.tick += Math.max(0, playedDuration);
+                    int tremoloPartnerIndex = twoChordTremoloPartnerIndex(voice, childIndex);
+                    if (tremoloPartnerIndex >= 0) {
+                        Element partner = voice.children.get(tremoloPartnerIndex);
+                        long partnerDuration = durationTicks(
+                                partner,
+                                score.division,
+                                tupletRatioForElement(partner, state.tupletsById, state.tupletRatio),
+                                state.measureTicks
+                        );
+                        long playedDuration = applyAndConsumeFermata(state, Math.max(1, nominalDuration + partnerDuration));
+                        appendTwoChordTremoloWithGraceNotes(
+                                element,
+                                partner,
+                                score,
+                                track,
+                                state,
+                                voiceIndex,
+                                Math.max(1, playedDuration)
+                        );
+                        state.tick += Math.max(0, playedDuration);
+                        consumeTupletSlot(state, element);
+                        consumeTupletSlot(state, partner);
+                        childIndex = tremoloPartnerIndex;
+                    } else {
+                        long playedDuration = applyAndConsumeFermata(state, nominalDuration);
+                        appendChordWithGraceNotes(element, score, track, state, voiceIndex, Math.max(1, playedDuration));
+                        state.tick += Math.max(0, playedDuration);
+                        consumeTupletSlot(state, element);
+                    }
                     state.pendingGraceChords.clear();
-                    consumeTupletSlot(state, element);
                 }
             } else if ("Fermata".equals(tag)) {
                 state.pendingFermataMultiplier = Math.max(state.pendingFermataMultiplier, fermataMultiplier(element));
@@ -994,6 +1020,47 @@ public final class MsczToMidx {
         }
     }
 
+    private static void appendTwoChordTremoloWithGraceNotes(
+            Element firstChord,
+            Element secondChord,
+            ScoreData score,
+            TrackData track,
+            VoiceState state,
+            int voiceIndex,
+            long nominalDuration
+    ) {
+        List<Element> beforeGrace = new ArrayList<Element>();
+        for (Element grace : state.pendingGraceChords) {
+            if (!isGraceAfterChord(grace)) {
+                beforeGrace.add(grace);
+            }
+        }
+
+        long beforeTotal = 0;
+        long beforeEach = 0;
+        if (!beforeGrace.isEmpty() && nominalDuration > 1) {
+            beforeTotal = Math.min(nominalDuration - 1, Math.max(1, nominalDuration / 8));
+            beforeEach = Math.max(1, beforeTotal / beforeGrace.size());
+            beforeTotal = beforeEach * beforeGrace.size();
+        }
+
+        long beforeTick = state.tick;
+        for (int i = 0; i < beforeGrace.size(); i++) {
+            appendChordNotes(beforeGrace.get(i), score, track, state, voiceIndex, beforeTick + beforeEach * i, beforeEach);
+        }
+
+        appendTwoChordTremoloNotes(
+                firstChord,
+                secondChord,
+                score,
+                track,
+                state,
+                voiceIndex,
+                state.tick + beforeTotal,
+                Math.max(1, nominalDuration - beforeTotal)
+        );
+    }
+
     private static void appendChordNotes(
             Element chord,
             ScoreData score,
@@ -1003,9 +1070,22 @@ public final class MsczToMidx {
             long chordStartTick,
             long nominalDuration
     ) {
+        List<EventTiming> timings = eventTimings(chord, track, chordStartTick, nominalDuration, score.division);
+        appendChordNotesWithTimings(chord, score, track, state, voiceIndex, chordStartTick, nominalDuration, timings);
+    }
+
+    private static void appendChordNotesWithTimings(
+            Element chord,
+            ScoreData score,
+            TrackData track,
+            VoiceState state,
+            int voiceIndex,
+            long chordStartTick,
+            long nominalDuration,
+            List<EventTiming> timings
+    ) {
         ChordPerformance performance = chordPerformance(chord);
         int gateTimePercent = clamp(track.gateTimePercent * performance.gateTimePercent / 100, 1, 1000);
-        List<EventTiming> timings = eventTimings(chord, nominalDuration, score.division);
         List<Element> notes = directChildren(chord, "Note");
         boolean arpeggio = firstDirectChild(chord, "Arpeggio") != null && intText(firstDirectChild(firstDirectChild(chord, "Arpeggio"), "play"), 1) != 0;
         for (int noteIndex = 0; noteIndex < notes.size(); noteIndex++) {
@@ -1065,6 +1145,38 @@ public final class MsczToMidx {
         }
     }
 
+    private static void appendTwoChordTremoloNotes(
+            Element firstChord,
+            Element secondChord,
+            ScoreData score,
+            TrackData track,
+            VoiceState state,
+            int voiceIndex,
+            long chordStartTick,
+            long nominalDuration
+    ) {
+        Element tremolo = firstDirectChild(firstChord, "Tremolo");
+        long unit = tremoloUnitTicks(tremoloSubtype(tremolo), score.division);
+        long offset = 0;
+        int index = 0;
+        while (offset < nominalDuration) {
+            long length = Math.min(Math.max(1, unit), nominalDuration - offset);
+            Element chord = (index % 2 == 0) ? firstChord : secondChord;
+            appendChordNotesWithTimings(
+                    chord,
+                    score,
+                    track,
+                    state,
+                    voiceIndex,
+                    chordStartTick + offset,
+                    length,
+                    singleEventTiming(length)
+            );
+            offset += length;
+            index++;
+        }
+    }
+
     private static void emitPlayback(TrackData track, ScoreData score, NotePlayback playback) {
         playback.pitch = clamp(playback.pitch, 0, 127);
         playback.nativePitch = clamp(playback.nativePitch, 0, 127);
@@ -1086,12 +1198,16 @@ public final class MsczToMidx {
         return startTick + Math.max(1, gatedDuration);
     }
 
-    private static List<EventTiming> eventTimings(Element chord, long nominalDuration, int division) {
+    private static List<EventTiming> eventTimings(Element chord, TrackData track, long chordStartTick, long nominalDuration, int division) {
         Element events = firstDirectChild(chord, "Events");
         if (events == null) {
             List<EventTiming> ornament = ornamentEventTimings(chord, nominalDuration, division);
             if (ornament != null) {
                 return ornament;
+            }
+            List<EventTiming> trill = trillEventTimings(track, chordStartTick, nominalDuration, division);
+            if (trill != null) {
+                return trill;
             }
             List<EventTiming> tremolo = tremoloEventTimings(chord, nominalDuration, division);
             if (tremolo != null) {
@@ -1262,20 +1378,111 @@ public final class MsczToMidx {
 
     private static List<EventTiming> tremoloEventTimings(Element chord, long nominalDuration, int division) {
         Element tremolo = firstDirectChild(chord, "Tremolo");
-        if (tremolo == null) {
+        if (tremolo == null || intText(firstDirectChild(tremolo, "play"), 1) == 0) {
             return null;
         }
-        String subtype = text(firstDirectChild(tremolo, "subtype")).toLowerCase(Locale.ROOT);
+        String subtype = tremoloSubtype(tremolo);
+        long unit = tremoloUnitTicks(subtype, division);
+        return repeatedPitchTiming(0.0, nominalDuration, unit);
+    }
+
+    private static List<EventTiming> trillEventTimings(TrackData track, long chordStartTick, long nominalDuration, int division) {
+        if (track == null || nominalDuration <= 1) {
+            return null;
+        }
+        long chordEndTick = chordStartTick + nominalDuration;
+        for (OrnamentRange range : track.trillRanges) {
+            if (range.endTick <= chordStartTick || range.startTick >= chordEndTick) {
+                continue;
+            }
+            OrnamentPattern pattern = trillPattern(range.name);
+            if (pattern == null) {
+                continue;
+            }
+            long activeStart = Math.max(0, range.startTick - chordStartTick);
+            long activeEnd = Math.min(nominalDuration, range.endTick - chordStartTick);
+            if (activeEnd <= activeStart) {
+                continue;
+            }
+            List<EventTiming> out = new ArrayList<EventTiming>();
+            if (activeStart > 0) {
+                out.add(new EventTiming(0, activeStart, 0.0));
+            }
+            for (EventTiming timing : patternEventTimings(
+                    pattern.pitchDeltas,
+                    pattern.repeat,
+                    pattern.sustainLast,
+                    activeEnd - activeStart,
+                    pattern.unitTicks(division)
+            )) {
+                out.add(new EventTiming(activeStart + timing.offsetTicks, timing.lengthTicks, timing.pitchDelta));
+            }
+            if (activeEnd < nominalDuration) {
+                out.add(new EventTiming(activeEnd, nominalDuration - activeEnd, 0.0));
+            }
+            return out.isEmpty() ? null : out;
+        }
+        return null;
+    }
+
+    private static OrnamentPattern trillPattern(String name) {
+        String lower = name == null ? "" : name.toLowerCase(Locale.ROOT);
+        if (lower.length() == 0 || lower.contains("trill")) {
+            return new OrnamentPattern(new int[]{0, 1}, true, true, 32);
+        }
+        if (lower.contains("upprall")) {
+            return new OrnamentPattern(new int[]{-1, 0, 1, 0}, true, true, 16);
+        }
+        if (lower.contains("downprall") || lower.contains("downmordent")) {
+            return new OrnamentPattern(new int[]{1, 0, 1, 0, -1, 0}, true, true, 16);
+        }
+        if (lower.contains("prallprall")) {
+            return new OrnamentPattern(new int[]{0, 1}, true, true, 16);
+        }
+        return ornamentPattern("ornament" + name);
+    }
+
+    private static String tremoloSubtype(Element tremolo) {
+        return text(firstDirectChild(tremolo, "subtype")).toLowerCase(Locale.ROOT);
+    }
+
+    private static long tremoloUnitTicks(String subtype, int division) {
         int denominator = 16;
-        if (subtype.contains("32") || subtype.contains("three") || subtype.contains("r32")) {
+        int numeric = parseInt(subtype, -1);
+        if (numeric == 7 || numeric == 2 || subtype.contains("32") || subtype.contains("three") || subtype.contains("r32") || subtype.contains("c32")) {
             denominator = 32;
-        } else if (subtype.contains("64") || subtype.contains("four") || subtype.contains("r64")) {
+        } else if (numeric == 8 || numeric == 3 || subtype.contains("64") || subtype.contains("four") || subtype.contains("r64") || subtype.contains("c64")) {
             denominator = 64;
-        } else if (subtype.contains("8") || subtype.contains("one") || subtype.contains("r8")) {
+        } else if (numeric == 5 || numeric == 0 || subtype.contains("8") || subtype.contains("one") || subtype.contains("r8") || subtype.contains("c8")) {
             denominator = 8;
         }
-        long unit = Math.max(1, Math.round(division * 4.0 / denominator));
-        return repeatedPitchTiming(0.0, nominalDuration, unit);
+        return Math.max(1, Math.round(division * 4.0 / denominator));
+    }
+
+    private static boolean isTwoChordTremolo(Element chord) {
+        Element tremolo = firstDirectChild(chord, "Tremolo");
+        if (tremolo == null || intText(firstDirectChild(tremolo, "play"), 1) == 0) {
+            return false;
+        }
+        String subtype = tremoloSubtype(tremolo);
+        int numeric = parseInt(subtype, -1);
+        return numeric >= 5
+                || subtype.startsWith("c")
+                || subtype.contains("two")
+                || subtype.contains("change");
+    }
+
+    private static int twoChordTremoloPartnerIndex(Element voice, int chordIndex) {
+        Element chord = chordIndex >= 0 && chordIndex < voice.children.size() ? voice.children.get(chordIndex) : null;
+        if (chord == null || !isTwoChordTremolo(chord)) {
+            return -1;
+        }
+        int nextIndex = chordIndex + 1;
+        if (nextIndex >= voice.children.size()) {
+            return -1;
+        }
+        Element next = voice.children.get(nextIndex);
+        return "Chord".equals(next.getTagName()) && !isGraceChord(next) ? nextIndex : -1;
     }
 
     private static OrnamentPattern ornamentPattern(String name) {
@@ -1514,6 +1721,8 @@ public final class MsczToMidx {
                 }
             } else if ("Spanner".equals(tag) && "Pedal".equals(element.getAttribute("type"))) {
                 addPedalRangeFromSpanner(element, track, tick, slot.length, division);
+            } else if ("Spanner".equals(tag) && "Trill".equals(element.getAttribute("type"))) {
+                addTrillRangeFromSpanner(element, track, tick, slot.length, division);
             } else if ("endSpanner".equals(tag)) {
                 closeHairpin(activeHairpins, closedHairpins, element.getAttribute("id"), tick + childLocationOffset(element, division, slot.length));
             } else if ("Rest".equals(tag) || "Chord".equals(tag)) {
@@ -1571,6 +1780,23 @@ public final class MsczToMidx {
         track.pedalRanges.add(range);
         track.events.add(MidiEvent.controlChange(startTick, MIDI_CONTROL_SUSTAIN, 127));
         track.events.add(MidiEvent.controlChange(endTick, MIDI_CONTROL_SUSTAIN, 0));
+    }
+
+    private static void addTrillRangeFromSpanner(Element spanner, TrackData track, long startTick, long measureTicks, int division) {
+        Element trill = firstDirectChild(spanner, "Trill");
+        if (trill == null || firstDirectChild(spanner, "prev") != null) {
+            return;
+        }
+        Element next = firstDirectChild(spanner, "next");
+        long length = locationTicks(firstDirectChild(next, "location"), division, measureTicks);
+        if (length <= 0) {
+            length = Math.max(1, measureTicks);
+        }
+        OrnamentRange range = new OrnamentRange();
+        range.startTick = startTick;
+        range.endTick = startTick + Math.max(1, length);
+        range.name = text(firstDirectChild(trill, "subtype"));
+        track.trillRanges.add(range);
     }
 
     private static long pedalExtendedEndTick(TrackData track, long startTick, long endTick) {
@@ -2266,6 +2492,7 @@ public final class MsczToMidx {
         final List<MidiEvent> events = new ArrayList<MidiEvent>();
         final List<PedalRange> pedalRanges = new ArrayList<PedalRange>();
         final List<HairpinRange> hairpins = new ArrayList<HairpinRange>();
+        final List<OrnamentRange> trillRanges = new ArrayList<OrnamentRange>();
     }
 
     private static final class VoiceState {
@@ -2314,6 +2541,12 @@ public final class MsczToMidx {
         long startTick;
         long endTick;
         int velocityDelta;
+    }
+
+    private static final class OrnamentRange {
+        long startTick;
+        long endTick;
+        String name;
     }
 
     private static final class GracePlaybackSplit {

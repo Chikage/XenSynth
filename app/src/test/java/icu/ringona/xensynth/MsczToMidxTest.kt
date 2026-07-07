@@ -126,6 +126,24 @@ class MsczToMidxTest {
     }
 
     @Test
+    fun expandsMuseScoreTrillSpannersIntoPlaybackEvents() {
+        val parsed = parseMuseScore(TRILL_SPANNER_MSCX)
+
+        assertTrue(parsed.notes.size > 1)
+        assertEquals(listOf(60, 61, 60, 61), parsed.notes.take(4).map { it.midiPitch })
+        assertEquals(listOf(0L, 60L, 120L, 180L), parsed.notes.take(4).map { it.startTick })
+    }
+
+    @Test
+    fun alternatesMuseScoreTwoChordTremoloPairs() {
+        val parsed = parseMuseScore(TWO_CHORD_TREMOLO_MSCX)
+
+        assertEquals(8, parsed.notes.size)
+        assertEquals(listOf(60, 67, 60, 67, 60, 67, 60, 67), parsed.notes.map { it.midiPitch })
+        assertEquals(listOf(0L, 120L, 240L, 360L), parsed.notes.take(4).map { it.startTick })
+    }
+
+    @Test
     fun appliesChordArticulationGateAndVelocity() {
         val parsed = parseMuseScore(ARTICULATION_MSCX)
         val note = parsed.notes.single()
@@ -378,6 +396,71 @@ class MsczToMidxTest {
                           <subtype>ornamentTurn</subtype>
                         </Articulation>
                         <Note><pitch>60</pitch></Note>
+                      </Chord>
+                    </voice>
+                  </Measure>
+                </Staff>
+              </Score>
+            </museScore>
+        """.trimIndent()
+
+        val TRILL_SPANNER_MSCX = """
+            <?xml version="1.0" encoding="UTF-8"?>
+            <museScore version="4.0">
+              <Score>
+                <Division>480</Division>
+                <Part>
+                  <Staff id="1"/>
+                  <Instrument><Channel><program value="0"/></Channel></Instrument>
+                </Part>
+                <Staff id="1">
+                  <Measure>
+                    <voice>
+                      <Spanner type="Trill">
+                        <Trill>
+                          <subtype>trill</subtype>
+                        </Trill>
+                        <next>
+                          <location>
+                            <fractions>1/2</fractions>
+                          </location>
+                        </next>
+                      </Spanner>
+                      <Chord>
+                        <durationType>half</durationType>
+                        <Note><pitch>60</pitch></Note>
+                      </Chord>
+                    </voice>
+                  </Measure>
+                </Staff>
+              </Score>
+            </museScore>
+        """.trimIndent()
+
+        val TWO_CHORD_TREMOLO_MSCX = """
+            <?xml version="1.0" encoding="UTF-8"?>
+            <museScore version="4.0">
+              <Score>
+                <Division>480</Division>
+                <Part>
+                  <Staff id="1"/>
+                  <Instrument><Channel><program value="0"/></Channel></Instrument>
+                </Part>
+                <Staff id="1">
+                  <Measure>
+                    <voice>
+                      <Chord>
+                        <durationType>half</durationType>
+                        <duration>1/4</duration>
+                        <Note><pitch>60</pitch></Note>
+                        <Tremolo>
+                          <subtype>c16</subtype>
+                        </Tremolo>
+                      </Chord>
+                      <Chord>
+                        <durationType>half</durationType>
+                        <duration>1/4</duration>
+                        <Note><pitch>67</pitch></Note>
                       </Chord>
                     </voice>
                   </Measure>

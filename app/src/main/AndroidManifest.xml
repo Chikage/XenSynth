@@ -35,13 +35,54 @@
                 <category android:name="android.intent.category.BROWSABLE" />
                 <data android:scheme="content" />
                 <data android:scheme="file" />
+                <data android:mimeType="audio/mid" />
+                <data android:mimeType="audio/x-mid" />
                 <data android:mimeType="audio/midi" />
                 <data android:mimeType="audio/x-midi" />
-                <data android:mimeType="audio/sp-midi" />
-                <data android:mimeType="application/octet-stream" />
+                <data android:mimeType="audio/midi2" />
+                <data android:mimeType="audio/x-midi2" />
                 <data android:mimeType="application/x-musescore" />
-                <data android:mimeType="application/vnd.recordare.musicxml" />
-                <data android:mimeType="application/vnd.recordare.musicxml+xml" />
+                <data android:mimeType="application/vnd.musescore" />
+            </intent-filter>
+
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="content" android:host="*" android:pathPattern=".*\\.midi" />
+                <data android:scheme="content" android:host="*" android:pathPattern=".*\\.midix" />
+                <data android:scheme="content" android:host="*" android:pathPattern=".*\\.mid" />
+                <data android:scheme="content" android:host="*" android:pathPattern=".*\\.midx" />
+                <data android:scheme="content" android:host="*" android:pathPattern=".*\\.midi2" />
+                <data android:scheme="content" android:host="*" android:pathPattern=".*\\.mscz" />
+                <data android:scheme="content" android:host="*" android:pathPattern=".*\\.mscx" />
+                <data android:scheme="file" android:host="*" android:pathPattern=".*\\.midi" />
+                <data android:scheme="file" android:host="*" android:pathPattern=".*\\.midix" />
+                <data android:scheme="file" android:host="*" android:pathPattern=".*\\.mid" />
+                <data android:scheme="file" android:host="*" android:pathPattern=".*\\.midx" />
+                <data android:scheme="file" android:host="*" android:pathPattern=".*\\.midi2" />
+                <data android:scheme="file" android:host="*" android:pathPattern=".*\\.mscz" />
+                <data android:scheme="file" android:host="*" android:pathPattern=".*\\.mscx" />
+            </intent-filter>
+
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="content" android:host="*" android:mimeType="*/*" android:pathPattern=".*\\.midi" />
+                <data android:scheme="content" android:host="*" android:mimeType="*/*" android:pathPattern=".*\\.midix" />
+                <data android:scheme="content" android:host="*" android:mimeType="*/*" android:pathPattern=".*\\.mid" />
+                <data android:scheme="content" android:host="*" android:mimeType="*/*" android:pathPattern=".*\\.midx" />
+                <data android:scheme="content" android:host="*" android:mimeType="*/*" android:pathPattern=".*\\.midi2" />
+                <data android:scheme="content" android:host="*" android:mimeType="*/*" android:pathPattern=".*\\.mscz" />
+                <data android:scheme="content" android:host="*" android:mimeType="*/*" android:pathPattern=".*\\.mscx" />
+                <data android:scheme="file" android:host="*" android:mimeType="*/*" android:pathPattern=".*\\.midi" />
+                <data android:scheme="file" android:host="*" android:mimeType="*/*" android:pathPattern=".*\\.midix" />
+                <data android:scheme="file" android:host="*" android:mimeType="*/*" android:pathPattern=".*\\.mid" />
+                <data android:scheme="file" android:host="*" android:mimeType="*/*" android:pathPattern=".*\\.midx" />
+                <data android:scheme="file" android:host="*" android:mimeType="*/*" android:pathPattern=".*\\.midi2" />
+                <data android:scheme="file" android:host="*" android:mimeType="*/*" android:pathPattern=".*\\.mscz" />
+                <data android:scheme="file" android:host="*" android:mimeType="*/*" android:pathPattern=".*\\.mscx" />
             </intent-filter>
         </activity>
 
