@@ -520,7 +520,7 @@ class WaterfallGestureController(
         const val GESTURE_REFERENCE_MIN_PX = 80f
         const val PINCH_REFERENCE_RATIO = 0.42f
         const val TIME_ZOOM_STEP = 10.0
-        const val PITCH_ZOOM_STEP = 0.05
+        const val PITCH_ZOOM_STEP = 0.01
         const val PREVIEW_UPDATE_CENTS = 6.0
         const val MIDI_PROGRAM_MIN = 0
         const val MIDI_PROGRAM_MAX = 127

@@ -550,7 +550,7 @@ class CanvasWaterfallView @JvmOverloads constructor(
         }
         if (octaveDivisions > 0) {
             val step = 12.0 / octaveDivisions
-            val densityStride = densityStride(step, pitchSpacingForPixels(minPitch, maxPitch, width, gridMinLineSpacingPx))
+            val minPitchSpacing = pitchSpacingForPixels(minPitch, maxPitch, width, gridMinLineSpacingPx)
             var stepIndex = floor(minPitch / step).toInt()
             var pitch = stepIndex * step
             while (pitch <= maxPitch + step) {
@@ -561,8 +561,17 @@ class CanvasWaterfallView @JvmOverloads constructor(
                     continue
                 }
                 val x = layout.pitchToX(pitch, width)
-                if (shouldDrawDenseStep(stepIndex, densityStride) && x >= 0f && x <= width) {
-                    gridPaint.color = Color.argb(WaterfallMetrics.GRID_LINE_ALPHA, 255, 255, 255)
+                val visibilityRatio = DenseLineVisibility.ratioForStep(stepIndex, step, minPitchSpacing)
+                if (visibilityRatio > 0f && x >= 0f && x <= width) {
+                    val alpha = (WaterfallMetrics.GRID_LINE_ALPHA * visibilityRatio)
+                        .roundToInt()
+                        .coerceIn(0, WaterfallMetrics.GRID_LINE_ALPHA)
+                    if (alpha <= 0) {
+                        stepIndex++
+                        pitch += step
+                        continue
+                    }
+                    gridPaint.color = Color.argb(alpha, 255, 255, 255)
                     gridPaint.strokeWidth = 1f
                     drawPixelAlignedVerticalLine(canvas, x, 0f, top, gridPaint)
                 }
@@ -577,17 +586,6 @@ class CanvasWaterfallView @JvmOverloads constructor(
             return 0.0
         }
         return (maxPitch - minPitch) * minPixels / width.toDouble().coerceAtLeast(1.0)
-    }
-
-    private fun densityStride(step: Double, minPitchSpacing: Double): Int {
-        if (step <= 0.0001 || minPitchSpacing <= 0.0001) {
-            return 1
-        }
-        return ceil(minPitchSpacing / step).toInt().coerceAtLeast(1)
-    }
-
-    private fun shouldDrawDenseStep(stepIndex: Int, densityStride: Int): Boolean {
-        return densityStride <= 1 || positiveModulo(stepIndex, densityStride) == 0
     }
 
     private fun positiveModulo(value: Double, mod: Double): Double {

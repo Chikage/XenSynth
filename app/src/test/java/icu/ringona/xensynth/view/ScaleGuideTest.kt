@@ -76,6 +76,19 @@ class ScaleGuideTest {
     }
 
     @Test
+    fun denseScaleLinesFadeBetweenStrideThresholds() {
+        val guide = guide(scales = mapOf(12 to "000000000000"))
+
+        val lines = guide.linesForVisibleRange(12, 60.0, 64.0, minPitchSpacing = 2.5)
+        val lowerStrideLine = lines.first { kotlin.math.abs(it.pitch - 62.0) < 0.0001 }
+        val upperStrideLine = lines.first { kotlin.math.abs(it.pitch - 63.0) < 0.0001 }
+
+        assertEquals(0.5f, lowerStrideLine.ratio, 0.0001f)
+        assertEquals(0.5f, upperStrideLine.ratio, 0.0001f)
+        assertFalse(lines.any { kotlin.math.abs(it.pitch - 61.0) < 0.0001 })
+    }
+
+    @Test
     fun denseCustomLinesAreThinnedButKeepCMarks() {
         val guide = ScaleGuide.fromCustomProfile(
             profileName = "dense",

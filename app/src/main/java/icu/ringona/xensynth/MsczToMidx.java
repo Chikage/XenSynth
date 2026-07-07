@@ -173,6 +173,7 @@ public final class MsczToMidx {
             score.division = DEFAULT_DIVISION;
         }
 
+        parseScoreStyle(scoreElement, score);
         parseParts(scoreElement, score);
         parseStaffBodies(scoreElement, score);
 
@@ -184,6 +185,17 @@ public final class MsczToMidx {
         }
 
         return score;
+    }
+
+    private static void parseScoreStyle(Element scoreElement, ScoreData score) {
+        Element style = firstDirectChild(scoreElement, "Style");
+        if (style == null) {
+            return;
+        }
+        int ratio = intText(firstDirectChild(style, "swingRatio"), 0);
+        if (ratio > 0) {
+            score.swingRatio = clamp(ratio, 50, 90);
+        }
     }
 
     private static Element readMuseScoreXml(File input) throws Exception {
@@ -857,9 +869,12 @@ public final class MsczToMidx {
                 if (state == null) {
                     state = new VoiceState();
                     state.velocity = DEFAULT_VELOCITY;
+                    state.swingRatio = score.swingRatio;
+                    state.swingUnitDenominator = score.swingUnitDenominator;
                     voiceStates.put(Integer.valueOf(voiceIndex), state);
                 }
                 state.tick = measureStart;
+                state.gridTick = measureStart;
                 state.measureStart = measureStart;
                 state.sourceMeasureStart = slot.sourceStart;
                 state.measureTicks = measureTicks;
@@ -901,11 +916,16 @@ public final class MsczToMidx {
                 }
             } else if ("Dynamic".equals(tag)) {
                 state.velocity = clamp(intText(firstDirectChild(element, "velocity"), state.velocity), 1, 127);
+            } else if ("StaffText".equals(tag) || "SystemText".equals(tag)) {
+                applySwingText(element, state);
             } else if ("location".equals(tag)) {
-                state.tick += locationTicks(element, score.division, state.measureTicks);
+                long offset = locationTicks(element, score.division, state.measureTicks);
+                state.tick += offset;
+                state.gridTick += offset;
             } else if ("tick".equals(tag)) {
                 long absoluteTick = fileTick(text(element));
                 state.tick = state.measureStart + Math.max(0, absoluteTick - state.sourceMeasureStart);
+                state.gridTick = state.tick;
             } else if ("Tuplet".equals(tag)) {
                 TupletInfo info = parseTupletInfo(element, state.tupletsById);
                 if (info != null) {
@@ -926,7 +946,8 @@ public final class MsczToMidx {
                         tupletRatioForElement(element, state.tupletsById, state.tupletRatio),
                         state.measureTicks
                 );
-                state.tick += Math.max(0, applyAndConsumeFermata(state, duration));
+                state.tick += Math.max(0, applyAndConsumeFermata(state, swungDuration(state, duration, score.division)));
+                state.gridTick += Math.max(0, duration);
                 consumeTupletSlot(state, element);
             } else if ("Chord".equals(tag)) {
                 long nominalDuration = durationTicks(
@@ -947,7 +968,8 @@ public final class MsczToMidx {
                                 tupletRatioForElement(partner, state.tupletsById, state.tupletRatio),
                                 state.measureTicks
                         );
-                        long playedDuration = applyAndConsumeFermata(state, Math.max(1, nominalDuration + partnerDuration));
+                        long gridDuration = Math.max(1, nominalDuration + partnerDuration);
+                        long playedDuration = applyAndConsumeFermata(state, gridDuration);
                         appendTwoChordTremoloWithGraceNotes(
                                 element,
                                 partner,
@@ -958,13 +980,15 @@ public final class MsczToMidx {
                                 Math.max(1, playedDuration)
                         );
                         state.tick += Math.max(0, playedDuration);
+                        state.gridTick += Math.max(0, gridDuration);
                         consumeTupletSlot(state, element);
                         consumeTupletSlot(state, partner);
                         childIndex = tremoloPartnerIndex;
                     } else {
-                        long playedDuration = applyAndConsumeFermata(state, nominalDuration);
+                        long playedDuration = applyAndConsumeFermata(state, swungDuration(state, nominalDuration, score.division));
                         appendChordWithGraceNotes(element, score, track, state, voiceIndex, Math.max(1, playedDuration));
                         state.tick += Math.max(0, playedDuration);
+                        state.gridTick += Math.max(0, nominalDuration);
                         consumeTupletSlot(state, element);
                     }
                     state.pendingGraceChords.clear();
@@ -982,6 +1006,45 @@ public final class MsczToMidx {
             return duration;
         }
         return Math.max(1, Math.round(duration * multiplier));
+    }
+
+    private static void applySwingText(Element textElement, VoiceState state) {
+        Element swing = firstDirectChild(textElement, "swing");
+        if (swing == null) {
+            return;
+        }
+        int ratio = intAttribute(swing, "ratio", state.swingRatio);
+        if (ratio <= 0) {
+            state.swingRatio = 0;
+        } else {
+            state.swingRatio = clamp(ratio, 50, 90);
+        }
+        String unit = swing.getAttribute("unit").toLowerCase(Locale.ROOT);
+        if (unit.contains("16")) {
+            state.swingUnitDenominator = 16;
+        } else if (unit.contains("eighth") || unit.contains("8")) {
+            state.swingUnitDenominator = 8;
+        }
+    }
+
+    private static long swungDuration(VoiceState state, long duration, int division) {
+        if (state.swingRatio <= 50 || duration <= 0) {
+            return duration;
+        }
+        long unit = Math.max(1, Math.round(division * 4.0 / Math.max(1, state.swingUnitDenominator)));
+        if (Math.abs(duration - unit) > 1) {
+            return duration;
+        }
+        long pair = unit * 2;
+        long position = Math.floorMod(state.gridTick - state.measureStart, pair);
+        long first = clamp(Math.round(pair * (state.swingRatio / 100.0)), 1L, pair - 1);
+        if (position == 0) {
+            return first;
+        }
+        if (Math.abs(position - unit) <= 1) {
+            return Math.max(1, pair - first);
+        }
+        return duration;
     }
 
     private static void appendChordWithGraceNotes(
@@ -1087,7 +1150,7 @@ public final class MsczToMidx {
         ChordPerformance performance = chordPerformance(chord);
         int gateTimePercent = clamp(track.gateTimePercent * performance.gateTimePercent / 100, 1, 1000);
         List<Element> notes = directChildren(chord, "Note");
-        boolean arpeggio = firstDirectChild(chord, "Arpeggio") != null && intText(firstDirectChild(firstDirectChild(chord, "Arpeggio"), "play"), 1) != 0;
+        boolean arpeggio = isPlayableArpeggio(chord);
         for (int noteIndex = 0; noteIndex < notes.size(); noteIndex++) {
             Element note = notes.get(noteIndex);
             int xmlPitch = intText(firstDirectChild(note, "pitch"), -1);
@@ -1097,19 +1160,24 @@ public final class MsczToMidx {
             if (intText(firstDirectChild(note, "play"), 1) == 0) {
                 continue;
             }
-            double tuning = doubleText(firstDirectChild(note, "tuning"), 0.0);
+            double tuning = noteTuningCents(note);
             int baseVelocity = clamp(noteVelocity(note, state.velocity) + performance.velocityOffset, 1, 127);
             boolean tiePrev = hasTieEndpoint(note, "prev");
             boolean tieNext = hasTieEndpoint(note, "next");
-            long arpeggioOffset = arpeggio ? arpeggioOffsetTicks(chord, noteIndex, notes.size(), nominalDuration, score.division) : 0;
+            long arpeggioOffset = arpeggio ? arpeggioOffsetTicks(chord, noteIndex, notes.size(), nominalDuration, score.division, state.bpm) : 0;
+            List<EventTiming> noteTimings = noteEventTimings(note, track, chordStartTick, nominalDuration, score.division, timings, noteIndex, xmlPitch);
 
-            for (EventTiming timing : timings) {
-                double eventPitchDelta = timing.pitchDelta;
-                NormalizedPitch normalized = normalizeMidxPitchCents(xmlPitch + eventPitchDelta, tuning);
-                int nativePitch = clamp((int) Math.round(xmlPitch + eventPitchDelta), 0, 127);
+            for (EventTiming timing : noteTimings) {
                 long startTick = chordStartTick + timing.offsetTicks + arpeggioOffset;
+                int pitchShift = pitchShiftAt(track, startTick);
+                double eventPitchDelta = timing.pitchDelta;
+                NormalizedPitch normalized = normalizeMidxPitchCents(xmlPitch + pitchShift + eventPitchDelta, tuning);
+                int nativePitch = clamp((int) Math.round(xmlPitch + pitchShift + eventPitchDelta), 0, 127);
                 long endTick = Math.max(startTick + 1, startTick + timing.lengthTicks);
-                int velocity = clamp(baseVelocity + hairpinVelocityOffset(track, startTick), 1, 127);
+                int velocity = clamp(baseVelocity
+                        + hairpinVelocityOffset(track, startTick)
+                        + playbackVelocityOffset(track, startTick), 1, 127);
+                int effectiveGateTimePercent = playbackGateTimePercent(track, startTick, gateTimePercent);
                 TieKey key = new TieKey(track.staffId, voiceIndex, xmlPitch, Math.round(tuning * 1000.0) / 1000.0);
 
                 if (tiePrev) {
@@ -1134,7 +1202,7 @@ public final class MsczToMidx {
                 playback.nativePitch = nativePitch;
                 playback.cents = normalized.cents;
                 playback.velocity = velocity;
-                playback.gateTimePercent = gateTimePercent;
+                playback.gateTimePercent = effectiveGateTimePercent;
 
                 if (tieNext) {
                     state.activeTies.put(key, playback);
@@ -1177,6 +1245,335 @@ public final class MsczToMidx {
         }
     }
 
+    private static List<EventTiming> noteEventTimings(
+            Element note,
+            TrackData track,
+            long chordStartTick,
+            long nominalDuration,
+            int division,
+            List<EventTiming> fallback,
+            int noteIndex,
+            int xmlPitch
+    ) {
+        List<EventTiming> bend = bendEventTimings(note, nominalDuration);
+        if (bend != null) {
+            return bend;
+        }
+        List<EventTiming> guitarBend = guitarBendEventTimings(track, chordStartTick, nominalDuration, noteIndex, xmlPitch);
+        if (guitarBend != null) {
+            return guitarBend;
+        }
+        List<EventTiming> glissando = glissandoEventTimings(track, chordStartTick, nominalDuration, division, noteIndex, xmlPitch);
+        if (glissando != null) {
+            return glissando;
+        }
+        List<EventTiming> vibrato = vibratoEventTimings(track, chordStartTick, nominalDuration, division);
+        if (vibrato != null) {
+            return vibrato;
+        }
+        return fallback;
+    }
+
+    private static List<EventTiming> bendEventTimings(Element note, long nominalDuration) {
+        Element bend = firstDirectChild(note, "Bend");
+        if (bend == null || intText(firstDirectChild(bend, "play"), 1) == 0) {
+            return null;
+        }
+        List<BendPoint> points = new ArrayList<BendPoint>();
+        for (Element point : directChildren(bend, "point")) {
+            BendPoint bendPoint = new BendPoint();
+            bendPoint.time = clamp(intAttribute(point, "time", 0), 0, 60);
+            bendPoint.pitchDelta = intAttribute(point, "pitch", 0) / 50.0;
+            points.add(bendPoint);
+        }
+        if (points.isEmpty()) {
+            return null;
+        }
+        Collections.sort(points, new Comparator<BendPoint>() {
+            public int compare(BendPoint a, BendPoint b) {
+                return a.time - b.time;
+            }
+        });
+        if (points.size() == 1) {
+            return repeatedPitchTiming(points.get(0).pitchDelta, nominalDuration, nominalDuration);
+        }
+
+        List<EventTiming> out = new ArrayList<EventTiming>();
+        for (int i = 0; i < points.size() - 1; i++) {
+            BendPoint start = points.get(i);
+            BendPoint end = points.get(i + 1);
+            if (end.time <= start.time) {
+                continue;
+            }
+            long startTick = Math.round(nominalDuration * start.time / 60.0);
+            long endTick = Math.round(nominalDuration * end.time / 60.0);
+            long span = Math.max(1, endTick - startTick);
+            int slices = clamp((int) Math.ceil(Math.abs(end.pitchDelta - start.pitchDelta) * 2.0), 1, 8);
+            long sliceOffset = startTick;
+            for (int slice = 0; slice < slices; slice++) {
+                long nextOffset = startTick + Math.round(span * (slice + 1) / (double) slices);
+                long length = Math.max(1, nextOffset - sliceOffset);
+                double progress = slices <= 1 ? 0.0 : slice / (double) (slices - 1);
+                double pitchDelta = start.pitchDelta + (end.pitchDelta - start.pitchDelta) * progress;
+                out.add(new EventTiming(sliceOffset, length, pitchDelta));
+                sliceOffset = nextOffset;
+            }
+        }
+        BendPoint last = points.get(points.size() - 1);
+        long lastTick = Math.round(nominalDuration * last.time / 60.0);
+        if (lastTick < nominalDuration) {
+            out.add(new EventTiming(lastTick, nominalDuration - lastTick, last.pitchDelta));
+        }
+        return out.isEmpty() ? null : out;
+    }
+
+    private static List<EventTiming> guitarBendEventTimings(
+            TrackData track,
+            long chordStartTick,
+            long nominalDuration,
+            int noteIndex,
+            int xmlPitch
+    ) {
+        if (track == null || nominalDuration <= 1) {
+            return null;
+        }
+        for (GuitarBendRange range : track.guitarBendRanges) {
+            if (range.startTick != chordStartTick || range.noteIndex != noteIndex || range.sourcePitch != xmlPitch) {
+                continue;
+            }
+            double totalDelta = range.targetPitch + range.targetCents / 100.0 - range.sourcePitch - range.sourceCents / 100.0;
+            String type = range.type == null ? "" : range.type.toLowerCase(Locale.ROOT);
+            if (Math.abs(totalDelta) < 0.000001 && type.contains("slight")) {
+                totalDelta = 0.5;
+            }
+            if (Math.abs(totalDelta) < 0.000001 && (type.contains("dip") || type.contains("scoop"))) {
+                totalDelta = -1.0;
+            }
+            if (Math.abs(totalDelta) < 0.000001) {
+                return null;
+            }
+
+            long activeDuration = range.endTick > range.startTick
+                    ? Math.min(nominalDuration, range.endTick - range.startTick)
+                    : nominalDuration;
+            double startFactor = clampFactor(range.startFactor);
+            double endFactor = clampFactor(range.endFactor);
+            if (endFactor < startFactor) {
+                endFactor = startFactor;
+            }
+            if (type.contains("dip")) {
+                double targetFactor = range.hasTargetFactor ? clampFactor(range.targetFactor) : (startFactor + endFactor) / 2.0;
+                return bendDipTimings(-Math.abs(totalDelta), activeDuration, nominalDuration, startFactor, targetFactor, endFactor);
+            }
+            if (type.contains("scoop")) {
+                return bendScoopTimings(-Math.abs(totalDelta), activeDuration, nominalDuration, startFactor, endFactor);
+            }
+            return bendRampTimings(totalDelta, activeDuration, nominalDuration, startFactor, endFactor);
+        }
+        return null;
+    }
+
+    private static List<EventTiming> bendRampTimings(
+            double totalDelta,
+            long activeDuration,
+            long nominalDuration,
+            double startFactor,
+            double endFactor
+    ) {
+        List<EventTiming> out = new ArrayList<EventTiming>();
+        long rampStart = Math.min(activeDuration - 1, Math.max(0, Math.round(activeDuration * startFactor)));
+        long rampEnd = Math.max(rampStart + 1, Math.round(activeDuration * endFactor));
+        rampEnd = Math.min(activeDuration, rampEnd);
+        if (rampStart > 0) {
+            out.add(new EventTiming(0, rampStart, 0.0));
+        }
+        int slices = clamp((int) Math.ceil(Math.abs(totalDelta) * 2.0), 1, 8);
+        long offset = rampStart;
+        for (int slice = 0; slice < slices && offset < rampEnd; slice++) {
+            long next = rampStart + Math.round((rampEnd - rampStart) * (slice + 1) / (double) slices);
+            double progress = (slice + 1) / (double) slices;
+            out.add(new EventTiming(offset, Math.max(1, next - offset), totalDelta * progress));
+            offset = next;
+        }
+        if (rampEnd < nominalDuration) {
+            out.add(new EventTiming(rampEnd, nominalDuration - rampEnd, totalDelta));
+        }
+        return out.isEmpty() ? null : out;
+    }
+
+    private static List<EventTiming> bendDipTimings(
+            double targetDelta,
+            long activeDuration,
+            long nominalDuration,
+            double startFactor,
+            double targetFactor,
+            double endFactor
+    ) {
+        if (activeDuration <= 2) {
+            return bendRampTimings(targetDelta, activeDuration, nominalDuration, startFactor, endFactor);
+        }
+        List<EventTiming> out = new ArrayList<EventTiming>();
+        long start = Math.min(activeDuration - 2, Math.max(0, Math.round(activeDuration * startFactor)));
+        long target = Math.min(activeDuration - 1, Math.max(start + 1, Math.round(activeDuration * targetFactor)));
+        long end = Math.min(activeDuration, Math.max(target + 1, Math.round(activeDuration * endFactor)));
+        if (start > 0) {
+            out.add(new EventTiming(0, start, 0.0));
+        }
+        out.add(new EventTiming(start, Math.max(1, target - start), targetDelta));
+        out.add(new EventTiming(target, Math.max(1, end - target), 0.0));
+        if (end < nominalDuration) {
+            out.add(new EventTiming(end, nominalDuration - end, 0.0));
+        }
+        return out;
+    }
+
+    private static List<EventTiming> bendScoopTimings(
+            double startDelta,
+            long activeDuration,
+            long nominalDuration,
+            double startFactor,
+            double endFactor
+    ) {
+        if (activeDuration <= 1) {
+            return repeatedPitchTiming(startDelta, nominalDuration, nominalDuration);
+        }
+        List<EventTiming> out = new ArrayList<EventTiming>();
+        long holdEnd = Math.max(1, Math.min(activeDuration - 1, Math.round(activeDuration * startFactor)));
+        long settleEnd = Math.max(holdEnd + 1, Math.round(activeDuration * endFactor));
+        settleEnd = Math.min(activeDuration, settleEnd);
+        out.add(new EventTiming(0, holdEnd, startDelta));
+        out.add(new EventTiming(holdEnd, Math.max(1, settleEnd - holdEnd), 0.0));
+        if (settleEnd < nominalDuration) {
+            out.add(new EventTiming(settleEnd, nominalDuration - settleEnd, 0.0));
+        }
+        return out;
+    }
+
+    private static List<EventTiming> glissandoEventTimings(
+            TrackData track,
+            long chordStartTick,
+            long nominalDuration,
+            int division,
+            int noteIndex,
+            int xmlPitch
+    ) {
+        for (PitchRange range : track.glissandoRanges) {
+            if (range.startTick != chordStartTick || range.noteIndex != noteIndex || range.sourcePitch != xmlPitch) {
+                continue;
+            }
+            double totalDelta = range.targetPitch + range.targetCents / 100.0 - range.sourcePitch - range.sourceCents / 100.0;
+            if (Math.abs(totalDelta) < 0.000001) {
+                return null;
+            }
+            long activeDuration = range.endTick > range.startTick
+                    ? Math.min(nominalDuration, range.endTick - range.startTick)
+                    : nominalDuration;
+            if (range.continuous) {
+                int slices = clamp((int) Math.ceil(Math.abs(totalDelta) * 2.0), 2, 16);
+                List<EventTiming> out = new ArrayList<EventTiming>();
+                long offset = 0;
+                for (int i = 0; i < slices; i++) {
+                    long next = Math.round(activeDuration * (i + 1) / (double) slices);
+                    double pitchDelta = totalDelta * (i / (double) slices);
+                    out.add(new EventTiming(offset, Math.max(1, next - offset), pitchDelta));
+                    offset = next;
+                }
+                if (activeDuration < nominalDuration) {
+                    out.add(new EventTiming(activeDuration, nominalDuration - activeDuration, totalDelta));
+                }
+                return out;
+            }
+            return discreteGlissandoTimings(range, totalDelta, activeDuration, nominalDuration, division);
+        }
+        return null;
+    }
+
+    private static List<EventTiming> discreteGlissandoTimings(
+            PitchRange range,
+            double totalDelta,
+            long activeDuration,
+            long nominalDuration,
+            int division
+    ) {
+        int direction = totalDelta >= 0.0 ? 1 : -1;
+        int semitones = Math.max(1, (int) Math.floor(Math.abs(totalDelta)));
+        List<Double> deltas = new ArrayList<Double>();
+        for (int step = 0; step < semitones; step++) {
+            int semitone = step * direction;
+            if (range.whiteKeysOnly && !isWhiteKey(range.sourcePitch + semitone)) {
+                continue;
+            }
+            if (range.blackKeysOnly && isWhiteKey(range.sourcePitch + semitone)) {
+                continue;
+            }
+            deltas.add(Double.valueOf(semitone));
+        }
+        if (deltas.isEmpty()) {
+            deltas.add(Double.valueOf(0.0));
+        }
+        long unit = Math.max(1, Math.min(Math.max(1, division / 16L), Math.max(1, activeDuration / deltas.size())));
+        List<EventTiming> out = new ArrayList<EventTiming>();
+        long offset = 0;
+        for (int i = 0; i < deltas.size() && offset < activeDuration; i++) {
+            long length = i == deltas.size() - 1
+                    ? Math.max(1, activeDuration - offset)
+                    : Math.min(unit, Math.max(1, activeDuration - offset));
+            out.add(new EventTiming(offset, length, deltas.get(i).doubleValue()));
+            offset += length;
+        }
+        if (activeDuration < nominalDuration) {
+            out.add(new EventTiming(activeDuration, nominalDuration - activeDuration, totalDelta));
+        }
+        return out;
+    }
+
+    private static List<EventTiming> vibratoEventTimings(TrackData track, long chordStartTick, long nominalDuration, int division) {
+        if (track == null || nominalDuration <= 1) {
+            return null;
+        }
+        long chordEndTick = chordStartTick + nominalDuration;
+        for (VibratoRange range : track.vibratoRanges) {
+            if (range.endTick <= chordStartTick || range.startTick >= chordEndTick) {
+                continue;
+            }
+            long activeStart = Math.max(0, range.startTick - chordStartTick);
+            long activeEnd = Math.min(nominalDuration, range.endTick - chordStartTick);
+            if (activeEnd <= activeStart) {
+                continue;
+            }
+            List<EventTiming> out = new ArrayList<EventTiming>();
+            if (activeStart > 0) {
+                out.add(new EventTiming(0, activeStart, 0.0));
+            }
+            long unit = Math.max(1, Math.min(Math.max(1, division / 32L), Math.max(1, (activeEnd - activeStart) / 4L)));
+            long offset = activeStart;
+            int index = 0;
+            double semitoneWidth = range.cents / 100.0;
+            while (offset < activeEnd) {
+                long next = Math.min(activeEnd, offset + unit);
+                double delta;
+                if (range.sawtooth) {
+                    delta = (index % 3 == 0) ? 0.0 : ((index % 3 == 1) ? semitoneWidth : -semitoneWidth);
+                } else {
+                    delta = (index % 2 == 0) ? semitoneWidth : -semitoneWidth;
+                }
+                out.add(new EventTiming(offset, Math.max(1, next - offset), delta));
+                offset = next;
+                index++;
+            }
+            if (activeEnd < nominalDuration) {
+                out.add(new EventTiming(activeEnd, nominalDuration - activeEnd, 0.0));
+            }
+            return out.isEmpty() ? null : out;
+        }
+        return null;
+    }
+
+    private static boolean isWhiteKey(int pitch) {
+        int pc = Math.floorMod(pitch, 12);
+        return pc == 0 || pc == 2 || pc == 4 || pc == 5 || pc == 7 || pc == 9 || pc == 11;
+    }
+
     private static void emitPlayback(TrackData track, ScoreData score, NotePlayback playback) {
         playback.pitch = clamp(playback.pitch, 0, 127);
         playback.nativePitch = clamp(playback.nativePitch, 0, 127);
@@ -1212,6 +1609,10 @@ public final class MsczToMidx {
             List<EventTiming> tremolo = tremoloEventTimings(chord, nominalDuration, division);
             if (tremolo != null) {
                 return tremolo;
+            }
+            List<EventTiming> chordLine = chordLineEventTimings(chord, nominalDuration, division);
+            if (chordLine != null) {
+                return chordLine;
             }
             return singleEventTiming(nominalDuration);
         }
@@ -1370,10 +1771,68 @@ public final class MsczToMidx {
             }
             OrnamentPattern pattern = ornamentPattern(articulationName(articulation));
             if (pattern != null) {
-                return patternEventTimings(pattern.pitchDeltas, pattern.repeat, pattern.sustainLast, nominalDuration, pattern.unitTicks(division));
+                int[] pitchDeltas = ornamentPitchDeltas(pattern.pitchDeltas, articulation);
+                return patternEventTimings(pitchDeltas, pattern.repeat, pattern.sustainLast, nominalDuration, pattern.unitTicks(division));
             }
         }
         return null;
+    }
+
+    private static int[] ornamentPitchDeltas(int[] source, Element articulation) {
+        int above = ornamentIntervalSemitones(text(firstDirectChild(articulation, "intervalAbove")), true, 1);
+        int below = -ornamentIntervalSemitones(text(firstDirectChild(articulation, "intervalBelow")), false, 1);
+        int[] out = new int[source.length];
+        for (int i = 0; i < source.length; i++) {
+            if (source[i] > 0) {
+                out[i] = above * source[i];
+            } else if (source[i] < 0) {
+                out[i] = -below * source[i];
+            } else {
+                out[i] = 0;
+            }
+        }
+        if (boolText(firstDirectChild(articulation, "startOnUpperNote"), false) && out.length >= 2 && out[0] == 0 && out[1] > 0) {
+            out[0] = out[1];
+            out[1] = 0;
+        }
+        return out;
+    }
+
+    private static int ornamentIntervalSemitones(String value, boolean above, int fallback) {
+        if (value == null || value.trim().length() == 0) {
+            return fallback;
+        }
+        String lower = value.toLowerCase(Locale.ROOT);
+        int base;
+        if (lower.contains("octave")) {
+            base = 12;
+        } else if (lower.contains("seventh")) {
+            base = lower.contains("major") ? 11 : 10;
+        } else if (lower.contains("sixth")) {
+            base = lower.contains("major") ? 9 : 8;
+        } else if (lower.contains("fifth")) {
+            base = 7;
+        } else if (lower.contains("fourth")) {
+            base = 5;
+        } else if (lower.contains("third")) {
+            base = lower.contains("major") ? 4 : 3;
+        } else if (lower.contains("second")) {
+            base = lower.contains("major") ? 2 : 1;
+        } else if (lower.contains("unison")) {
+            base = 0;
+        } else {
+            return fallback;
+        }
+        if (lower.contains("augmented")) {
+            base += 1;
+        } else if (lower.contains("diminished")) {
+            base -= 1;
+        } else if (lower.contains("perfect") && (lower.contains("fourth") || lower.contains("fifth") || lower.contains("octave"))) {
+            // Keep the perfect interval base.
+        } else if (lower.contains("auto")) {
+            base = fallback;
+        }
+        return Math.max(0, base);
     }
 
     private static List<EventTiming> tremoloEventTimings(Element chord, long nominalDuration, int division) {
@@ -1562,6 +2021,46 @@ public final class MsczToMidx {
         return out.isEmpty() ? singleEventTiming(nominalDuration) : out;
     }
 
+    private static List<EventTiming> chordLineEventTimings(Element chord, long nominalDuration, int division) {
+        Element chordLine = firstDirectChild(chord, "ChordLine");
+        if (chordLine == null || intText(firstDirectChild(chordLine, "play"), 1) == 0 || nominalDuration <= 1) {
+            return null;
+        }
+        String subtype = text(firstDirectChild(chordLine, "subtype")).toLowerCase(Locale.ROOT);
+        int numeric = parseInt(subtype, -1);
+        double amount;
+        boolean settlesToMain;
+        if (numeric == 1 || subtype.contains("fall")) {
+            amount = -2.0;
+            settlesToMain = false;
+        } else if (numeric == 2 || subtype.contains("doit")) {
+            amount = 2.0;
+            settlesToMain = false;
+        } else if (numeric == 3 || subtype.contains("plop")) {
+            amount = 2.0;
+            settlesToMain = true;
+        } else if (numeric == 4 || subtype.contains("scoop")) {
+            amount = -2.0;
+            settlesToMain = true;
+        } else {
+            return null;
+        }
+
+        long effect = Math.max(1, Math.min(Math.max(1, division / 4L), Math.max(1, nominalDuration / 3L)));
+        List<EventTiming> out = new ArrayList<EventTiming>();
+        if (settlesToMain) {
+            out.add(new EventTiming(0, effect, amount));
+            if (effect < nominalDuration) {
+                out.add(new EventTiming(effect, nominalDuration - effect, 0.0));
+            }
+        } else {
+            long main = Math.max(1, nominalDuration - effect);
+            out.add(new EventTiming(0, main, 0.0));
+            out.add(new EventTiming(main, nominalDuration - main, amount));
+        }
+        return out;
+    }
+
     private static List<EventTiming> repeatedPitchTiming(double pitchDelta, long nominalDuration, long unitTicks) {
         List<EventTiming> out = new ArrayList<EventTiming>();
         long offset = 0;
@@ -1573,16 +2072,66 @@ public final class MsczToMidx {
         return out.isEmpty() ? singleEventTiming(nominalDuration) : out;
     }
 
-    private static long arpeggioOffsetTicks(Element chord, int noteIndex, int noteCount, long nominalDuration, int division) {
+    private static boolean isPlayableArpeggio(Element chord) {
+        Element arpeggio = firstDirectChild(chord, "Arpeggio");
+        if (arpeggio == null || intText(firstDirectChild(arpeggio, "play"), 1) == 0) {
+            return false;
+        }
+        int subtype = parseInt(text(firstDirectChild(arpeggio, "subtype")), -1);
+        return subtype != 3 && !text(firstDirectChild(arpeggio, "subtype")).toLowerCase(Locale.ROOT).contains("bracket");
+    }
+
+    private static long arpeggioOffsetTicks(Element chord, int noteIndex, int noteCount, long nominalDuration, int division, double bpm) {
         if (noteCount <= 1) {
             return 0;
         }
         Element arpeggio = firstDirectChild(chord, "Arpeggio");
         String subtype = text(firstDirectChild(arpeggio, "subtype")).toLowerCase(Locale.ROOT);
-        boolean down = subtype.contains("down");
+        int numericSubtype = parseInt(subtype, -1);
+        boolean down = numericSubtype == 2 || numericSubtype == 5 || subtype.contains("down");
         int order = down ? (noteCount - noteIndex - 1) : noteIndex;
-        long step = Math.max(1, Math.min(Math.max(1, division / 32L), Math.max(1, nominalDuration / (noteCount * 8L))));
+        double stretch = Math.max(0.1, doubleText(firstDirectChild(arpeggio, "timeStretch"), 1.0));
+        double userLen = Math.max(0.0, doubleText(firstDirectChild(arpeggio, "userLen1"), 0.0));
+        long defaultStep = Math.max(1, Math.min(Math.max(1, division / 32L), Math.max(1, nominalDuration / (noteCount * 8L))));
+        long step;
+        if (userLen > 0.0) {
+            long ticks = Math.max(1, Math.round(userLen * Math.max(1.0, bpm) * division / 60.0));
+            step = Math.max(1, ticks / Math.max(1, noteCount - 1));
+        } else {
+            step = Math.max(1, Math.round(defaultStep * stretch));
+        }
+        step = Math.min(step, Math.max(1, nominalDuration / Math.max(2, noteCount)));
         return order * step;
+    }
+
+    private static int pitchShiftAt(TrackData track, long tick) {
+        int shift = 0;
+        for (PitchShiftRange range : track.ottavaRanges) {
+            if (tick >= range.startTick && tick < range.endTick) {
+                shift += range.semitones;
+            }
+        }
+        return shift;
+    }
+
+    private static int playbackVelocityOffset(TrackData track, long tick) {
+        int offset = 0;
+        for (PlaybackRange range : track.playbackRanges) {
+            if (tick >= range.startTick && tick < range.endTick) {
+                offset += range.velocityOffset;
+            }
+        }
+        return clamp(offset, -64, 64);
+    }
+
+    private static int playbackGateTimePercent(TrackData track, long tick, int baseGateTimePercent) {
+        int gate = baseGateTimePercent;
+        for (PlaybackRange range : track.playbackRanges) {
+            if (tick >= range.startTick && tick < range.endTick) {
+                gate = clamp(gate * range.gateTimePercent / 100, 1, 1000);
+            }
+        }
+        return gate;
     }
 
     private static int hairpinVelocityOffset(TrackData track, long tick) {
@@ -1615,6 +2164,14 @@ public final class MsczToMidx {
             velocity = inheritedVelocity + intText(velocityElement, 0);
         }
         return clamp(velocity, 1, 127);
+    }
+
+    private static double noteTuningCents(Element note) {
+        Element centOffset = firstDirectChild(note, "centOffset");
+        if (centOffset != null) {
+            return doubleText(centOffset, 0.0);
+        }
+        return doubleText(firstDirectChild(note, "tuning"), 0.0);
     }
 
     private static boolean hasTieEndpoint(Element note, String endpoint) {
@@ -1690,7 +2247,8 @@ public final class MsczToMidx {
         double legacyTupletRatio = 1.0;
         int legacyTupletRemaining = 0;
         Map<String, TupletInfo> tupletsById = new HashMap<String, TupletInfo>();
-        for (Element element : voice.children) {
+        for (int childIndex = 0; childIndex < voice.children.size(); childIndex++) {
+            Element element = voice.children.get(childIndex);
             String tag = element.getTagName();
             if ("Tuplet".equals(tag)) {
                 TupletInfo info = parseTupletInfo(element, tupletsById);
@@ -1719,10 +2277,23 @@ public final class MsczToMidx {
                     range.velocityDelta = hairpinVelocityDelta(element);
                     activeHairpins.put(id, range);
                 }
-            } else if ("Spanner".equals(tag) && "Pedal".equals(element.getAttribute("type"))) {
-                addPedalRangeFromSpanner(element, track, tick, slot.length, division);
-            } else if ("Spanner".equals(tag) && "Trill".equals(element.getAttribute("type"))) {
-                addTrillRangeFromSpanner(element, track, tick, slot.length, division);
+            } else if ("Spanner".equals(tag)) {
+                String type = element.getAttribute("type");
+                if ("Pedal".equals(type)) {
+                    addPedalRangeFromSpanner(element, track, tick, slot.length, division, "Pedal", true);
+                } else if ("LetRing".equals(type)) {
+                    addPedalRangeFromSpanner(element, track, tick, slot.length, division, "LetRing", false);
+                } else if ("PalmMute".equals(type)) {
+                    addPlaybackRangeFromSpanner(element, track, tick, slot.length, division, "PalmMute", 55, -10);
+                } else if ("Slur".equals(type) || "HammerOnPullOff".equals(type)) {
+                    addPlaybackRangeFromSpanner(element, track, tick, slot.length, division, type, 110, 0);
+                } else if ("Vibrato".equals(type)) {
+                    addVibratoRangeFromSpanner(element, track, tick, slot.length, division);
+                } else if ("Ottava".equals(type)) {
+                    addOttavaRangeFromSpanner(element, track, tick, slot.length, division);
+                } else if ("Trill".equals(type)) {
+                    addTrillRangeFromSpanner(element, track, tick, slot.length, division);
+                }
             } else if ("endSpanner".equals(tag)) {
                 closeHairpin(activeHairpins, closedHairpins, element.getAttribute("id"), tick + childLocationOffset(element, division, slot.length));
             } else if ("Rest".equals(tag) || "Chord".equals(tag)) {
@@ -1730,7 +2301,12 @@ public final class MsczToMidx {
                     continue;
                 }
                 double ratio = tupletRatioForElement(element, tupletsById, legacyTupletRatio);
-                tick += Math.max(0, durationTicks(element, division, ratio, slot.length));
+                long duration = Math.max(0, durationTicks(element, division, ratio, slot.length));
+                if ("Chord".equals(tag)) {
+                    addGlissandoRangesFromChord(voice, childIndex, element, track, tick, slot.length, division);
+                    addGuitarBendRangesFromChord(voice, childIndex, element, track, tick, duration, slot.length, division);
+                }
+                tick += duration;
                 if (legacyTupletRemaining > 0 && firstDirectChild(element, "Tuplet") == null) {
                     legacyTupletRemaining--;
                     if (legacyTupletRemaining <= 0) {
@@ -1739,6 +2315,166 @@ public final class MsczToMidx {
                 }
             }
         }
+    }
+
+    private static void addGlissandoRangesFromChord(
+            Element voice,
+            int chordIndex,
+            Element chord,
+            TrackData track,
+            long startTick,
+            long measureTicks,
+            int division
+    ) {
+        List<Element> notes = directChildren(chord, "Note");
+        for (int noteIndex = 0; noteIndex < notes.size(); noteIndex++) {
+            Element note = notes.get(noteIndex);
+            int sourcePitch = intText(firstDirectChild(note, "pitch"), -1);
+            if (sourcePitch < 0) {
+                continue;
+            }
+            for (Element spanner : directChildren(note, "Spanner")) {
+                if (!"Glissando".equals(spanner.getAttribute("type")) || firstDirectChild(spanner, "prev") != null) {
+                    continue;
+                }
+                Element glissando = firstDirectChild(spanner, "Glissando");
+                Element next = firstDirectChild(spanner, "next");
+                if (glissando == null || next == null || intText(firstDirectChild(glissando, "play"), 1) == 0) {
+                    continue;
+                }
+                Element targetNote = glissandoTargetNote(voice, chordIndex, noteIndex);
+                if (targetNote == null) {
+                    continue;
+                }
+                long length = locationTicks(firstDirectChild(next, "location"), division, measureTicks);
+                if (length <= 0) {
+                    length = Math.max(1, division);
+                }
+                String style = text(firstDirectChild(glissando, "glissandoStyle")).toLowerCase(Locale.ROOT);
+                PitchRange range = new PitchRange();
+                range.startTick = startTick;
+                range.endTick = startTick + Math.max(1, length);
+                range.noteIndex = noteIndex;
+                range.sourcePitch = sourcePitch;
+                range.sourceCents = noteTuningCents(note);
+                range.targetPitch = intText(firstDirectChild(targetNote, "pitch"), sourcePitch);
+                range.targetCents = noteTuningCents(targetNote);
+                range.continuous = style.contains("portamento") || style.contains("continuous");
+                range.whiteKeysOnly = style.contains("white");
+                range.blackKeysOnly = style.contains("black");
+                track.glissandoRanges.add(range);
+            }
+        }
+    }
+
+    private static Element glissandoTargetNote(Element voice, int chordIndex, int noteIndex) {
+        for (int i = chordIndex + 1; i < voice.children.size(); i++) {
+            Element candidate = voice.children.get(i);
+            if (!"Chord".equals(candidate.getTagName()) || isGraceChord(candidate)) {
+                continue;
+            }
+            List<Element> notes = directChildren(candidate, "Note");
+            if (notes.isEmpty()) {
+                return null;
+            }
+            return notes.get(Math.min(noteIndex, notes.size() - 1));
+        }
+        return null;
+    }
+
+    private static void addGuitarBendRangesFromChord(
+            Element voice,
+            int chordIndex,
+            Element chord,
+            TrackData track,
+            long startTick,
+            long nominalDuration,
+            long measureTicks,
+            int division
+    ) {
+        List<Element> notes = directChildren(chord, "Note");
+        for (int noteIndex = 0; noteIndex < notes.size(); noteIndex++) {
+            Element note = notes.get(noteIndex);
+            int sourcePitch = intText(firstDirectChild(note, "pitch"), -1);
+            if (sourcePitch < 0) {
+                continue;
+            }
+            for (Element spanner : directChildren(note, "Spanner")) {
+                if (!"GuitarBend".equals(spanner.getAttribute("type")) || firstDirectChild(spanner, "prev") != null) {
+                    continue;
+                }
+                Element bend = firstDirectChild(spanner, "GuitarBend");
+                if (bend == null || intText(firstDirectChild(bend, "play"), 1) == 0) {
+                    continue;
+                }
+                Element targetNote = guitarBendTargetNote(voice, chordIndex, noteIndex);
+                int targetPitch = targetNote == null ? sourcePitch : intText(firstDirectChild(targetNote, "pitch"), sourcePitch);
+                double targetCents = targetNote == null ? noteTuningCents(note) : noteTuningCents(targetNote);
+                long length = spannerLengthTicks(spanner, division, measureTicks);
+                if (length <= 0) {
+                    length = Math.max(1, nominalDuration);
+                }
+                GuitarBendRange range = new GuitarBendRange();
+                range.startTick = startTick;
+                range.endTick = startTick + Math.max(1, length);
+                range.noteIndex = noteIndex;
+                range.sourcePitch = sourcePitch;
+                range.sourceCents = noteTuningCents(note);
+                range.targetPitch = targetPitch;
+                range.targetCents = targetCents;
+                range.type = text(firstDirectChild(bend, "guitarBendType"));
+                range.startFactor = doubleText(firstDirectChild(bend, "bendStartTimeFactor"), 0.0);
+                Element targetFactor = firstDirectChild(bend, "bendTargetTimeFactor");
+                range.hasTargetFactor = targetFactor != null;
+                range.targetFactor = doubleText(targetFactor, 0.5);
+                range.endFactor = doubleText(firstDirectChild(bend, "bendEndTimeFactor"), 1.0);
+                track.guitarBendRanges.add(range);
+            }
+        }
+    }
+
+    private static Element guitarBendTargetNote(Element voice, int chordIndex, int noteIndex) {
+        Element forward = findGuitarBendEndpointNote(voice, chordIndex + 1, voice.children.size(), 1, noteIndex);
+        if (forward != null) {
+            return forward;
+        }
+        return findGuitarBendEndpointNote(voice, chordIndex - 1, -1, -1, noteIndex);
+    }
+
+    private static Element findGuitarBendEndpointNote(Element voice, int startIndex, int endIndex, int step, int noteIndex) {
+        for (int i = startIndex; i != endIndex; i += step) {
+            if (i < 0 || i >= voice.children.size()) {
+                continue;
+            }
+            Element candidate = voice.children.get(i);
+            if (!"Chord".equals(candidate.getTagName())) {
+                continue;
+            }
+            List<Element> notes = directChildren(candidate, "Note");
+            if (notes.isEmpty()) {
+                continue;
+            }
+            int safeIndex = Math.min(noteIndex, notes.size() - 1);
+            Element indexed = notes.get(safeIndex);
+            if (hasSpannerEndpoint(indexed, "GuitarBend", "prev")) {
+                return indexed;
+            }
+            for (Element note : notes) {
+                if (hasSpannerEndpoint(note, "GuitarBend", "prev")) {
+                    return note;
+                }
+            }
+        }
+        return null;
+    }
+
+    private static boolean hasSpannerEndpoint(Element note, String type, String endpoint) {
+        for (Element spanner : directChildren(note, "Spanner")) {
+            if (type.equals(spanner.getAttribute("type")) && firstDirectChild(spanner, endpoint) != null) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private static int hairpinVelocityDelta(Element hairpin) {
@@ -1766,20 +2502,112 @@ public final class MsczToMidx {
         }
     }
 
-    private static void addPedalRangeFromSpanner(Element spanner, TrackData track, long startTick, long measureTicks, int division) {
-        if (firstDirectChild(spanner, "Pedal") == null || firstDirectChild(spanner, "next") == null) {
+    private static void addPedalRangeFromSpanner(
+            Element spanner,
+            TrackData track,
+            long startTick,
+            long measureTicks,
+            int division,
+            String childTag,
+            boolean emitControlChange
+    ) {
+        if (firstDirectChild(spanner, childTag) == null || firstDirectChild(spanner, "next") == null || firstDirectChild(spanner, "prev") != null) {
             return;
         }
-        Element next = firstDirectChild(spanner, "next");
-        Element location = firstDirectChild(next, "location");
-        long offset = locationTicks(location, division, measureTicks);
+        long offset = spannerLengthTicks(spanner, division, measureTicks);
         long endTick = startTick + Math.max(1, offset);
         PedalRange range = new PedalRange();
         range.startTick = startTick;
         range.endTick = endTick;
         track.pedalRanges.add(range);
-        track.events.add(MidiEvent.controlChange(startTick, MIDI_CONTROL_SUSTAIN, 127));
-        track.events.add(MidiEvent.controlChange(endTick, MIDI_CONTROL_SUSTAIN, 0));
+        if (emitControlChange) {
+            track.events.add(MidiEvent.controlChange(startTick, MIDI_CONTROL_SUSTAIN, 127));
+            track.events.add(MidiEvent.controlChange(endTick, MIDI_CONTROL_SUSTAIN, 0));
+        }
+    }
+
+    private static void addPlaybackRangeFromSpanner(
+            Element spanner,
+            TrackData track,
+            long startTick,
+            long measureTicks,
+            int division,
+            String childTag,
+            int gateTimePercent,
+            int velocityOffset
+    ) {
+        if (firstDirectChild(spanner, childTag) == null || firstDirectChild(spanner, "next") == null || firstDirectChild(spanner, "prev") != null) {
+            return;
+        }
+        PlaybackRange range = new PlaybackRange();
+        range.startTick = startTick;
+        range.endTick = startTick + Math.max(1, spannerLengthTicks(spanner, division, measureTicks));
+        range.gateTimePercent = clamp(gateTimePercent, 1, 1000);
+        range.velocityOffset = clamp(velocityOffset, -64, 64);
+        track.playbackRanges.add(range);
+    }
+
+    private static void addVibratoRangeFromSpanner(Element spanner, TrackData track, long startTick, long measureTicks, int division) {
+        Element vibrato = firstDirectChild(spanner, "Vibrato");
+        if (vibrato == null || firstDirectChild(spanner, "next") == null || firstDirectChild(spanner, "prev") != null) {
+            return;
+        }
+        String subtype = text(firstDirectChild(vibrato, "subtype")).toLowerCase(Locale.ROOT);
+        VibratoRange range = new VibratoRange();
+        range.startTick = startTick;
+        range.endTick = startTick + Math.max(1, spannerLengthTicks(spanner, division, measureTicks));
+        range.cents = subtype.contains("wide") ? 24.0 : 14.0;
+        range.sawtooth = subtype.contains("saw");
+        track.vibratoRanges.add(range);
+    }
+
+    private static void addOttavaRangeFromSpanner(Element spanner, TrackData track, long startTick, long measureTicks, int division) {
+        Element ottava = firstDirectChild(spanner, "Ottava");
+        if (ottava == null || firstDirectChild(spanner, "next") == null || firstDirectChild(spanner, "prev") != null) {
+            return;
+        }
+        int semitones = ottavaSemitoneShift(text(firstDirectChild(ottava, "subtype")));
+        if (semitones == 0) {
+            semitones = ottavaSemitoneShift(text(firstDirectChild(ottava, "ottavaType")));
+        }
+        if (semitones == 0) {
+            return;
+        }
+        PitchShiftRange range = new PitchShiftRange();
+        range.startTick = startTick;
+        range.endTick = startTick + Math.max(1, spannerLengthTicks(spanner, division, measureTicks));
+        range.semitones = semitones;
+        track.ottavaRanges.add(range);
+    }
+
+    private static int ottavaSemitoneShift(String subtype) {
+        String lower = subtype == null ? "" : subtype.toLowerCase(Locale.ROOT);
+        int numeric = parseInt(lower, -1);
+        if (numeric == 0 || lower.contains("8va")) {
+            return 12;
+        }
+        if (numeric == 1 || lower.contains("8vb")) {
+            return -12;
+        }
+        if (numeric == 2 || lower.contains("15ma")) {
+            return 24;
+        }
+        if (numeric == 3 || lower.contains("15mb")) {
+            return -24;
+        }
+        if (numeric == 4 || lower.contains("22ma")) {
+            return 36;
+        }
+        if (numeric == 5 || lower.contains("22mb")) {
+            return -36;
+        }
+        return 0;
+    }
+
+    private static long spannerLengthTicks(Element spanner, int division, long measureTicks) {
+        Element next = firstDirectChild(spanner, "next");
+        Element location = firstDirectChild(next, "location");
+        return locationTicks(location, division, measureTicks);
     }
 
     private static void addTrillRangeFromSpanner(Element spanner, TrackData track, long startTick, long measureTicks, int division) {
@@ -2293,6 +3121,14 @@ public final class MsczToMidx {
         return parseDouble(text(element), fallback);
     }
 
+    private static boolean boolText(Element element, boolean fallback) {
+        String value = text(element).toLowerCase(Locale.ROOT);
+        if (value.length() == 0) {
+            return fallback;
+        }
+        return "1".equals(value) || "true".equals(value) || "yes".equals(value);
+    }
+
     private static int intAttribute(Element element, String name, int fallback) {
         if (element == null) {
             return fallback;
@@ -2331,7 +3167,30 @@ public final class MsczToMidx {
         }
     }
 
+    private static double clampFactor(double value) {
+        if (Double.isNaN(value) || Double.isInfinite(value)) {
+            return 0.0;
+        }
+        if (value < 0.0) {
+            return 0.0;
+        }
+        if (value > 1.0) {
+            return 1.0;
+        }
+        return value;
+    }
+
     private static int clamp(int value, int min, int max) {
+        if (value < min) {
+            return min;
+        }
+        if (value > max) {
+            return max;
+        }
+        return value;
+    }
+
+    private static long clamp(long value, long min, long max) {
         if (value < min) {
             return min;
         }
@@ -2430,6 +3289,8 @@ public final class MsczToMidx {
         int division = DEFAULT_DIVISION;
         int noteCount = 0;
         int microtonalCount = 0;
+        int swingRatio = 0;
+        int swingUnitDenominator = 8;
         final Map<Integer, StaffInfo> staffInfos = new LinkedHashMap<Integer, StaffInfo>();
         final Map<Integer, TrackData> tracks = new TreeMap<Integer, TrackData>();
         final List<TempoEvent> tempoEvents = new ArrayList<TempoEvent>();
@@ -2493,15 +3354,23 @@ public final class MsczToMidx {
         final List<PedalRange> pedalRanges = new ArrayList<PedalRange>();
         final List<HairpinRange> hairpins = new ArrayList<HairpinRange>();
         final List<OrnamentRange> trillRanges = new ArrayList<OrnamentRange>();
+        final List<PitchRange> glissandoRanges = new ArrayList<PitchRange>();
+        final List<GuitarBendRange> guitarBendRanges = new ArrayList<GuitarBendRange>();
+        final List<PitchShiftRange> ottavaRanges = new ArrayList<PitchShiftRange>();
+        final List<PlaybackRange> playbackRanges = new ArrayList<PlaybackRange>();
+        final List<VibratoRange> vibratoRanges = new ArrayList<VibratoRange>();
     }
 
     private static final class VoiceState {
         long tick;
+        long gridTick;
         long measureStart;
         long sourceMeasureStart;
         long measureTicks;
         int velocity;
         double bpm = DEFAULT_BPM;
+        int swingRatio;
+        int swingUnitDenominator = 8;
         double tupletRatio;
         int tupletRemaining;
         int lastTimeSigN;
@@ -2547,6 +3416,59 @@ public final class MsczToMidx {
         long startTick;
         long endTick;
         String name;
+    }
+
+    private static final class PitchRange {
+        long startTick;
+        long endTick;
+        int noteIndex;
+        int sourcePitch;
+        double sourceCents;
+        int targetPitch;
+        double targetCents;
+        boolean continuous;
+        boolean whiteKeysOnly;
+        boolean blackKeysOnly;
+    }
+
+    private static final class GuitarBendRange {
+        long startTick;
+        long endTick;
+        int noteIndex;
+        int sourcePitch;
+        double sourceCents;
+        int targetPitch;
+        double targetCents;
+        String type;
+        double startFactor;
+        double targetFactor;
+        double endFactor;
+        boolean hasTargetFactor;
+    }
+
+    private static final class PitchShiftRange {
+        long startTick;
+        long endTick;
+        int semitones;
+    }
+
+    private static final class PlaybackRange {
+        long startTick;
+        long endTick;
+        int gateTimePercent = 100;
+        int velocityOffset;
+    }
+
+    private static final class VibratoRange {
+        long startTick;
+        long endTick;
+        double cents;
+        boolean sawtooth;
+    }
+
+    private static final class BendPoint {
+        int time;
+        double pitchDelta;
     }
 
     private static final class GracePlaybackSplit {

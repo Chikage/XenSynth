@@ -9,7 +9,6 @@ import org.xmlpull.v1.XmlPullParserFactory
 import java.io.InputStream
 import java.io.StringReader
 import kotlin.math.abs
-import kotlin.math.ceil
 import kotlin.math.floor
 import kotlin.math.roundToInt
 
@@ -91,7 +90,6 @@ class ScaleGuide private constructor(
         if (lastStep < firstStep) {
             return
         }
-        val densityStride = densityStride(step, minPitchSpacing)
         for (stepIndex in firstStep..lastStep) {
             val pitch = stepIndex * step
             if (pitch < minPitch - step || pitch > maxPitch + step) {
@@ -104,10 +102,11 @@ class ScaleGuide private constructor(
                 continue
             }
             val isC = octaveStep == 0
-            if (!shouldDrawDenseLine(stepIndex, densityStride, isC)) {
+            val visibilityRatio = DenseLineVisibility.ratioForStep(stepIndex, step, minPitchSpacing, isC)
+            if (visibilityRatio <= 0f) {
                 continue
             }
-            consumer.onLine(pitch, ratio.coerceIn(0f, 1f), 0f, false, isC)
+            consumer.onLine(pitch, ratio.coerceIn(0f, 1f) * visibilityRatio, 0f, false, isC)
         }
     }
 
@@ -264,18 +263,6 @@ class ScaleGuide private constructor(
                 lastDrawnPitch = pitch
             }
         }
-    }
-
-    private fun densityStride(step: Double, minPitchSpacing: Double): Int {
-        val spacing = sanitizedMinPitchSpacing(minPitchSpacing)
-        if (spacing <= STEP_EPSILON || step <= STEP_EPSILON) {
-            return 1
-        }
-        return ceil(spacing / step).toInt().coerceAtLeast(1)
-    }
-
-    private fun shouldDrawDenseLine(stepIndex: Int, densityStride: Int, isAnchor: Boolean): Boolean {
-        return isAnchor || densityStride <= 1 || positiveModulo(stepIndex, densityStride) == 0
     }
 
     private fun sanitizedMinPitchSpacing(value: Double): Double {
