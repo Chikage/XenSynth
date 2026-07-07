@@ -1,0 +1,55 @@
+# Xen Synth
+
+Xen Synth is an Android landscape app for playing and visualizing microtonal
+MIDX / MIDI 2.0 waterfall files.
+
+## Current Scope
+
+- Android package: `icu.ringona.xensynth`
+- App label: `Xen Synth`
+- Minimum SDK: 24
+- Orientation: sensor landscape
+- File access: Android Storage Access Framework, plus `ACTION_VIEW` handling for MIDI-like files
+- MIDI-related manifest capability: optional `android.software.midi` and USB host feature declarations
+- Waterfall engine: native Android renderer and playback controller
+- Supported score inputs: `.mid`, `.midi`, `.midx`, `.midix`, `.midi2`, `.mscz`, `.mscx`
+- MuseScore conversion helper: `MsczToMidx` can emit `.midx` with microtonal offsets or plain `.mid/.midi`
+- Sound mode: native Oboe / FluidSynth playback with the bundled SoundFont
+
+The app no longer embeds a WebView waterfall runtime; score parsing,
+visualization, gestures, transport, and audio scheduling all run in the native
+Android layer.
+
+## Build
+
+This repository uses the Gradle wrapper copied from the Android toolchain used by
+the related projects. AGP 9 requires Java 17+.
+
+```sh
+JAVA_HOME="/Applications/Android Studio.app/Contents/jbr/Contents/Home" \
+ANDROID_HOME="$HOME/Library/Android/sdk" \
+ANDROID_SDK_ROOT="$HOME/Library/Android/sdk" \
+./gradlew :app:assembleDebug
+```
+
+The debug APK is written to:
+
+```text
+app/build/outputs/apk/debug/app-debug.apk
+```
+
+## Audio Notes
+
+The app copies the bundled SoundFont from assets into cache on first use and
+loads it into the native FluidSynth backend.
+
+The JustPiano `feature_5.1` native audio stack is the reference for the next
+audio milestone:
+
+- `SoundEngineUtil` Java/Kotlin-facing API
+- `SoundEngine.cpp` native Oboe / FluidSynth rendering
+- SF2 loading via `loadSf2(path)`
+- pitch calibration / tuning behavior through FluidSynth key tuning
+
+The MIDX/MIDI2 parser, renderer, transport, and low-latency audio backend are
+now integrated as the primary runtime.
