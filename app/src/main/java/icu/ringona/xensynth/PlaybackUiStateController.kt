@@ -52,11 +52,8 @@ internal class PlaybackUiStateController(
     }
 
     fun updateParsedScore(parsed: ParsedScore, playheadSeconds: Double, offsetCents: Double) {
-        val metrics = parsed.metricsAt(playheadSeconds)
-        state.bpm = metrics.bpm
-        state.meter = metrics.meter
+        applyPlayheadSnapshot(playheadSnapshot(parsed, playheadSeconds))
         updateOffsetDisplay(offsetCents)
-        state.progress = parsed.durationText(playheadSeconds)
         state.status = parsed.titleStatusText()
     }
 
@@ -64,10 +61,28 @@ internal class PlaybackUiStateController(
         if (score == null) {
             return
         }
+        applyPlayheadSnapshot(playheadSnapshot(score, playheadSeconds))
+    }
+
+    fun playheadSnapshot(score: ParsedScore, playheadSeconds: Double): PlaybackToolbarSnapshot {
         val metrics = score.metricsAt(playheadSeconds)
-        state.bpm = metrics.bpm
-        state.meter = metrics.meter
-        state.progress = score.durationText(playheadSeconds)
+        return PlaybackToolbarSnapshot(
+            bpm = metrics.bpm,
+            meter = metrics.meter,
+            progress = score.durationText(playheadSeconds)
+        )
+    }
+
+    fun applyPlayheadSnapshot(snapshot: PlaybackToolbarSnapshot) {
+        if (state.bpm != snapshot.bpm) {
+            state.bpm = snapshot.bpm
+        }
+        if (state.meter != snapshot.meter) {
+            state.meter = snapshot.meter
+        }
+        if (state.progress != snapshot.progress) {
+            state.progress = snapshot.progress
+        }
     }
 
     fun updateOffsetDisplay(cents: Double) {
@@ -89,6 +104,13 @@ internal class PlaybackUiStateController(
     fun updateVolume(gain: Float) {
         state.volumeGain = gain
         state.volume = gain.formatVolumePercent()
+    }
+
+    fun updateReverb(value: Int) {
+        state.reverb = value.coerceIn(
+            MainActivity.REVERB_MIN,
+            MainActivity.REVERB_MAX
+        )
     }
 
     fun showVolumeGesture() {
@@ -156,6 +178,7 @@ internal class ShellUiState {
     var touchKeyboardProgramControlsMidi by mutableStateOf(MainActivity.GM_PROGRAM_CONTROLS_MIDI_DEFAULT)
     var volumeGain by mutableStateOf(MainActivity.VOLUME_GAIN_DEFAULT)
     var volume by mutableStateOf(MainActivity.VOLUME_GAIN_DEFAULT.formatVolumePercent())
+    var reverb by mutableStateOf(MainActivity.REVERB_DEFAULT)
     var volumeGestureVisible by mutableStateOf(false)
     var volumeGestureRevision by mutableStateOf(0)
     var progress by mutableStateOf("0:00/0:00")
@@ -171,6 +194,12 @@ internal class ShellUiState {
     var playDescription by mutableStateOf("Play")
     var refreshRateExperimentLabel by mutableStateOf("FULL")
 }
+
+internal data class PlaybackToolbarSnapshot(
+    val bpm: String,
+    val meter: String,
+    val progress: String
+)
 
 private data class ScoreMetrics(
     val bpm: String,

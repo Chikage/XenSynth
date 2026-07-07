@@ -25,6 +25,12 @@ class NativeAudioController(
         }.isSuccess
     }
 
+    fun setReverb(value: Int): Boolean {
+        return runCatching {
+            nativeAudio.setReverb(value)
+        }.isSuccess
+    }
+
     fun noteOn(
         key: Int,
         velocity: Int,

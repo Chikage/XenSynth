@@ -1,5 +1,5 @@
 # Auto detect text files and perform LF normalization
 * text=auto
-*.SF2 filter=lfs diff=lfs merge=lfs -text
-*.sf2 filter=lfs diff=lfs merge=lfs -text
+*.SF2 binary
+*.sf2 binary
 *.pkg binary

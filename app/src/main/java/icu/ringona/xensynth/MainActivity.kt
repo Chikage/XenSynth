@@ -133,6 +133,9 @@ import kotlin.math.roundToInt
 
 private const val COMPACT_SLIDER_WIDTH_DP = 184
 private const val TOOLBAR_TITLE_MAX_WIDTH_DP = 192
+private const val AUDIO_LATENCY_MAX_MS = 500
+private const val AUDIO_LATENCY_STEP_MS = 5
+private const val TOOLBAR_PLAYHEAD_UPDATE_NANOS = 100_000_000L
 private const val SHOW_REFRESH_DIAGNOSTIC_CONTROLS = false
 
 class MainActivity : ComponentActivity(), RenderFramePacer.InteractionListener {
@@ -147,6 +150,8 @@ class MainActivity : ComponentActivity(), RenderFramePacer.InteractionListener {
     private var volumeGestureOverlayView: View? = null
     private val shellUiState = ShellUiState()
     private val playbackUi = PlaybackUiStateController(shellUiState)
+    private var lastToolbarPlayheadUpdateNanos = 0L
+    private var lastToolbarPlayheadSnapshot: PlaybackToolbarSnapshot? = null
     private var requestedDisplayModeId = 0
     private var requestedWindowRefreshRate = 0f
     private var highRefreshRateKeepAlivePosted = false
@@ -197,10 +202,12 @@ class MainActivity : ComponentActivity(), RenderFramePacer.InteractionListener {
                 }
                 updatePlayButtonIcon()
                 updateStageControls()
+                updateToolbarPlayheadIfNeeded(force = true)
             }
 
             override fun onPlaybackFinished() {
                 updateStageControls()
+                updateToolbarPlayheadIfNeeded(force = true)
             }
 
             override fun onStatusText(text: String) {
@@ -241,6 +248,7 @@ class MainActivity : ComponentActivity(), RenderFramePacer.InteractionListener {
     private var nativeSf2Loading = false
     private var playbackStartSuppressedUntil = 0L
     private var volumeGain = VOLUME_GAIN_DEFAULT
+    private var reverbValue = REVERB_DEFAULT
     private val sampleLoaderExecutor: ExecutorService = Executors.newSingleThreadExecutor()
     private val destroyed = AtomicBoolean(false)
     private lateinit var waterfallGestureController: WaterfallGestureController
@@ -307,6 +315,7 @@ class MainActivity : ComponentActivity(), RenderFramePacer.InteractionListener {
                 .show()
         }
         applyVolumeGain(volumeGain)
+        applyReverbMix(reverbValue)
         setContentView(createNativeShell())
         registerDisplayModeDiagnostics()
         logDisplayModeDiagnostic("onCreate", force = true)
@@ -598,16 +607,6 @@ class MainActivity : ComponentActivity(), RenderFramePacer.InteractionListener {
         if (::waterfallView.isInitialized) {
             waterfallView.requestHighRefreshFrame(frameTimeNanos)
         }
-        window.decorView.invalidate()
-        if (::shellRootFrame.isInitialized) {
-            shellRootFrame.invalidate()
-        }
-        if (::stageRoot.isInitialized) {
-            stageRoot.invalidate()
-        }
-        toolbarView?.invalidate()
-        rulerGlassOverlayView?.invalidate()
-        volumeGestureOverlayView?.invalidate()
     }
 
     private fun logHighRefreshUiPulseStats(frameTimeNanos: Long) {
@@ -816,6 +815,7 @@ class MainActivity : ComponentActivity(), RenderFramePacer.InteractionListener {
                         onTouchKeyboardProgramChanged = ::onTouchKeyboardProgramProgressChanged,
                         onTouchKeyboardProgramTextChanged = ::onTouchKeyboardProgramTextChanged,
                         onTouchKeyboardProgramMidiOverrideChanged = ::onTouchKeyboardProgramMidiOverrideChanged,
+                        onReverbChanged = ::onReverbChanged,
                         onRefreshRateExperimentSelected = ::onRefreshRateExperimentSelected,
                         onFocusClearerChanged = { clearToolbarFocus = it }
                     )
@@ -1007,6 +1007,7 @@ class MainActivity : ComponentActivity(), RenderFramePacer.InteractionListener {
         val speed = progressToSpeed(nextProgress)
         nativeSpeed = speed
         playbackUi.updateSpeed(nextProgress, speed)
+        updateToolbarPlayheadIfNeeded(force = true)
     }
 
     private fun onSpeedTextChanged(value: Double) {
@@ -1028,6 +1029,7 @@ class MainActivity : ComponentActivity(), RenderFramePacer.InteractionListener {
         nativeLoading = false
         nativePlayback.clearPendingDefaultSoundFontPlayback()
         waterfallView.setScore(null)
+        resetToolbarPlayheadUpdateCache()
         resetNativePlayback()
         playbackUi.resetScoreSummary()
         updatePlayButtonIcon()
@@ -1053,6 +1055,7 @@ class MainActivity : ComponentActivity(), RenderFramePacer.InteractionListener {
 
     private fun endNativeSeekGesture() {
         nativePlayback.endSeekGesture()
+        updateToolbarPlayheadIfNeeded(force = true)
     }
 
     private fun updateNativeOffsetDisplay(cents: Double) {
@@ -1068,6 +1071,12 @@ class MainActivity : ComponentActivity(), RenderFramePacer.InteractionListener {
             updateWaterfallVolumeGestureFeedback()
         }
         nativeAudioController.setGain(volumeGain)
+    }
+
+    private fun applyReverbMix(value: Int) {
+        reverbValue = value.coerceIn(REVERB_MIN, REVERB_MAX)
+        playbackUi.updateReverb(reverbValue)
+        nativeAudioController.setReverb(reverbValue)
     }
 
     private fun showVolumeGestureFeedback() {
@@ -1125,6 +1134,10 @@ class MainActivity : ComponentActivity(), RenderFramePacer.InteractionListener {
     private fun onTouchKeyboardProgramMidiOverrideChanged(enabled: Boolean) {
         touchKeyboardProgramControlsMidi = enabled
         playbackUi.updateTouchKeyboardProgramMidiOverride(enabled)
+    }
+
+    private fun onReverbChanged(progress: Float) {
+        applyReverbMix(progress.roundToInt())
     }
 
     private fun onRefreshRateExperimentSelected(label: String) {
@@ -1374,6 +1387,8 @@ class MainActivity : ComponentActivity(), RenderFramePacer.InteractionListener {
             playheadSeconds = nativePlayheadSeconds,
             offsetCents = waterfallView.displayState().waterfallOffsetCents
         )
+        resetToolbarPlayheadUpdateCache()
+        updateToolbarPlayheadIfNeeded(force = true)
     }
 
     private fun applyCurrentKeybindToScore() {
@@ -1394,7 +1409,9 @@ class MainActivity : ComponentActivity(), RenderFramePacer.InteractionListener {
     }
 
     private fun resetNativePlayback() {
+        resetToolbarPlayheadUpdateCache()
         nativePlayback.reset()
+        updateToolbarPlayheadIfNeeded(force = true)
     }
 
     private fun toggleNativePlayback() {
@@ -1428,8 +1445,8 @@ class MainActivity : ComponentActivity(), RenderFramePacer.InteractionListener {
             return
         }
         nativePlayheadSeconds = visualPlayhead
-        waterfallView.setPlayhead(nativePlayheadSeconds)
-        playbackUi.updatePlayhead(nativeParsedScore, 0.0)
+        updateWaterfallPlayheadFrame()
+        updateToolbarPlayheadIfNeeded(force = true)
     }
 
     private fun suppressPlaybackStartBriefly() {
@@ -1460,9 +1477,42 @@ class MainActivity : ComponentActivity(), RenderFramePacer.InteractionListener {
         if (nativePlaying) {
             RenderFramePacer.notifyContentActive()
         }
+        updateWaterfallPlayheadFrame()
+        updateToolbarPlayheadIfNeeded()
+    }
+
+    private fun updateWaterfallPlayheadFrame() {
+        if (!::waterfallView.isInitialized) {
+            return
+        }
         waterfallView.setPlayhead(nativePlayheadSeconds)
         rulerGlassOverlayView?.postInvalidateOnAnimation()
-        playbackUi.updatePlayhead(nativeParsedScore, nativePlayheadSeconds.coerceAtLeast(0.0))
+    }
+
+    private fun updateToolbarPlayheadIfNeeded(force: Boolean = false) {
+        val parsed = nativeParsedScore ?: return
+        val now = System.nanoTime()
+        if (!force &&
+            lastToolbarPlayheadUpdateNanos > 0L &&
+            now - lastToolbarPlayheadUpdateNanos < TOOLBAR_PLAYHEAD_UPDATE_NANOS
+        ) {
+            return
+        }
+        val snapshot = playbackUi.playheadSnapshot(
+            parsed,
+            nativePlayheadSeconds.coerceAtLeast(0.0)
+        )
+        lastToolbarPlayheadUpdateNanos = now
+        if (!force && snapshot == lastToolbarPlayheadSnapshot) {
+            return
+        }
+        lastToolbarPlayheadSnapshot = snapshot
+        playbackUi.applyPlayheadSnapshot(snapshot)
+    }
+
+    private fun resetToolbarPlayheadUpdateCache() {
+        lastToolbarPlayheadUpdateNanos = 0L
+        lastToolbarPlayheadSnapshot = null
     }
 
     private fun canUseNativeAudio(): Boolean {
@@ -1730,6 +1780,9 @@ class MainActivity : ComponentActivity(), RenderFramePacer.InteractionListener {
         const val VOLUME_GAIN_MIN = 0f
         const val VOLUME_GAIN_MAX = 6f
         const val VOLUME_GAIN_DEFAULT = 2.05f
+        const val REVERB_MIN = 0
+        const val REVERB_MAX = 100
+        const val REVERB_DEFAULT = 54
         const val VOLUME_GESTURE_VISIBLE_MS = 900L
         const val RESET_PLAY_SUPPRESSION_MS = 350L
         const val HIGH_REFRESH_KEEPALIVE_MS = 1_000L
@@ -1855,6 +1908,7 @@ private fun XenToolbar(
     onTouchKeyboardProgramChanged: (Float) -> Unit,
     onTouchKeyboardProgramTextChanged: (Int) -> Unit,
     onTouchKeyboardProgramMidiOverrideChanged: (Boolean) -> Unit,
+    onReverbChanged: (Float) -> Unit,
     onRefreshRateExperimentSelected: (String) -> Unit,
     onFocusClearerChanged: ((() -> Unit)?) -> Unit
 ) {
@@ -2005,32 +2059,14 @@ private fun XenToolbar(
                 onTextFieldBoundsChanged = { offsetTextFieldBounds = it },
                 showProgressTrack = false
             )
-            EditableMetricSliderTile(
-                label = "GMPN",
-                displayValue = state.touchKeyboardProgram.toString(),
-                inputValue = state.touchKeyboardProgram.toString(),
-                valueEditable = true,
-                width = metricControlWidth,
-                sliderValue = state.touchKeyboardProgram.toFloat(),
-                range = MainActivity.GM_PROGRAM_MIN.toFloat()..MainActivity.GM_PROGRAM_MAX.toFloat(),
-                steps = MainActivity.GM_PROGRAM_MAX - MainActivity.GM_PROGRAM_MIN - 1,
-                enabled = state.audioControlsEnabled,
-                keyboardType = KeyboardType.Number,
-                onValueChange = onTouchKeyboardProgramChanged,
-                onTextValueChange = { text ->
-                    text.toIntOrNull()?.let(onTouchKeyboardProgramTextChanged)
-                },
-                sanitizeTextInput = { text ->
-                    sanitizeUnsignedIntInput(text, MainActivity.GM_PROGRAM_MAX)
-                },
-                onTextFieldBoundsChanged = { programTextFieldBounds = it },
-                popupContent = {
-                    MidiProgramOverrideToggle(
-                        checked = state.touchKeyboardProgramControlsMidi,
-                        enabled = state.audioControlsEnabled,
-                        onCheckedChange = onTouchKeyboardProgramMidiOverrideChanged
-                    )
-                }
+            ToolbarDivider()
+            ToolbarSettingsMenu(
+                state = state,
+                onTouchKeyboardProgramChanged = onTouchKeyboardProgramChanged,
+                onTouchKeyboardProgramTextChanged = onTouchKeyboardProgramTextChanged,
+                onTouchKeyboardProgramMidiOverrideChanged = onTouchKeyboardProgramMidiOverrideChanged,
+                onReverbChanged = onReverbChanged,
+                onProgramTextFieldBoundsChanged = { programTextFieldBounds = it }
             )
             if (SHOW_REFRESH_DIAGNOSTIC_CONTROLS) {
                 RefreshRateExperimentMenu(
@@ -2582,6 +2618,277 @@ private fun EditableMetricSliderTile(
             popupContent?.invoke()
         }
     }
+}
+
+@Composable
+private fun ToolbarSettingsMenu(
+    state: ShellUiState,
+    onTouchKeyboardProgramChanged: (Float) -> Unit,
+    onTouchKeyboardProgramTextChanged: (Int) -> Unit,
+    onTouchKeyboardProgramMidiOverrideChanged: (Boolean) -> Unit,
+    onReverbChanged: (Float) -> Unit,
+    onProgramTextFieldBoundsChanged: (Rect?) -> Unit
+) {
+    var expanded by remember { mutableStateOf(false) }
+    var audioLatencyMs by remember { mutableStateOf(0f) }
+    val focusManager = LocalFocusManager.current
+    val popupOffsetX = ((48 - COMPACT_SLIDER_WIDTH_DP) / 2).dp
+
+    LaunchedEffect(expanded) {
+        if (!expanded) {
+            onProgramTextFieldBoundsChanged(null)
+        }
+    }
+
+    Box(
+        modifier = Modifier
+            .padding(end = 6.dp)
+            .height(44.dp),
+        contentAlignment = Alignment.Center
+    ) {
+        FilledIconButton(
+            onClick = {
+                if (expanded) {
+                    focusManager.clearFocus()
+                }
+                expanded = !expanded
+            },
+            modifier = Modifier.size(width = 48.dp, height = 44.dp),
+            shape = RoundedCornerShape(8.dp),
+            colors = IconButtonDefaults.filledIconButtonColors(
+                containerColor = if (expanded) XenActive else XenButton,
+                contentColor = ComposeColor.White,
+                disabledContainerColor = XenPanel,
+                disabledContentColor = XenMuted
+            )
+        ) {
+            Icon(
+                painter = painterResource(R.drawable.ic_settings_24),
+                contentDescription = "Settings",
+                modifier = Modifier.size(22.dp)
+            )
+        }
+        DropdownMenu(
+            expanded = expanded,
+            onDismissRequest = {
+                focusManager.clearFocus()
+                expanded = false
+            },
+            offset = DpOffset(x = popupOffsetX, y = 0.dp),
+            modifier = Modifier
+                .background(XenPanel)
+                .width(COMPACT_SLIDER_WIDTH_DP.dp)
+        ) {
+            SettingsTextFieldRow(
+                label = "PROG NUM",
+                inputValue = state.touchKeyboardProgram.toString(),
+                enabled = state.audioControlsEnabled,
+                keyboardType = KeyboardType.Number,
+                onTextValueChange = { text ->
+                    text.toIntOrNull()?.let(onTouchKeyboardProgramTextChanged)
+                },
+                sanitizeTextInput = { text ->
+                    sanitizeUnsignedIntInput(text, MainActivity.GM_PROGRAM_MAX)
+                },
+                onTextFieldBoundsChanged = onProgramTextFieldBoundsChanged
+            )
+            CompactSlider(
+                value = state.touchKeyboardProgram.toFloat(),
+                onValueChange = onTouchKeyboardProgramChanged,
+                range = MainActivity.GM_PROGRAM_MIN.toFloat()..MainActivity.GM_PROGRAM_MAX.toFloat(),
+                steps = MainActivity.GM_PROGRAM_MAX - MainActivity.GM_PROGRAM_MIN - 1,
+                enabled = state.audioControlsEnabled
+            )
+            MidiProgramOverrideToggle(
+                checked = state.touchKeyboardProgramControlsMidi,
+                enabled = state.audioControlsEnabled,
+                onCheckedChange = onTouchKeyboardProgramMidiOverrideChanged
+            )
+            SettingsMenuDivider()
+            SettingsValueRow(
+                label = "LATENCY",
+                value = "${audioLatencyMs.roundToInt()} ms",
+                enabled = true
+            )
+            CompactSlider(
+                value = audioLatencyMs,
+                onValueChange = { value ->
+                    audioLatencyMs = (value / AUDIO_LATENCY_STEP_MS)
+                        .roundToInt()
+                        .times(AUDIO_LATENCY_STEP_MS)
+                        .toFloat()
+                        .coerceIn(0f, AUDIO_LATENCY_MAX_MS.toFloat())
+                },
+                range = 0f..AUDIO_LATENCY_MAX_MS.toFloat(),
+                steps = AUDIO_LATENCY_MAX_MS / AUDIO_LATENCY_STEP_MS - 1,
+                enabled = true
+            )
+            SettingsMenuDivider()
+            SettingsValueRow(
+                label = "REVERB",
+                value = "${state.reverb}%",
+                enabled = state.audioControlsEnabled
+            )
+            CompactSlider(
+                value = state.reverb.toFloat(),
+                onValueChange = onReverbChanged,
+                range = MainActivity.REVERB_MIN.toFloat()..MainActivity.REVERB_MAX.toFloat(),
+                steps = MainActivity.REVERB_MAX - MainActivity.REVERB_MIN - 1,
+                enabled = state.audioControlsEnabled
+            )
+        }
+    }
+}
+
+@Composable
+private fun SettingsTextFieldRow(
+    label: String,
+    inputValue: String,
+    enabled: Boolean,
+    keyboardType: KeyboardType,
+    onTextValueChange: (String) -> Unit,
+    sanitizeTextInput: (String) -> String,
+    onTextFieldBoundsChanged: (Rect?) -> Unit
+) {
+    var inputFocused by remember { mutableStateOf(false) }
+    var textValue by remember {
+        mutableStateOf(TextFieldValue(inputValue, selection = TextRange(inputValue.length)))
+    }
+    val focusManager = LocalFocusManager.current
+
+    DisposableEffect(Unit) {
+        onDispose { onTextFieldBoundsChanged(null) }
+    }
+
+    LaunchedEffect(inputValue, inputFocused) {
+        if (!inputFocused) {
+            textValue = TextFieldValue(inputValue, selection = TextRange(inputValue.length))
+        }
+    }
+
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(36.dp)
+            .padding(horizontal = 12.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Text(
+            modifier = Modifier.weight(1f),
+            text = label,
+            color = if (enabled) XenToolbarText else XenMuted,
+            fontSize = 11.sp,
+            lineHeight = 12.sp,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            fontFamily = FontFamily.Monospace
+        )
+        BasicTextField(
+            value = textValue,
+            onValueChange = { nextValue ->
+                val nextText = sanitizeTextInput(nextValue.text)
+                textValue = TextFieldValue(
+                    text = nextText,
+                    selection = TextRange(nextText.length)
+                )
+                onTextValueChange(nextText)
+            },
+            modifier = Modifier
+                .width(46.dp)
+                .height(24.dp)
+                .clip(RoundedCornerShape(4.dp))
+                .background(XenMetricStroke.copy(alpha = 0.32f))
+                .onGloballyPositioned { coordinates ->
+                    onTextFieldBoundsChanged(coordinates.boundsInRoot())
+                }
+                .onFocusChanged { focusState ->
+                    val nowFocused = focusState.isFocused
+                    if (nowFocused && !inputFocused) {
+                        textValue = textValue.copy(
+                            selection = TextRange(0, textValue.text.length)
+                        )
+                    } else if (!nowFocused && inputFocused) {
+                        textValue = TextFieldValue(
+                            inputValue,
+                            selection = TextRange(inputValue.length)
+                        )
+                    }
+                    inputFocused = nowFocused
+                },
+            enabled = enabled,
+            singleLine = true,
+            textStyle = TextStyle(
+                color = if (enabled) XenToolbarText else XenMuted,
+                fontSize = 12.sp,
+                lineHeight = 13.sp,
+                textAlign = TextAlign.Center,
+                fontFamily = FontFamily.Monospace
+            ),
+            cursorBrush = SolidColor(XenActive),
+            keyboardOptions = KeyboardOptions(
+                keyboardType = keyboardType,
+                imeAction = ImeAction.Done
+            ),
+            keyboardActions = KeyboardActions(
+                onDone = { focusManager.clearFocus() }
+            ),
+            decorationBox = { innerTextField ->
+                Box(
+                    modifier = Modifier.fillMaxSize(),
+                    contentAlignment = Alignment.Center
+                ) {
+                    innerTextField()
+                }
+            }
+        )
+    }
+}
+
+@Composable
+private fun SettingsValueRow(
+    label: String,
+    value: String,
+    enabled: Boolean
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(32.dp)
+            .padding(horizontal = 12.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Text(
+            modifier = Modifier.weight(1f),
+            text = label,
+            color = if (enabled) XenToolbarText else XenMuted,
+            fontSize = 11.sp,
+            lineHeight = 12.sp,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            fontFamily = FontFamily.Monospace
+        )
+        Text(
+            text = value,
+            color = if (enabled) XenToolbarText else XenMuted,
+            fontSize = 12.sp,
+            lineHeight = 13.sp,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            textAlign = TextAlign.End,
+            fontFamily = FontFamily.Monospace
+        )
+    }
+}
+
+@Composable
+private fun SettingsMenuDivider() {
+    Spacer(
+        modifier = Modifier
+            .padding(horizontal = 12.dp, vertical = 4.dp)
+            .fillMaxWidth()
+            .height(1.dp)
+            .background(XenMetricStroke.copy(alpha = 0.52f))
+    )
 }
 
 @Composable
