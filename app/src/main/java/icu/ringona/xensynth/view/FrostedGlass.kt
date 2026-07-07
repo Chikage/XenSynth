@@ -55,6 +55,7 @@ internal object FrostedGlassStyle {
     fun darkBottom(alpha: Int): Int = Color.argb(alpha, 7, 9, 14)
     fun highlight(alpha: Int): Int = Color.argb(alpha, 255, 255, 255)
     fun coolHighlight(alpha: Int): Int = Color.argb(alpha, 220, 236, 255)
+    fun rulerHighlight(alpha: Int): Int = Color.argb(alpha, 255, 222, 111)
     fun shadow(alpha: Int): Int = Color.argb(alpha, 0, 0, 0)
     fun toolbarBlurRadiusPx(density: Float): Float = TOOLBAR_BLUR_RADIUS_DP * density
 }
@@ -681,11 +682,11 @@ internal class FrostedRulerOverlayView @JvmOverloads constructor(
     private val pixelCopyRect = Rect()
     private val pixelCopyHandler = Handler(Looper.getMainLooper())
     private val tickPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = Color.argb(110, 255, 255, 255)
+        color = FrostedGlassStyle.rulerHighlight(110)
         strokeWidth = 1f
     }
     private val labelPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = Color.argb(WaterfallMetrics.C_TICK_ALPHA, 255, 255, 255)
+        color = FrostedGlassStyle.rulerHighlight(WaterfallMetrics.C_TICK_ALPHA)
         textAlign = Paint.Align.CENTER
         textSize = 10f * resources.displayMetrics.density
     }
@@ -705,8 +706,14 @@ internal class FrostedRulerOverlayView @JvmOverloads constructor(
     private var captureBitmap: Bitmap? = null
     private var grainBitmap: Bitmap? = null
     private var grainShader: BitmapShader? = null
+    private var captureBitmapReady = false
     private var captureInFlight = false
     private var lastCaptureMs = 0L
+    private var surfaceSnapshotRetryPosted = false
+    private val surfaceSnapshotRetryRunnable = Runnable {
+        surfaceSnapshotRetryPosted = false
+        invalidate()
+    }
 
     init {
         isClickable = false
@@ -753,6 +760,7 @@ internal class FrostedRulerOverlayView @JvmOverloads constructor(
         }
         bounds.set(0f, top, width.toFloat(), height.toFloat())
         val source = backdropSource
+        var backdropReady = source == null
         if (source != null) {
             val blurred = if (source is SurfaceView) {
                 drawBlurredSurfaceSnapshot(canvas, source, bounds)
@@ -773,24 +781,26 @@ internal class FrostedRulerOverlayView @JvmOverloads constructor(
                     magnification = 1f
                 )
             }
-            if (!blurred) {
-                glassPaint.color = FrostedGlassStyle.darkBottom(56)
-                canvas.drawRect(bounds, glassPaint)
-            }
+            backdropReady = blurred
         }
-        drawRulerFrostVeil(canvas, bounds)
-        canvas.drawDarkFrostedPanel(
-            bounds = bounds,
-            paint = glassPaint,
-            topAlpha = FrostedGlassStyle.RULER_TOP_ALPHA,
-            bottomAlpha = FrostedGlassStyle.RULER_BOTTOM_ALPHA,
-            hairlineAlpha = FrostedGlassStyle.RULER_HAIRLINE_ALPHA,
-            shadowAlpha = FrostedGlassStyle.RULER_SHADOW_ALPHA,
-            topHighlightAlpha = 36
-        )
-        drawRulerGlassSheen(canvas, bounds)
-        drawRulerFineGrain(canvas, bounds)
-        drawRulerGlassEdges(canvas, bounds)
+        if (backdropReady) {
+            drawRulerFrostVeil(canvas, bounds)
+            canvas.drawDarkFrostedPanel(
+                bounds = bounds,
+                paint = glassPaint,
+                topAlpha = FrostedGlassStyle.RULER_TOP_ALPHA,
+                bottomAlpha = FrostedGlassStyle.RULER_BOTTOM_ALPHA,
+                hairlineAlpha = FrostedGlassStyle.RULER_HAIRLINE_ALPHA,
+                shadowAlpha = FrostedGlassStyle.RULER_SHADOW_ALPHA,
+                topHighlightAlpha = 36,
+                highlightColor = FrostedGlassStyle::rulerHighlight
+            )
+            drawRulerGlassSheen(canvas, bounds)
+            drawRulerFineGrain(canvas, bounds)
+            drawRulerGlassEdges(canvas, bounds)
+        } else {
+            drawPendingRulerBackdrop(canvas, bounds)
+        }
         drawRulerTicks(canvas, bounds)
         val hasImpacts = drawRulerImpacts(canvas, bounds)
         val hasParticles = drawRulerParticles(canvas, bounds)
@@ -803,10 +813,32 @@ internal class FrostedRulerOverlayView @JvmOverloads constructor(
         legacyBlur.release()
         captureBitmap?.recycle()
         captureBitmap = null
+        captureBitmapReady = false
         grainBitmap?.recycle()
         grainBitmap = null
         grainShader = null
+        removeCallbacks(surfaceSnapshotRetryRunnable)
+        surfaceSnapshotRetryPosted = false
         super.onDetachedFromWindow()
+    }
+
+    private fun drawPendingRulerBackdrop(canvas: Canvas, area: RectF) {
+        glassPaint.shader = LinearGradient(
+            0f,
+            area.top,
+            0f,
+            area.bottom,
+            intArrayOf(
+                FrostedGlassStyle.darkTop(132),
+                FrostedGlassStyle.darkBottom(178)
+            ),
+            floatArrayOf(0f, 1f),
+            Shader.TileMode.CLAMP
+        )
+        canvas.drawRect(area, glassPaint)
+        glassPaint.shader = null
+        edgePaint.color = FrostedGlassStyle.rulerHighlight(54)
+        canvas.drawRect(area.left, area.top, area.right, area.top + 1f, edgePaint)
     }
 
     private fun drawRulerFrostVeil(canvas: Canvas, area: RectF) {
@@ -820,7 +852,7 @@ internal class FrostedRulerOverlayView @JvmOverloads constructor(
             area.bottom,
             intArrayOf(
                 FrostedGlassStyle.coolHighlight(74),
-                FrostedGlassStyle.highlight(38),
+                FrostedGlassStyle.rulerHighlight(38),
                 FrostedGlassStyle.coolHighlight(18),
                 FrostedGlassStyle.shadow(22)
             ),
@@ -841,7 +873,7 @@ internal class FrostedRulerOverlayView @JvmOverloads constructor(
             area.right,
             area.bottom,
             intArrayOf(
-                FrostedGlassStyle.highlight(96),
+                FrostedGlassStyle.rulerHighlight(96),
                 FrostedGlassStyle.coolHighlight(42),
                 Color.TRANSPARENT,
                 FrostedGlassStyle.shadow(30)
@@ -872,7 +904,7 @@ internal class FrostedRulerOverlayView @JvmOverloads constructor(
             0f,
             area.top + topDepth,
             intArrayOf(
-                FrostedGlassStyle.highlight(118),
+                FrostedGlassStyle.rulerHighlight(118),
                 FrostedGlassStyle.coolHighlight(28),
                 Color.TRANSPARENT
             ),
@@ -889,7 +921,7 @@ internal class FrostedRulerOverlayView @JvmOverloads constructor(
             area.bottom,
             intArrayOf(
                 Color.TRANSPARENT,
-                FrostedGlassStyle.highlight(34),
+                FrostedGlassStyle.rulerHighlight(34),
                 FrostedGlassStyle.shadow(86)
             ),
             floatArrayOf(0f, 0.34f, 1f),
@@ -897,7 +929,7 @@ internal class FrostedRulerOverlayView @JvmOverloads constructor(
         )
         canvas.drawRect(area.left, depthTop, area.right, area.bottom, edgePaint)
         edgePaint.shader = null
-        edgePaint.color = FrostedGlassStyle.highlight(FrostedGlassStyle.RULER_HAIRLINE_ALPHA)
+        edgePaint.color = FrostedGlassStyle.rulerHighlight(FrostedGlassStyle.RULER_HAIRLINE_ALPHA)
         canvas.drawRect(area.left, area.top, area.right, area.top + 1f, edgePaint)
         edgePaint.color = FrostedGlassStyle.shadow(72)
         canvas.drawRect(area.left, area.bottom - 1f, area.right, area.bottom, edgePaint)
@@ -934,7 +966,7 @@ internal class FrostedRulerOverlayView @JvmOverloads constructor(
     private fun drawBlurredSurfaceSnapshot(canvas: Canvas, source: SurfaceView, area: RectF): Boolean {
         requestSurfaceSnapshot(source, area)
         val bitmap = captureBitmap ?: return false
-        if (bitmap.isRecycled || bitmap.width <= 0 || bitmap.height <= 0) {
+        if (!captureBitmapReady || bitmap.isRecycled || bitmap.width <= 0 || bitmap.height <= 0) {
             return false
         }
         localBlurBounds.set(0f, 0f, area.width(), area.height())
@@ -960,10 +992,16 @@ internal class FrostedRulerOverlayView @JvmOverloads constructor(
             return
         }
         if (source.width <= 0 || source.height <= 0) {
+            if (!captureBitmapReady) {
+                scheduleSurfaceSnapshotRetry()
+            }
             return
         }
         val now = SystemClock.uptimeMillis()
         if (now - lastCaptureMs < SURFACE_CAPTURE_INTERVAL_MS) {
+            if (!captureBitmapReady) {
+                scheduleSurfaceSnapshotRetry(SURFACE_CAPTURE_INTERVAL_MS - (now - lastCaptureMs))
+            }
             return
         }
         val captureWidth = max(1, area.width().roundToInt())
@@ -976,6 +1014,7 @@ internal class FrostedRulerOverlayView @JvmOverloads constructor(
         ) {
             current?.recycle()
             captureBitmap = Bitmap.createBitmap(captureWidth, captureHeight, Bitmap.Config.ARGB_8888)
+            captureBitmapReady = false
         }
         val target = captureBitmap ?: return
         val overlayLocation = IntArray(2)
@@ -991,6 +1030,9 @@ internal class FrostedRulerOverlayView @JvmOverloads constructor(
             (top + captureHeight).coerceIn(1, source.height)
         )
         if (pixelCopyRect.width() <= 0 || pixelCopyRect.height() <= 0) {
+            if (!captureBitmapReady) {
+                scheduleSurfaceSnapshotRetry()
+            }
             return
         }
         captureInFlight = true
@@ -999,12 +1041,28 @@ internal class FrostedRulerOverlayView @JvmOverloads constructor(
             PixelCopy.request(source, pixelCopyRect, target, { result ->
                 captureInFlight = false
                 if (result == PixelCopy.SUCCESS) {
+                    captureBitmapReady = true
+                    removeCallbacks(surfaceSnapshotRetryRunnable)
+                    surfaceSnapshotRetryPosted = false
                     invalidate()
+                } else {
+                    captureBitmapReady = false
+                    scheduleSurfaceSnapshotRetry()
                 }
             }, pixelCopyHandler)
         }.onFailure {
             captureInFlight = false
+            captureBitmapReady = false
+            scheduleSurfaceSnapshotRetry()
         }
+    }
+
+    private fun scheduleSurfaceSnapshotRetry(delayMs: Long = SURFACE_CAPTURE_INTERVAL_MS) {
+        if (surfaceSnapshotRetryPosted) {
+            return
+        }
+        surfaceSnapshotRetryPosted = true
+        postDelayed(surfaceSnapshotRetryRunnable, delayMs.coerceAtLeast(1L))
     }
 
     private fun drawRulerImpacts(canvas: Canvas, area: RectF): Boolean {
@@ -1148,13 +1206,10 @@ internal class FrostedRulerOverlayView @JvmOverloads constructor(
                     } else {
                         length
                     }
-                    tickPaint.color = Color.argb(
+                    tickPaint.color = FrostedGlassStyle.rulerHighlight(
                         (WaterfallMetrics.C_TICK_ALPHA * line.ratio)
                             .roundToInt()
-                            .coerceIn(0, WaterfallMetrics.C_TICK_ALPHA),
-                        255,
-                        255,
-                        255
+                            .coerceIn(0, WaterfallMetrics.C_TICK_ALPHA)
                     )
                     tickPaint.strokeWidth = line.strokeRatio?.let { 1.4f * it } ?: if (line.isC) 1.4f else 1f
                     val alignedX = drawPixelAlignedVerticalLine(canvas, x, area.top, area.top + tickLength, tickPaint)
@@ -1187,7 +1242,7 @@ internal class FrostedRulerOverlayView @JvmOverloads constructor(
             } else {
                 tick.length
             }
-            tickPaint.color = Color.argb(tick.alpha, 255, 255, 255)
+            tickPaint.color = FrostedGlassStyle.rulerHighlight(tick.alpha)
             tickPaint.strokeWidth = tick.strokeWidth
             val alignedX = drawPixelAlignedVerticalLine(canvas, x, area.top, area.top + tickLength, tickPaint)
             if (isC4) {
@@ -1233,7 +1288,8 @@ internal fun Canvas.drawDarkFrostedPanel(
     hairlineAlpha: Int,
     shadowAlpha: Int,
     topHighlightAlpha: Int = 18,
-    drawTopEdge: Boolean = true
+    drawTopEdge: Boolean = true,
+    highlightColor: (Int) -> Int = FrostedGlassStyle::highlight
 ) {
     paint.shader = LinearGradient(
         0f,
@@ -1241,7 +1297,7 @@ internal fun Canvas.drawDarkFrostedPanel(
         0f,
         bounds.bottom,
         intArrayOf(
-            FrostedGlassStyle.highlight(topHighlightAlpha),
+            highlightColor(topHighlightAlpha),
             FrostedGlassStyle.darkTop(topAlpha),
             FrostedGlassStyle.darkBottom(bottomAlpha)
         ),
@@ -1251,7 +1307,7 @@ internal fun Canvas.drawDarkFrostedPanel(
     drawRect(bounds, paint)
     paint.shader = null
     if (drawTopEdge) {
-        paint.color = FrostedGlassStyle.highlight(hairlineAlpha)
+        paint.color = highlightColor(hairlineAlpha)
         drawRect(bounds.left, bounds.top, bounds.right, bounds.top + 1f, paint)
         paint.color = FrostedGlassStyle.shadow(shadowAlpha)
         drawRect(bounds.left, bounds.top - 2f, bounds.right, bounds.top, paint)

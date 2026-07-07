@@ -94,14 +94,15 @@ class CanvasWaterfallView @JvmOverloads constructor(
     private var lastKeyboardGlassRefreshNanos = 0L
     private var keyboardGlassCacheSignature = Long.MIN_VALUE
     private var keyboardGlassRevision = 0L
+    private var keyboardGlassWarmupFramesRemaining = KEYBOARD_GLASS_WARMUP_FRAMES
     private var keyboardGrainBitmap: Bitmap? = null
     private var keyboardGrainShader: BitmapShader? = null
     private val keyboardLinePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = Color.argb(110, 255, 255, 255)
+        color = FrostedGlassStyle.rulerHighlight(110)
         strokeWidth = 1f
     }
     private val keyboardTextPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = Color.argb(184, 255, 255, 255)
+        color = FrostedGlassStyle.rulerHighlight(WaterfallMetrics.C_TICK_ALPHA)
         textAlign = Paint.Align.CENTER
         textSize = 10f * resources.displayMetrics.density
     }
@@ -431,6 +432,11 @@ class CanvasWaterfallView @JvmOverloads constructor(
             particles.isNotEmpty() ||
             keyImpacts.isNotEmpty() ||
             manualNotes.isNotEmpty()
+    }
+
+    override fun onAttachedToWindow() {
+        super.onAttachedToWindow()
+        beginKeyboardGlassWarmup()
     }
 
     override fun requestHighRefreshFrame(frameTimeNanos: Long) {
@@ -798,11 +804,8 @@ class CanvasWaterfallView @JvmOverloads constructor(
             } else {
                 length
             }
-            keyboardLinePaint.color = Color.argb(
-                (WaterfallMetrics.C_TICK_ALPHA * ratio).roundToInt().coerceIn(0, WaterfallMetrics.C_TICK_ALPHA),
-                255,
-                255,
-                255
+            keyboardLinePaint.color = FrostedGlassStyle.rulerHighlight(
+                (WaterfallMetrics.C_TICK_ALPHA * ratio).roundToInt().coerceIn(0, WaterfallMetrics.C_TICK_ALPHA)
             )
             keyboardLinePaint.strokeWidth = if (hasStrokeRatio) 1.4f * strokeRatio else if (isC) 1.4f else 1f
             val alignedX = drawPixelAlignedVerticalLine(canvas, x, top, top + tickLength, keyboardLinePaint)
@@ -843,7 +846,7 @@ class CanvasWaterfallView @JvmOverloads constructor(
             } else {
                 tick.length
             }
-            keyboardLinePaint.color = Color.argb(tick.alpha, 255, 255, 255)
+            keyboardLinePaint.color = FrostedGlassStyle.rulerHighlight(tick.alpha)
             keyboardLinePaint.strokeWidth = tick.strokeWidth
             val alignedX = drawPixelAlignedVerticalLine(canvas, x, top, top + tickLength, keyboardLinePaint)
             if (isC4) {
@@ -912,6 +915,7 @@ class CanvasWaterfallView @JvmOverloads constructor(
         if (refreshContent && backdrop != null && !backdrop.isRecycled) {
             keyboardGlassCacheSignature = signature
             lastKeyboardGlassRefreshNanos = now
+            completeKeyboardGlassWarmupFrame()
         }
         drawKeyboardFrostVeil(canvas, keyboardGlassBounds)
         canvas.drawDarkFrostedPanel(
@@ -921,7 +925,8 @@ class CanvasWaterfallView @JvmOverloads constructor(
             bottomAlpha = FrostedGlassStyle.RULER_BOTTOM_ALPHA,
             hairlineAlpha = FrostedGlassStyle.RULER_HAIRLINE_ALPHA,
             shadowAlpha = FrostedGlassStyle.RULER_SHADOW_ALPHA,
-            topHighlightAlpha = 36
+            topHighlightAlpha = 36,
+            highlightColor = FrostedGlassStyle::rulerHighlight
         )
         drawKeyboardGlassSheen(canvas, keyboardGlassBounds)
         drawKeyboardFineGrain(canvas, keyboardGlassBounds)
@@ -930,6 +935,9 @@ class CanvasWaterfallView @JvmOverloads constructor(
 
     private fun shouldRefreshKeyboardGlass(now: Long, signature: Long): Boolean {
         if (signature != keyboardGlassCacheSignature || keyboardBackdropBitmap == null) {
+            return true
+        }
+        if (keyboardGlassWarmupFramesRemaining > 0) {
             return true
         }
         if (!hasHighRefreshDemand()) {
@@ -969,8 +977,24 @@ class CanvasWaterfallView @JvmOverloads constructor(
         keyboardGlassRevision++
         keyboardGlassCacheSignature = Long.MIN_VALUE
         lastKeyboardGlassRefreshNanos = 0L
+        beginKeyboardGlassWarmup()
         nativeGlassBlur?.resetCache()
         legacyGlassBlur.resetCache()
+    }
+
+    private fun beginKeyboardGlassWarmup(frames: Int = KEYBOARD_GLASS_WARMUP_FRAMES) {
+        keyboardGlassWarmupFramesRemaining = max(keyboardGlassWarmupFramesRemaining, frames)
+        postInvalidateOnAnimation()
+    }
+
+    private fun completeKeyboardGlassWarmupFrame() {
+        if (keyboardGlassWarmupFramesRemaining <= 0) {
+            return
+        }
+        keyboardGlassWarmupFramesRemaining--
+        if (keyboardGlassWarmupFramesRemaining > 0) {
+            postInvalidateOnAnimation()
+        }
     }
 
     private fun drawKeyboardFrostVeil(canvas: Canvas, area: RectF) {
@@ -984,7 +1008,7 @@ class CanvasWaterfallView @JvmOverloads constructor(
             area.bottom,
             intArrayOf(
                 FrostedGlassStyle.coolHighlight(74),
-                FrostedGlassStyle.highlight(38),
+                FrostedGlassStyle.rulerHighlight(38),
                 FrostedGlassStyle.coolHighlight(18),
                 FrostedGlassStyle.shadow(22)
             ),
@@ -1005,7 +1029,7 @@ class CanvasWaterfallView @JvmOverloads constructor(
             area.right,
             area.bottom,
             intArrayOf(
-                FrostedGlassStyle.highlight(96),
+                FrostedGlassStyle.rulerHighlight(96),
                 FrostedGlassStyle.coolHighlight(42),
                 Color.TRANSPARENT,
                 FrostedGlassStyle.shadow(30)
@@ -1036,7 +1060,7 @@ class CanvasWaterfallView @JvmOverloads constructor(
             0f,
             area.top + topDepth,
             intArrayOf(
-                FrostedGlassStyle.highlight(118),
+                FrostedGlassStyle.rulerHighlight(118),
                 FrostedGlassStyle.coolHighlight(28),
                 Color.TRANSPARENT
             ),
@@ -1053,7 +1077,7 @@ class CanvasWaterfallView @JvmOverloads constructor(
             area.bottom,
             intArrayOf(
                 Color.TRANSPARENT,
-                FrostedGlassStyle.highlight(34),
+                FrostedGlassStyle.rulerHighlight(34),
                 FrostedGlassStyle.shadow(86)
             ),
             floatArrayOf(0f, 0.34f, 1f),
@@ -1061,7 +1085,7 @@ class CanvasWaterfallView @JvmOverloads constructor(
         )
         canvas.drawRect(area.left, depthTop, area.right, area.bottom, keyboardEdgePaint)
         keyboardEdgePaint.shader = null
-        keyboardEdgePaint.color = FrostedGlassStyle.highlight(FrostedGlassStyle.RULER_HAIRLINE_ALPHA)
+        keyboardEdgePaint.color = FrostedGlassStyle.rulerHighlight(FrostedGlassStyle.RULER_HAIRLINE_ALPHA)
         canvas.drawRect(area.left, area.top, area.right, area.top + 1f, keyboardEdgePaint)
         keyboardEdgePaint.color = FrostedGlassStyle.shadow(72)
         canvas.drawRect(area.left, area.bottom - 1f, area.right, area.bottom, keyboardEdgePaint)
@@ -1100,6 +1124,7 @@ class CanvasWaterfallView @JvmOverloads constructor(
         keyboardBackdropBitmap?.recycle()
         keyboardBackdropBitmap = null
         keyboardBackdropCanvas = null
+        keyboardGlassWarmupFramesRemaining = 0
         nativeGlassBlur?.resetCache()
         keyboardGrainBitmap?.recycle()
         keyboardGrainBitmap = null
@@ -1665,5 +1690,6 @@ class CanvasWaterfallView @JvmOverloads constructor(
         private val TRACK_HUES = floatArrayOf(190f, 28f, 132f, 48f, 264f, 158f, 330f, 88f)
         private const val NOTE_TONE_VELOCITY_BUCKETS = 128
         private const val KEYBOARD_GLASS_ACTIVE_REFRESH_NANOS = 33_333_333L
+        private const val KEYBOARD_GLASS_WARMUP_FRAMES = 12
     }
 }

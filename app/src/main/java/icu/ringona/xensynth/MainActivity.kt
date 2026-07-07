@@ -24,12 +24,16 @@ import android.widget.LinearLayout
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.result.contract.ActivityResultContract
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.basicMarquee
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -67,10 +71,12 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.draw.scale
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
@@ -89,6 +95,7 @@ import androidx.compose.ui.platform.ComposeView
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.ViewCompositionStrategy
 import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.TextRange
@@ -129,6 +136,7 @@ import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import kotlin.math.abs
 import kotlin.math.roundToInt
 
@@ -854,6 +862,7 @@ class MainActivity : ComponentActivity(), RenderFramePacer.InteractionListener {
                         onTouchKeyboardProgramMidiOverrideChanged = ::onTouchKeyboardProgramMidiOverrideChanged,
                         onAudioLatencyChanged = ::onAudioLatencyChanged,
                         onReverbChanged = ::onReverbChanged,
+                        onResetSettingsToDefaults = ::restoreDefaultSettings,
                         onRefreshRateExperimentSelected = ::onRefreshRateExperimentSelected,
                         onFocusClearerChanged = { clearToolbarFocus = it }
                     )
@@ -1221,6 +1230,33 @@ class MainActivity : ComponentActivity(), RenderFramePacer.InteractionListener {
         if (!leadInChanged) {
             updateWaterfallPlayheadFrame()
         }
+    }
+
+    private fun restoreDefaultSettings() {
+        clearCustomTuningIfNeeded()
+        isUserEditingEdo = true
+        try {
+            applyNativeEdo(EDO_DEFAULT, updateSeek = true)
+        } finally {
+            isUserEditingEdo = false
+        }
+        onSpeedProgressChanged(speedToProgress(1.0).toFloat())
+        if (::waterfallGestureController.isInitialized) {
+            onOffsetCentsChanged(0f)
+        }
+        applyVolumeGain(VOLUME_GAIN_DEFAULT)
+        updateTouchKeyboardProgram(GM_PROGRAM_DEFAULT)
+        onTouchKeyboardProgramMidiOverrideChanged(GM_PROGRAM_CONTROLS_MIDI_DEFAULT)
+        applyReverbMix(REVERB_DEFAULT)
+        applyAudioLatency(AUDIO_LATENCY_DEFAULT_MS, resetScheduler = true)
+        settingsPreferences().edit()
+            .putInt(PREF_EDO, EDO_DEFAULT)
+            .putInt(PREF_TOUCH_KEYBOARD_PROGRAM, GM_PROGRAM_DEFAULT)
+            .putBoolean(PREF_TOUCH_KEYBOARD_PROGRAM_CONTROLS_MIDI, GM_PROGRAM_CONTROLS_MIDI_DEFAULT)
+            .putInt(PREF_REVERB, REVERB_DEFAULT)
+            .putInt(PREF_AUDIO_LATENCY_MS, AUDIO_LATENCY_DEFAULT_MS)
+            .apply()
+        Toast.makeText(this, "Settings restored to defaults", Toast.LENGTH_SHORT).show()
     }
 
     private fun roundedAudioLatencyMs(value: Float): Int {
@@ -1951,6 +1987,8 @@ class MainActivity : ComponentActivity(), RenderFramePacer.InteractionListener {
         const val AUDIO_LATENCY_DEFAULT_MS = 0
         const val VOLUME_GESTURE_VISIBLE_MS = 900L
         const val RESET_PLAY_SUPPRESSION_MS = 350L
+        const val SETTINGS_RESET_SPIN_MS = 900L
+        const val SETTINGS_RESET_SPIN_DEGREES = 1080f
         const val HIGH_REFRESH_KEEPALIVE_MS = 1_000L
         const val FORCE_WINDOW_REFRESH_ACTIVE = false
         const val HIGH_REFRESH_UI_REQUEST_NANOS = 250_000_000L
@@ -2076,6 +2114,7 @@ private fun XenToolbar(
     onTouchKeyboardProgramMidiOverrideChanged: (Boolean) -> Unit,
     onAudioLatencyChanged: (Float) -> Unit,
     onReverbChanged: (Float) -> Unit,
+    onResetSettingsToDefaults: () -> Unit,
     onRefreshRateExperimentSelected: (String) -> Unit,
     onFocusClearerChanged: ((() -> Unit)?) -> Unit
 ) {
@@ -2234,6 +2273,7 @@ private fun XenToolbar(
                 onTouchKeyboardProgramMidiOverrideChanged = onTouchKeyboardProgramMidiOverrideChanged,
                 onAudioLatencyChanged = onAudioLatencyChanged,
                 onReverbChanged = onReverbChanged,
+                onResetSettingsToDefaults = onResetSettingsToDefaults,
                 onProgramTextFieldBoundsChanged = { programTextFieldBounds = it }
             )
             if (SHOW_REFRESH_DIAGNOSTIC_CONTROLS) {
@@ -2788,6 +2828,7 @@ private fun EditableMetricSliderTile(
     }
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun ToolbarSettingsMenu(
     state: ShellUiState,
@@ -2796,15 +2837,73 @@ private fun ToolbarSettingsMenu(
     onTouchKeyboardProgramMidiOverrideChanged: (Boolean) -> Unit,
     onAudioLatencyChanged: (Float) -> Unit,
     onReverbChanged: (Float) -> Unit,
+    onResetSettingsToDefaults: () -> Unit,
     onProgramTextFieldBoundsChanged: (Rect?) -> Unit
 ) {
     var expanded by remember { mutableStateOf(false) }
+    var audioLatencySliderValue by remember { mutableStateOf(state.audioLatencyMs.toFloat()) }
+    var audioLatencyDragging by remember { mutableStateOf(false) }
+    var resettingSettings by remember { mutableStateOf(false) }
+    val gearRotation = remember { Animatable(0f) }
+    val resetScope = rememberCoroutineScope()
     val focusManager = LocalFocusManager.current
     val popupOffsetX = ((48 - COMPACT_SLIDER_WIDTH_DP) / 2).dp
+    val displayedAudioLatencyMs = (
+        (audioLatencySliderValue / MainActivity.AUDIO_LATENCY_STEP_MS).roundToInt() *
+            MainActivity.AUDIO_LATENCY_STEP_MS
+        )
+        .coerceIn(MainActivity.AUDIO_LATENCY_MIN_MS, MainActivity.AUDIO_LATENCY_MAX_MS)
+
+    fun commitAudioLatency() {
+        audioLatencyDragging = false
+        onAudioLatencyChanged(audioLatencySliderValue)
+    }
 
     LaunchedEffect(expanded) {
         if (!expanded) {
             onProgramTextFieldBoundsChanged(null)
+            if (audioLatencyDragging) {
+                commitAudioLatency()
+            }
+        }
+    }
+
+    LaunchedEffect(state.audioLatencyMs) {
+        if (!audioLatencyDragging) {
+            audioLatencySliderValue = state.audioLatencyMs.toFloat()
+        }
+    }
+
+    fun toggleSettingsMenu() {
+        if (resettingSettings) {
+            return
+        }
+        if (expanded) {
+            focusManager.clearFocus()
+        }
+        expanded = !expanded
+    }
+
+    fun resetSettingsAfterGearSpin() {
+        if (resettingSettings) {
+            return
+        }
+        focusManager.clearFocus()
+        expanded = false
+        resettingSettings = true
+        resetScope.launch {
+            val startRotation = gearRotation.value % 360f
+            gearRotation.snapTo(startRotation)
+            gearRotation.animateTo(
+                targetValue = startRotation + MainActivity.SETTINGS_RESET_SPIN_DEGREES,
+                animationSpec = tween(
+                    durationMillis = MainActivity.SETTINGS_RESET_SPIN_MS.toInt(),
+                    easing = LinearEasing
+                )
+            )
+            gearRotation.snapTo(0f)
+            onResetSettingsToDefaults()
+            resettingSettings = false
         }
     }
 
@@ -2814,26 +2913,27 @@ private fun ToolbarSettingsMenu(
             .height(44.dp),
         contentAlignment = Alignment.Center
     ) {
-        FilledIconButton(
-            onClick = {
-                if (expanded) {
-                    focusManager.clearFocus()
-                }
-                expanded = !expanded
-            },
-            modifier = Modifier.size(width = 48.dp, height = 44.dp),
-            shape = RoundedCornerShape(8.dp),
-            colors = IconButtonDefaults.filledIconButtonColors(
-                containerColor = if (expanded) XenActive else XenButton,
-                contentColor = ComposeColor.White,
-                disabledContainerColor = XenPanel,
-                disabledContentColor = XenMuted
-            )
+        val settingsButtonShape = RoundedCornerShape(8.dp)
+        Box(
+            modifier = Modifier
+                .size(width = 48.dp, height = 44.dp)
+                .clip(settingsButtonShape)
+                .background(if (expanded || resettingSettings) XenActive else XenButton)
+                .combinedClickable(
+                    enabled = true,
+                    role = Role.Button,
+                    onClick = ::toggleSettingsMenu,
+                    onLongClick = ::resetSettingsAfterGearSpin
+                ),
+            contentAlignment = Alignment.Center
         ) {
             Icon(
                 painter = painterResource(R.drawable.ic_settings_24),
                 contentDescription = "Settings",
-                modifier = Modifier.size(22.dp)
+                tint = ComposeColor.White,
+                modifier = Modifier
+                    .size(22.dp)
+                    .rotate(gearRotation.value)
             )
         }
         DropdownMenu(
@@ -2874,12 +2974,16 @@ private fun ToolbarSettingsMenu(
             )
             SettingsValueRow(
                 label = "LATENCY",
-                value = "${state.audioLatencyMs} ms",
+                value = "$displayedAudioLatencyMs ms",
                 enabled = true
             )
             CompactSlider(
-                value = state.audioLatencyMs.toFloat(),
-                onValueChange = onAudioLatencyChanged,
+                value = audioLatencySliderValue,
+                onValueChange = { value ->
+                    audioLatencyDragging = true
+                    audioLatencySliderValue = value
+                },
+                onValueChangeFinished = ::commitAudioLatency,
                 range = MainActivity.AUDIO_LATENCY_MIN_MS.toFloat()..
                     MainActivity.AUDIO_LATENCY_MAX_MS.toFloat(),
                 steps = (MainActivity.AUDIO_LATENCY_MAX_MS - MainActivity.AUDIO_LATENCY_MIN_MS) /
@@ -3079,6 +3183,7 @@ private fun MidiProgramOverrideToggle(
 private fun CompactSlider(
     value: Float,
     onValueChange: (Float) -> Unit,
+    onValueChangeFinished: (() -> Unit)? = null,
     range: ClosedFloatingPointRange<Float>,
     steps: Int,
     enabled: Boolean,
@@ -3094,6 +3199,7 @@ private fun CompactSlider(
         Slider(
             value = value,
             onValueChange = onValueChange,
+            onValueChangeFinished = onValueChangeFinished,
             valueRange = range,
             steps = steps,
             enabled = enabled,

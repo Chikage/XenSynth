@@ -54,7 +54,7 @@ class WaterfallModelTest {
         val y = layout.timeToY(notes.first().start, height = 1000f, playhead = displayPlayhead)
 
         assertEquals(
-            layout.keyboardTop(1000f) - WaterfallMetrics.INITIAL_NOTE_RULER_GAP_DP * layout.density,
+            layout.keyboardTop(1000f) - WaterfallMetrics.INITIAL_NOTE_RULER_GAP_PX,
             y,
             0.0001f
         )
@@ -71,7 +71,7 @@ class WaterfallModelTest {
             density = 1f
         )
 
-        assertEquals(0.0, layout.initialNoteDisplayPlayhead(listOf(note(start = 0.2, end = 0.5))), 0.0001)
+        assertEquals(0.0, layout.initialNoteDisplayPlayhead(listOf(note(start = 0.4, end = 0.5))), 0.0001)
     }
 
     @Test
@@ -106,7 +106,7 @@ class WaterfallModelTest {
 
         assertEquals(noteY, measureY, 0.0001f)
         assertEquals(
-            layout.keyboardTop(1000f) - WaterfallMetrics.INITIAL_NOTE_RULER_GAP_DP * layout.density,
+            layout.keyboardTop(1000f) - WaterfallMetrics.INITIAL_NOTE_RULER_GAP_PX,
             measureY,
             0.0001f
         )
@@ -134,7 +134,7 @@ class WaterfallModelTest {
     @Test
     fun negativeLeadInPositionsTimelineAboveRuler() {
         val layout = WaterfallLayout(
-            playheadSeconds = -0.16,
+            playheadSeconds = -0.36,
             pixelsPerSecond = 100.0,
             pitchZoomScale = WaterfallMetrics.PITCH_ZOOM_DEFAULT,
             pitchPanSemitones = 0.0,
@@ -144,7 +144,11 @@ class WaterfallModelTest {
 
         val startY = layout.timeToY(0.0, height = 1000f)
 
-        assertEquals(layout.keyboardTop(1000f) - 16f, startY, 0.0001f)
+        assertEquals(
+            layout.keyboardTop(1000f) - WaterfallMetrics.INITIAL_NOTE_RULER_GAP_PX,
+            startY,
+            0.0001f
+        )
     }
 
     @Test

@@ -43,7 +43,7 @@ object WaterfallMetrics {
     const val NOTE_MIN_WIDTH_PX = 2f
     const val NOTE_MAX_WIDTH_PX = 7f
     const val NOTE_MIN_HEIGHT_PX = 4f
-    const val INITIAL_NOTE_RULER_GAP_DP = 16f
+    const val INITIAL_NOTE_RULER_GAP_PX = 36f
     const val INITIAL_NOTE_GAP_PLAYHEAD_EPSILON = 0.001
     const val IMPACT_EXTRA_WIDTH = 3.0f
     const val C4_LABEL_RESERVED_HEIGHT_DP = 21f
@@ -230,7 +230,7 @@ data class WaterfallLayout(
         if (playheadSeconds > WaterfallMetrics.INITIAL_NOTE_GAP_PLAYHEAD_EPSILON) {
             return playheadSeconds
         }
-        val gapPx = WaterfallMetrics.INITIAL_NOTE_RULER_GAP_DP * density
+        val gapPx = WaterfallMetrics.INITIAL_NOTE_RULER_GAP_PX
         val currentGapPx = ((firstStart - playheadSeconds) * pixelsPerSecond).coerceAtLeast(0.0)
         if (currentGapPx >= gapPx) {
             return playheadSeconds
