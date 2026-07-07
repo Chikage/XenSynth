@@ -453,9 +453,6 @@ class MainActivity : ComponentActivity(), RenderFramePacer.InteractionListener {
         )
         requestedWindowRefreshRate = if (rateMode.windowRefreshRateEnabled) requestedFrameRate else 0f
         applyUiRequestedFrameRate(requestedFrameRate, force = force)
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) {
-            return
-        }
         if (!rateMode.displayModeEnabled) {
             clearPreferredDisplayModeId()
             return
@@ -523,7 +520,7 @@ class MainActivity : ComponentActivity(), RenderFramePacer.InteractionListener {
         requestedWindowRefreshRate = 0f
         val params = window.attributes
         var changed = false
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M && params.preferredDisplayModeId != 0) {
+        if (params.preferredDisplayModeId != 0) {
             params.preferredDisplayModeId = 0
             changed = true
         }
@@ -538,7 +535,7 @@ class MainActivity : ComponentActivity(), RenderFramePacer.InteractionListener {
     }
 
     private fun clearPreferredDisplayModeId() {
-        if (requestedDisplayModeId == 0 || Build.VERSION.SDK_INT < Build.VERSION_CODES.M) {
+        if (requestedDisplayModeId == 0) {
             return
         }
         requestedDisplayModeId = 0
@@ -631,14 +628,10 @@ class MainActivity : ComponentActivity(), RenderFramePacer.InteractionListener {
             return
         }
         val display = displayForRefreshMode()
-        val activeMode = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-            display?.mode?.let { mode ->
-                "${mode.physicalWidth}x${mode.physicalHeight}@" +
-                    "${HighRefreshRatePolicy.formatFrameRate(mode.refreshRate)}Hz"
-            } ?: "unknown"
-        } else {
-            "unknown"
-        }
+        val activeMode = display?.mode?.let { mode ->
+            "${mode.physicalWidth}x${mode.physicalHeight}@" +
+                "${HighRefreshRatePolicy.formatFrameRate(mode.refreshRate)}Hz"
+        } ?: "unknown"
         val lastDeltaNanos = if (previousFrameNanos > 0L) {
             frameTimeNanos - previousFrameNanos
         } else {
@@ -713,10 +706,8 @@ class MainActivity : ComponentActivity(), RenderFramePacer.InteractionListener {
     }
 
     private fun displayModeKey(display: Display?): String {
-        if (display == null || Build.VERSION.SDK_INT < Build.VERSION_CODES.M) {
-            return display?.let {
-                "${HighRefreshRatePolicy.formatFrameRate(it.refreshRate)}Hz"
-            } ?: "unknown"
+        if (display == null) {
+            return "unknown"
         }
         val mode = display.mode ?: return "unknown"
         return "id=${mode.modeId} " +

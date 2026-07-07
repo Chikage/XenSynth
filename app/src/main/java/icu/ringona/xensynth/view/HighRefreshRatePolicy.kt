@@ -31,7 +31,7 @@ object HighRefreshRatePolicy {
     }
 
     fun bestDisplayMode(display: Display?): Display.Mode? {
-        if (display == null || Build.VERSION.SDK_INT < Build.VERSION_CODES.M) {
+        if (display == null) {
             return null
         }
         val currentMode = display.mode
@@ -60,14 +60,12 @@ object HighRefreshRatePolicy {
             return "unknown"
         }
         val rates = linkedSetOf(sanitizeRefreshRate(display.refreshRate))
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-            val currentMode = display.mode
-            val currentWidth = currentMode?.physicalWidth ?: 0
-            val currentHeight = currentMode?.physicalHeight ?: 0
-            display.supportedModes?.forEach { mode ->
-                if (mode.matchesSize(currentWidth, currentHeight)) {
-                    rates += mode.supportedRefreshRates()
-                }
+        val currentMode = display.mode
+        val currentWidth = currentMode?.physicalWidth ?: 0
+        val currentHeight = currentMode?.physicalHeight ?: 0
+        display.supportedModes?.forEach { mode ->
+            if (mode.matchesSize(currentWidth, currentHeight)) {
+                rates += mode.supportedRefreshRates()
             }
         }
         return rates.sorted().joinToString(prefix = "[", postfix = "]") { formatFrameRate(it) }
@@ -192,14 +190,12 @@ object HighRefreshRatePolicy {
 
     private fun supportedRefreshRates(display: Display): List<Float> {
         val rates = linkedSetOf(sanitizeRefreshRate(display.refreshRate))
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-            val currentMode = display.mode
-            val currentWidth = currentMode?.physicalWidth ?: 0
-            val currentHeight = currentMode?.physicalHeight ?: 0
-            display.supportedModes?.forEach { mode ->
-                if (mode.matchesSize(currentWidth, currentHeight)) {
-                    rates += mode.supportedRefreshRates()
-                }
+        val currentMode = display.mode
+        val currentWidth = currentMode?.physicalWidth ?: 0
+        val currentHeight = currentMode?.physicalHeight ?: 0
+        display.supportedModes?.forEach { mode ->
+            if (mode.matchesSize(currentWidth, currentHeight)) {
+                rates += mode.supportedRefreshRates()
             }
         }
         return rates
