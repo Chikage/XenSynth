@@ -71,6 +71,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.scale
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Rect
@@ -133,8 +134,6 @@ import kotlin.math.roundToInt
 
 private const val COMPACT_SLIDER_WIDTH_DP = 184
 private const val TOOLBAR_TITLE_MAX_WIDTH_DP = 192
-private const val AUDIO_LATENCY_MAX_MS = 500
-private const val AUDIO_LATENCY_STEP_MS = 5
 private const val TOOLBAR_PLAYHEAD_UPDATE_NANOS = 100_000_000L
 private const val SHOW_REFRESH_DIAGNOSTIC_CONTROLS = false
 
@@ -249,6 +248,7 @@ class MainActivity : ComponentActivity(), RenderFramePacer.InteractionListener {
     private var playbackStartSuppressedUntil = 0L
     private var volumeGain = VOLUME_GAIN_DEFAULT
     private var reverbValue = REVERB_DEFAULT
+    private var audioLatencyMs = AUDIO_LATENCY_DEFAULT_MS
     private val sampleLoaderExecutor: ExecutorService = Executors.newSingleThreadExecutor()
     private val destroyed = AtomicBoolean(false)
     private lateinit var waterfallGestureController: WaterfallGestureController
@@ -300,10 +300,13 @@ class MainActivity : ComponentActivity(), RenderFramePacer.InteractionListener {
         defaultSoundFontLoader = DefaultSoundFontLoader(cacheDir, assets)
         defaultScaleGuide = ScaleGuide.fromResources(this)
         currentScaleGuide = defaultScaleGuide
-        nativeEdo = loadPersistedEdo()
+        loadPersistedSettings()
         refreshRateExperimentMode = DEFAULT_REFRESH_RATE_EXPERIMENT_MODE
         shellUiState.refreshRateExperimentLabel = refreshRateExperimentMode.toolbarLabel
         playbackUi.updateEdo(nativeEdo, updateProgress = true)
+        playbackUi.updateTouchKeyboardProgram(touchKeyboardProgram)
+        playbackUi.updateTouchKeyboardProgramMidiOverride(touchKeyboardProgramControlsMidi)
+        applyAudioLatency(audioLatencyMs, resetScheduler = false)
         configureFullscreen()
         RenderFramePacer.addInteractionListener(this)
         setKeepScreenAwake(true)
@@ -815,6 +818,7 @@ class MainActivity : ComponentActivity(), RenderFramePacer.InteractionListener {
                         onTouchKeyboardProgramChanged = ::onTouchKeyboardProgramProgressChanged,
                         onTouchKeyboardProgramTextChanged = ::onTouchKeyboardProgramTextChanged,
                         onTouchKeyboardProgramMidiOverrideChanged = ::onTouchKeyboardProgramMidiOverrideChanged,
+                        onAudioLatencyChanged = ::onAudioLatencyChanged,
                         onReverbChanged = ::onReverbChanged,
                         onRefreshRateExperimentSelected = ::onRefreshRateExperimentSelected,
                         onFocusClearerChanged = { clearToolbarFocus = it }
@@ -1127,17 +1131,63 @@ class MainActivity : ComponentActivity(), RenderFramePacer.InteractionListener {
     }
 
     private fun updateTouchKeyboardProgram(value: Int) {
-        touchKeyboardProgram = value.coerceIn(GM_PROGRAM_MIN, GM_PROGRAM_MAX)
-        playbackUi.updateTouchKeyboardProgram(touchKeyboardProgram)
+        val next = value.coerceIn(GM_PROGRAM_MIN, GM_PROGRAM_MAX)
+        if (touchKeyboardProgram == next) {
+            playbackUi.updateTouchKeyboardProgram(next)
+            return
+        }
+        touchKeyboardProgram = next
+        playbackUi.updateTouchKeyboardProgram(next)
+        persistTouchKeyboardProgram(next)
     }
 
     private fun onTouchKeyboardProgramMidiOverrideChanged(enabled: Boolean) {
+        if (touchKeyboardProgramControlsMidi == enabled) {
+            playbackUi.updateTouchKeyboardProgramMidiOverride(enabled)
+            return
+        }
         touchKeyboardProgramControlsMidi = enabled
         playbackUi.updateTouchKeyboardProgramMidiOverride(enabled)
+        persistTouchKeyboardProgramMidiOverride(enabled)
+    }
+
+    private fun onAudioLatencyChanged(value: Float) {
+        val next = roundedAudioLatencyMs(value)
+        if (audioLatencyMs == next) {
+            return
+        }
+        applyAudioLatency(next, resetScheduler = true)
+        persistAudioLatency(next)
     }
 
     private fun onReverbChanged(progress: Float) {
-        applyReverbMix(progress.roundToInt())
+        val next = progress.roundToInt().coerceIn(REVERB_MIN, REVERB_MAX)
+        if (reverbValue == next) {
+            return
+        }
+        applyReverbMix(next)
+        persistReverb(next)
+    }
+
+    private fun applyAudioLatency(value: Int, resetScheduler: Boolean) {
+        val next = roundedAudioLatencyMs(value.toFloat())
+        val changed = audioLatencyMs != next
+        audioLatencyMs = next
+        nativePlayback.audioScheduleOffsetSeconds = next / 1_000.0
+        playbackUi.updateAudioLatency(next)
+        if (!resetScheduler || !changed) {
+            return
+        }
+        if (nativePlaying) {
+            nativePlayback.stopAudio()
+        }
+        resetNativeAudioScheduler()
+        updateWaterfallPlayheadFrame()
+    }
+
+    private fun roundedAudioLatencyMs(value: Float): Int {
+        return ((value / AUDIO_LATENCY_STEP_MS).roundToInt() * AUDIO_LATENCY_STEP_MS)
+            .coerceIn(AUDIO_LATENCY_MIN_MS, AUDIO_LATENCY_MAX_MS)
     }
 
     private fun onRefreshRateExperimentSelected(label: String) {
@@ -1360,16 +1410,52 @@ class MainActivity : ComponentActivity(), RenderFramePacer.InteractionListener {
         }
     }
 
-    private fun loadPersistedEdo(): Int {
-        return getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-            .getInt(PREF_EDO, EDO_DEFAULT)
+    private fun settingsPreferences() = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+
+    private fun loadPersistedSettings() {
+        val prefs = settingsPreferences()
+        nativeEdo = prefs.getInt(PREF_EDO, EDO_DEFAULT)
             .coerceIn(0, EDO_MAX)
+        touchKeyboardProgram = prefs.getInt(PREF_TOUCH_KEYBOARD_PROGRAM, GM_PROGRAM_DEFAULT)
+            .coerceIn(GM_PROGRAM_MIN, GM_PROGRAM_MAX)
+        touchKeyboardProgramControlsMidi = prefs.getBoolean(
+            PREF_TOUCH_KEYBOARD_PROGRAM_CONTROLS_MIDI,
+            GM_PROGRAM_CONTROLS_MIDI_DEFAULT
+        )
+        reverbValue = prefs.getInt(PREF_REVERB, REVERB_DEFAULT)
+            .coerceIn(REVERB_MIN, REVERB_MAX)
+        audioLatencyMs = roundedAudioLatencyMs(
+            prefs.getInt(PREF_AUDIO_LATENCY_MS, AUDIO_LATENCY_DEFAULT_MS).toFloat()
+        )
     }
 
     private fun persistEdo(value: Int) {
-        getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-            .edit()
+        settingsPreferences().edit()
             .putInt(PREF_EDO, value.coerceIn(0, EDO_MAX))
+            .apply()
+    }
+
+    private fun persistTouchKeyboardProgram(value: Int) {
+        settingsPreferences().edit()
+            .putInt(PREF_TOUCH_KEYBOARD_PROGRAM, value.coerceIn(GM_PROGRAM_MIN, GM_PROGRAM_MAX))
+            .apply()
+    }
+
+    private fun persistTouchKeyboardProgramMidiOverride(enabled: Boolean) {
+        settingsPreferences().edit()
+            .putBoolean(PREF_TOUCH_KEYBOARD_PROGRAM_CONTROLS_MIDI, enabled)
+            .apply()
+    }
+
+    private fun persistReverb(value: Int) {
+        settingsPreferences().edit()
+            .putInt(PREF_REVERB, value.coerceIn(REVERB_MIN, REVERB_MAX))
+            .apply()
+    }
+
+    private fun persistAudioLatency(value: Int) {
+        settingsPreferences().edit()
+            .putInt(PREF_AUDIO_LATENCY_MS, roundedAudioLatencyMs(value.toFloat()))
             .apply()
     }
 
@@ -1440,13 +1526,20 @@ class MainActivity : ComponentActivity(), RenderFramePacer.InteractionListener {
             pitchPanSemitones = state.pitchPanSemitones,
             waterfallOffsetCents = state.waterfallOffsetCents,
             density = resources.displayMetrics.density
-        ).initialNoteDisplayPlayhead(parsed.notes)
+        ).initialNoteDisplayPlayhead(parsed.notes) - positiveAudioLatencySecondsForLeadIn()
         if (visualPlayhead >= nativePlayheadSeconds) {
             return
         }
         nativePlayheadSeconds = visualPlayhead
         updateWaterfallPlayheadFrame()
         updateToolbarPlayheadIfNeeded(force = true)
+    }
+
+    private fun positiveAudioLatencySecondsForLeadIn(): Double {
+        if (nativePlayheadSeconds < -WaterfallMetrics.INITIAL_NOTE_GAP_PLAYHEAD_EPSILON) {
+            return 0.0
+        }
+        return audioLatencyMs.coerceAtLeast(0) / 1_000.0
     }
 
     private fun suppressPlaybackStartBriefly() {
@@ -1773,6 +1866,10 @@ class MainActivity : ComponentActivity(), RenderFramePacer.InteractionListener {
         const val EDO_MAX = 72
         const val PREFS_NAME = "xen_player_settings"
         const val PREF_EDO = "edo"
+        const val PREF_TOUCH_KEYBOARD_PROGRAM = "touch_keyboard_program"
+        const val PREF_TOUCH_KEYBOARD_PROGRAM_CONTROLS_MIDI = "touch_keyboard_program_controls_midi"
+        const val PREF_REVERB = "reverb"
+        const val PREF_AUDIO_LATENCY_MS = "audio_latency_ms"
         const val SPEED_MIN = 0.2
         const val SPEED_MAX = 4.0
         const val SPEED_STEP = 0.05
@@ -1783,6 +1880,10 @@ class MainActivity : ComponentActivity(), RenderFramePacer.InteractionListener {
         const val REVERB_MIN = 0
         const val REVERB_MAX = 100
         const val REVERB_DEFAULT = 54
+        const val AUDIO_LATENCY_MIN_MS = -100
+        const val AUDIO_LATENCY_MAX_MS = 700
+        const val AUDIO_LATENCY_STEP_MS = 5
+        const val AUDIO_LATENCY_DEFAULT_MS = 0
         const val VOLUME_GESTURE_VISIBLE_MS = 900L
         const val RESET_PLAY_SUPPRESSION_MS = 350L
         const val HIGH_REFRESH_KEEPALIVE_MS = 1_000L
@@ -1908,6 +2009,7 @@ private fun XenToolbar(
     onTouchKeyboardProgramChanged: (Float) -> Unit,
     onTouchKeyboardProgramTextChanged: (Int) -> Unit,
     onTouchKeyboardProgramMidiOverrideChanged: (Boolean) -> Unit,
+    onAudioLatencyChanged: (Float) -> Unit,
     onReverbChanged: (Float) -> Unit,
     onRefreshRateExperimentSelected: (String) -> Unit,
     onFocusClearerChanged: ((() -> Unit)?) -> Unit
@@ -2065,6 +2167,7 @@ private fun XenToolbar(
                 onTouchKeyboardProgramChanged = onTouchKeyboardProgramChanged,
                 onTouchKeyboardProgramTextChanged = onTouchKeyboardProgramTextChanged,
                 onTouchKeyboardProgramMidiOverrideChanged = onTouchKeyboardProgramMidiOverrideChanged,
+                onAudioLatencyChanged = onAudioLatencyChanged,
                 onReverbChanged = onReverbChanged,
                 onProgramTextFieldBoundsChanged = { programTextFieldBounds = it }
             )
@@ -2626,11 +2729,11 @@ private fun ToolbarSettingsMenu(
     onTouchKeyboardProgramChanged: (Float) -> Unit,
     onTouchKeyboardProgramTextChanged: (Int) -> Unit,
     onTouchKeyboardProgramMidiOverrideChanged: (Boolean) -> Unit,
+    onAudioLatencyChanged: (Float) -> Unit,
     onReverbChanged: (Float) -> Unit,
     onProgramTextFieldBoundsChanged: (Rect?) -> Unit
 ) {
     var expanded by remember { mutableStateOf(false) }
-    var audioLatencyMs by remember { mutableStateOf(0f) }
     val focusManager = LocalFocusManager.current
     val popupOffsetX = ((48 - COMPACT_SLIDER_WIDTH_DP) / 2).dp
 
@@ -2704,26 +2807,20 @@ private fun ToolbarSettingsMenu(
                 enabled = state.audioControlsEnabled,
                 onCheckedChange = onTouchKeyboardProgramMidiOverrideChanged
             )
-            SettingsMenuDivider()
             SettingsValueRow(
                 label = "LATENCY",
-                value = "${audioLatencyMs.roundToInt()} ms",
+                value = "${state.audioLatencyMs} ms",
                 enabled = true
             )
             CompactSlider(
-                value = audioLatencyMs,
-                onValueChange = { value ->
-                    audioLatencyMs = (value / AUDIO_LATENCY_STEP_MS)
-                        .roundToInt()
-                        .times(AUDIO_LATENCY_STEP_MS)
-                        .toFloat()
-                        .coerceIn(0f, AUDIO_LATENCY_MAX_MS.toFloat())
-                },
-                range = 0f..AUDIO_LATENCY_MAX_MS.toFloat(),
-                steps = AUDIO_LATENCY_MAX_MS / AUDIO_LATENCY_STEP_MS - 1,
+                value = state.audioLatencyMs.toFloat(),
+                onValueChange = onAudioLatencyChanged,
+                range = MainActivity.AUDIO_LATENCY_MIN_MS.toFloat()..
+                    MainActivity.AUDIO_LATENCY_MAX_MS.toFloat(),
+                steps = (MainActivity.AUDIO_LATENCY_MAX_MS - MainActivity.AUDIO_LATENCY_MIN_MS) /
+                    MainActivity.AUDIO_LATENCY_STEP_MS - 1,
                 enabled = true
             )
-            SettingsMenuDivider()
             SettingsValueRow(
                 label = "REVERB",
                 value = "${state.reverb}%",
@@ -2881,17 +2978,6 @@ private fun SettingsValueRow(
 }
 
 @Composable
-private fun SettingsMenuDivider() {
-    Spacer(
-        modifier = Modifier
-            .padding(horizontal = 12.dp, vertical = 4.dp)
-            .fillMaxWidth()
-            .height(1.dp)
-            .background(XenMetricStroke.copy(alpha = 0.52f))
-    )
-}
-
-@Composable
 private fun MidiProgramOverrideToggle(
     checked: Boolean,
     enabled: Boolean,
@@ -2917,7 +3003,8 @@ private fun MidiProgramOverrideToggle(
         Switch(
             checked = checked,
             onCheckedChange = onCheckedChange,
-            enabled = enabled
+            enabled = enabled,
+            modifier = Modifier.scale(0.78f)
         )
     }
 }

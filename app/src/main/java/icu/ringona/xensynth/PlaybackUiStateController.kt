@@ -113,6 +113,13 @@ internal class PlaybackUiStateController(
         )
     }
 
+    fun updateAudioLatency(value: Int) {
+        state.audioLatencyMs = value.coerceIn(
+            MainActivity.AUDIO_LATENCY_MIN_MS,
+            MainActivity.AUDIO_LATENCY_MAX_MS
+        )
+    }
+
     fun showVolumeGesture() {
         state.volumeGestureVisible = true
         state.volumeGestureRevision += 1
@@ -179,6 +186,7 @@ internal class ShellUiState {
     var volumeGain by mutableStateOf(MainActivity.VOLUME_GAIN_DEFAULT)
     var volume by mutableStateOf(MainActivity.VOLUME_GAIN_DEFAULT.formatVolumePercent())
     var reverb by mutableStateOf(MainActivity.REVERB_DEFAULT)
+    var audioLatencyMs by mutableStateOf(MainActivity.AUDIO_LATENCY_DEFAULT_MS)
     var volumeGestureVisible by mutableStateOf(false)
     var volumeGestureRevision by mutableStateOf(0)
     var progress by mutableStateOf("0:00/0:00")

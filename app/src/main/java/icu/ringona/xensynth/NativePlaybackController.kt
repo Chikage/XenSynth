@@ -37,6 +37,10 @@ class NativePlaybackController(
     var playing = false
     var loading = false
     var finished = false
+    var audioScheduleOffsetSeconds = 0.0
+        set(value) {
+            field = if (value.isFinite()) value else 0.0
+        }
 
     private var framePosted = false
     private var lastFrameNanos = 0L
@@ -64,9 +68,9 @@ class NativePlaybackController(
         loading = false
         if (nextPlaying) {
             finished = false
-            audioScheduler.reset(score, playheadSeconds)
+            resetAudioScheduler(score, playheadSeconds)
             if (!audioSchedulingSuspended) {
-                audioScheduler.schedule(score, playheadSeconds, speed, playing)
+                scheduleAudio()
             }
             lastFrameNanos = 0L
             postFrame()
@@ -84,7 +88,7 @@ class NativePlaybackController(
         playheadSeconds = 0.0
         audioSchedulingSuspended = false
         audioScheduler.stop()
-        audioScheduler.reset(score, playheadSeconds)
+        resetAudioScheduler(score, playheadSeconds)
         playOrPause(false)
         callbacks.onPlayheadChanged(score, playheadSeconds)
         callbacks.onStateChanged()
@@ -104,9 +108,9 @@ class NativePlaybackController(
             return
         }
         audioSchedulingSuspended = false
-        audioScheduler.reset(score, playheadSeconds)
+        resetAudioScheduler(score, playheadSeconds)
         if (playing && !finished) {
-            audioScheduler.schedule(score, playheadSeconds, speed, playing)
+            scheduleAudio()
             lastFrameNanos = 0L
             postFrame()
         }
@@ -146,7 +150,7 @@ class NativePlaybackController(
             playheadSeconds += deltaSeconds * speed
         }
         if (!audioSchedulingSuspended && !finished) {
-            audioScheduler.schedule(score, playheadSeconds, speed, playing)
+            scheduleAudio()
         }
         val duration = score?.duration ?: 0.0
         if (duration > 0.0 && playheadSeconds >= duration) {
@@ -169,7 +173,20 @@ class NativePlaybackController(
         }
     }
 
+    fun resetAudioScheduler(score: ParsedScore?, playheadSeconds: Double) {
+        audioScheduler.reset(score, audioSchedulerPlayheadSeconds(playheadSeconds))
+    }
+
+    private fun scheduleAudio() {
+        audioScheduler.schedule(score, audioSchedulerPlayheadSeconds(playheadSeconds), speed, playing)
+    }
+
+    private fun audioSchedulerPlayheadSeconds(playheadSeconds: Double): Double {
+        return playheadSeconds + audioScheduleOffsetSeconds * speed.coerceAtLeast(MIN_AUDIO_OFFSET_SPEED)
+    }
+
     private companion object {
         const val MAX_NATIVE_FRAME_DELTA_SECONDS = 0.08
+        const val MIN_AUDIO_OFFSET_SPEED = 0.05
     }
 }

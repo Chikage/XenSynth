@@ -117,6 +117,11 @@ class NativePlaybackCoordinator(
         set(value) {
             playbackController.speed = value
         }
+    var audioScheduleOffsetSeconds: Double
+        get() = playbackController.audioScheduleOffsetSeconds
+        set(value) {
+            playbackController.audioScheduleOffsetSeconds = value
+        }
     val playing: Boolean
         get() = playbackController.playing
     var loading: Boolean
@@ -185,7 +190,7 @@ class NativePlaybackCoordinator(
     }
 
     fun resetAudioScheduler(score: ParsedScore?, playheadSeconds: Double) {
-        audioScheduler.reset(score, playheadSeconds)
+        playbackController.resetAudioScheduler(score, playheadSeconds)
     }
 
     fun stopAudio() {
