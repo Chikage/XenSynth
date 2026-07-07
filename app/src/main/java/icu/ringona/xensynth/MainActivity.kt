@@ -1181,8 +1181,11 @@ class MainActivity : ComponentActivity(), RenderFramePacer.InteractionListener {
         if (nativePlaying) {
             nativePlayback.stopAudio()
         }
+        val leadInChanged = applyInitialWaterfallLeadIn()
         resetNativeAudioScheduler()
-        updateWaterfallPlayheadFrame()
+        if (!leadInChanged) {
+            updateWaterfallPlayheadFrame()
+        }
     }
 
     private fun roundedAudioLatencyMs(value: Float): Int {
@@ -1374,9 +1377,12 @@ class MainActivity : ComponentActivity(), RenderFramePacer.InteractionListener {
             nativeParsedScore = playbackScore
             nativePlayheadSeconds = 0.0
             nativeFinished = false
-            resetNativeAudioScheduler()
             setNativePlaying(false)
             waterfallView.setScore(playbackScore)
+            if (!applyInitialWaterfallLeadIn()) {
+                updateWaterfallPlayheadFrame()
+            }
+            resetNativeAudioScheduler()
             rulerGlassOverlayView?.invalidate()
             applyNativeParsedScore(playbackScore)
             updateStageControls()
@@ -1481,8 +1487,11 @@ class MainActivity : ComponentActivity(), RenderFramePacer.InteractionListener {
         val source = sourceParsedScore ?: return
         val playbackScore = source.withKeybind(currentScaleGuide)
         nativeParsedScore = playbackScore
-        resetNativeAudioScheduler()
         waterfallView.setScore(playbackScore)
+        if (!applyInitialWaterfallLeadIn()) {
+            updateWaterfallPlayheadFrame()
+        }
+        resetNativeAudioScheduler()
         applyNativeParsedScore(playbackScore)
     }
 
@@ -1497,6 +1506,8 @@ class MainActivity : ComponentActivity(), RenderFramePacer.InteractionListener {
     private fun resetNativePlayback() {
         resetToolbarPlayheadUpdateCache()
         nativePlayback.reset()
+        applyInitialWaterfallLeadIn()
+        resetNativeAudioScheduler()
         updateToolbarPlayheadIfNeeded(force = true)
     }
 
@@ -1504,41 +1515,39 @@ class MainActivity : ComponentActivity(), RenderFramePacer.InteractionListener {
         if (isPlaybackStartSuppressed()) {
             return
         }
-        prepareInitialWaterfallLeadIn()
+        applyInitialWaterfallLeadIn()
         nativePlayback.togglePlayback()
     }
 
-    private fun prepareInitialWaterfallLeadIn() {
-        val parsed = nativeParsedScore ?: return
+    private fun applyInitialWaterfallLeadIn(): Boolean {
+        val parsed = nativeParsedScore ?: return false
         if (
             nativePlaying ||
             nativeLoading ||
             !::waterfallView.isInitialized ||
             nativePlayheadSeconds > WaterfallMetrics.INITIAL_NOTE_GAP_PLAYHEAD_EPSILON
         ) {
-            return
+            return false
         }
         val state = waterfallView.displayState()
         val visualPlayhead = WaterfallLayout(
-            playheadSeconds = nativePlayheadSeconds,
+            playheadSeconds = 0.0,
             pixelsPerSecond = state.pixelsPerSecond,
             pitchZoomScale = state.pitchZoomScale,
             pitchPanSemitones = state.pitchPanSemitones,
             waterfallOffsetCents = state.waterfallOffsetCents,
             density = resources.displayMetrics.density
         ).initialNoteDisplayPlayhead(parsed.notes) - positiveAudioLatencySecondsForLeadIn()
-        if (visualPlayhead >= nativePlayheadSeconds) {
-            return
+        if (abs(visualPlayhead - nativePlayheadSeconds) < 0.001) {
+            return false
         }
         nativePlayheadSeconds = visualPlayhead
         updateWaterfallPlayheadFrame()
         updateToolbarPlayheadIfNeeded(force = true)
+        return true
     }
 
     private fun positiveAudioLatencySecondsForLeadIn(): Double {
-        if (nativePlayheadSeconds < -WaterfallMetrics.INITIAL_NOTE_GAP_PLAYHEAD_EPSILON) {
-            return 0.0
-        }
         return audioLatencyMs.coerceAtLeast(0) / 1_000.0
     }
 
