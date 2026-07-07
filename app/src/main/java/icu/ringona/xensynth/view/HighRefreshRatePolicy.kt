@@ -97,29 +97,30 @@ object HighRefreshRatePolicy {
         force: Boolean,
         tag: String
     ): SurfaceFrameRateRequest {
+        val targetFrameRate = if (contentActive) frameRate else 0f
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) {
-            return SurfaceFrameRateRequest(frameRate, null)
+            return SurfaceFrameRateRequest(targetFrameRate, null)
         }
-        if (!force && abs(frameRate - lastAppliedFrameRate) < FRAME_RATE_EPSILON) {
-            return SurfaceFrameRateRequest(frameRate, null)
+        if (!force && abs(targetFrameRate - lastAppliedFrameRate) < FRAME_RATE_EPSILON) {
+            return SurfaceFrameRateRequest(targetFrameRate, null)
         }
         if (surface == null || !surface.isValid) {
-            return SurfaceFrameRateRequest(frameRate, null)
+            return SurfaceFrameRateRequest(targetFrameRate, null)
         }
         val compatibility = frameRateCompatibility()
         try {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-                surface.setFrameRate(frameRate, compatibility, Surface.CHANGE_FRAME_RATE_ALWAYS)
+                surface.setFrameRate(targetFrameRate, compatibility, Surface.CHANGE_FRAME_RATE_ALWAYS)
             } else {
-                surface.setFrameRate(frameRate, compatibility)
+                surface.setFrameRate(targetFrameRate, compatibility)
             }
-            return SurfaceFrameRateRequest(frameRate, frameRate)
+            return SurfaceFrameRateRequest(targetFrameRate, targetFrameRate)
         } catch (error: IllegalArgumentException) {
-            Log.w(tag, "Surface rejected preferred frame rate=${formatFrameRate(frameRate)}", error)
+            Log.w(tag, "Surface rejected preferred frame rate=${formatFrameRate(targetFrameRate)}", error)
         } catch (error: IllegalStateException) {
-            Log.w(tag, "Surface frame-rate request failed rate=${formatFrameRate(frameRate)}", error)
+            Log.w(tag, "Surface frame-rate request failed rate=${formatFrameRate(targetFrameRate)}", error)
         }
-        return SurfaceFrameRateRequest(frameRate, null)
+        return SurfaceFrameRateRequest(targetFrameRate, null)
     }
 
     fun applySurfaceControlFrameRate(
@@ -130,15 +131,16 @@ object HighRefreshRatePolicy {
         lastAppliedFrameRate: Float,
         tag: String
     ): SurfaceFrameRateRequest {
+        val targetFrameRate = if (contentActive) frameRate else 0f
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) {
-            return SurfaceFrameRateRequest(frameRate, null)
+            return SurfaceFrameRateRequest(targetFrameRate, null)
         }
-        if (!force && abs(frameRate - lastAppliedFrameRate) < FRAME_RATE_EPSILON) {
-            return SurfaceFrameRateRequest(frameRate, null)
+        if (!force && abs(targetFrameRate - lastAppliedFrameRate) < FRAME_RATE_EPSILON) {
+            return SurfaceFrameRateRequest(targetFrameRate, null)
         }
         val surfaceControl = surfaceView?.surfaceControl
         if (surfaceControl == null || !surfaceControl.isValid) {
-            return SurfaceFrameRateRequest(frameRate, null)
+            return SurfaceFrameRateRequest(targetFrameRate, null)
         }
         val compatibility = frameRateCompatibility()
         try {
@@ -146,21 +148,21 @@ object HighRefreshRatePolicy {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
                 transaction.setFrameRate(
                     surfaceControl,
-                    frameRate,
+                    targetFrameRate,
                     compatibility,
                     Surface.CHANGE_FRAME_RATE_ALWAYS
                 )
             } else {
-                transaction.setFrameRate(surfaceControl, frameRate, compatibility)
+                transaction.setFrameRate(surfaceControl, targetFrameRate, compatibility)
             }
             transaction.apply()
-            return SurfaceFrameRateRequest(frameRate, frameRate)
+            return SurfaceFrameRateRequest(targetFrameRate, targetFrameRate)
         } catch (error: IllegalArgumentException) {
-            Log.w(tag, "SurfaceControl rejected preferred frame rate=${formatFrameRate(frameRate)}", error)
+            Log.w(tag, "SurfaceControl rejected preferred frame rate=${formatFrameRate(targetFrameRate)}", error)
         } catch (error: IllegalStateException) {
-            Log.w(tag, "SurfaceControl frame-rate request failed rate=${formatFrameRate(frameRate)}", error)
+            Log.w(tag, "SurfaceControl frame-rate request failed rate=${formatFrameRate(targetFrameRate)}", error)
         }
-        return SurfaceFrameRateRequest(frameRate, null)
+        return SurfaceFrameRateRequest(targetFrameRate, null)
     }
 
     fun formatFrameRate(value: Float): String {

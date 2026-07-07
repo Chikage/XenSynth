@@ -54,6 +54,7 @@ class CanvasWaterfallView @JvmOverloads constructor(
     private var waterfallOffsetCents = 0.0
     private var octaveDivisions = 12
     private var playbackActive = false
+    private var interactionActive = false
     private var particleCursor = 0
     private var dynamicFramePosted = false
     private var lastDynamicFrameNanos = 0L
@@ -90,6 +91,9 @@ class CanvasWaterfallView @JvmOverloads constructor(
     private val legacyGlassBlur = LegacyFrostedGlassBlur()
     private var keyboardBackdropBitmap: Bitmap? = null
     private var keyboardBackdropCanvas: Canvas? = null
+    private var lastKeyboardGlassRefreshNanos = 0L
+    private var keyboardGlassCacheSignature = Long.MIN_VALUE
+    private var keyboardGlassRevision = 0L
     private var keyboardGrainBitmap: Bitmap? = null
     private var keyboardGrainShader: BitmapShader? = null
     private val keyboardLinePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
@@ -136,6 +140,7 @@ class CanvasWaterfallView @JvmOverloads constructor(
         playheadSeconds = 0.0
         particleCursor = 0
         clearDynamicEffects()
+        invalidateKeyboardGlassCache()
         invalidate()
     }
 
@@ -147,12 +152,18 @@ class CanvasWaterfallView @JvmOverloads constructor(
         }
         playheadSeconds = next
         emitHitParticles(previous, next)
+        if (!playbackActive && !interactionActive) {
+            invalidateKeyboardGlassCache()
+        }
         postInvalidateOnAnimation()
     }
 
     override fun syncPlayhead(seconds: Double) {
         playheadSeconds = seconds
         particleCursor = findParticleCursor(playheadSeconds)
+        if (!playbackActive && !interactionActive) {
+            invalidateKeyboardGlassCache()
+        }
         postInvalidateOnAnimation()
     }
 
@@ -162,11 +173,13 @@ class CanvasWaterfallView @JvmOverloads constructor(
             return
         }
         octaveDivisions = next
+        invalidateKeyboardGlassCache()
         postInvalidateOnAnimation()
     }
 
     override fun setScaleGuide(nextGuide: ScaleGuide) {
         scaleGuide = nextGuide
+        invalidateKeyboardGlassCache()
         postInvalidateOnAnimation()
     }
 
@@ -219,6 +232,7 @@ class CanvasWaterfallView @JvmOverloads constructor(
         pitchZoomScale = nextPitchZoomScale
         pitchPanSemitones = WaterfallMetrics.coercePitchPan(nextPitchZoomScale, pitchPan)
         waterfallOffsetCents = offsetCents.coerceIn(-WaterfallMetrics.OFFSET_CENT_RANGE, WaterfallMetrics.OFFSET_CENT_RANGE)
+        invalidateKeyboardGlassCache()
         postInvalidateOnAnimation()
         return displayState()
     }
@@ -389,6 +403,7 @@ class CanvasWaterfallView @JvmOverloads constructor(
         nextManualNoteId = 1
         dynamicFramePosted = false
         lastDynamicFrameNanos = 0L
+        invalidateKeyboardGlassCache()
         Choreographer.getInstance().removeFrameCallback(dynamicFrameCallback)
     }
 
@@ -397,7 +412,25 @@ class CanvasWaterfallView @JvmOverloads constructor(
             return
         }
         playbackActive = active
+        invalidateKeyboardGlassCache()
         postInvalidateOnAnimation()
+    }
+
+    override fun setInteractionActive(active: Boolean) {
+        if (interactionActive == active) {
+            return
+        }
+        interactionActive = active
+        postInvalidateOnAnimation()
+    }
+
+    override fun hasHighRefreshDemand(): Boolean {
+        return playbackActive ||
+            interactionActive ||
+            dynamicFramePosted ||
+            particles.isNotEmpty() ||
+            keyImpacts.isNotEmpty() ||
+            manualNotes.isNotEmpty()
     }
 
     override fun requestHighRefreshFrame(frameTimeNanos: Long) {
@@ -834,29 +867,52 @@ class CanvasWaterfallView @JvmOverloads constructor(
     ) {
         keyboardGlassBounds.set(0f, top, width, bottom)
         val backdropHeight = max(1, ceil(bottom - top).toInt())
-        val backdrop = prepareKeyboardBackdrop(
-            width = width.roundToInt().coerceAtLeast(1),
+        val backdropWidth = width.roundToInt().coerceAtLeast(1)
+        val now = System.nanoTime()
+        val signature = keyboardGlassSignature(
+            width = backdropWidth,
             height = backdropHeight,
-            sourceTop = top,
-            viewHeight = bottom,
-            timelinePlayheadSeconds = timelinePlayheadSeconds,
+            top = top,
+            bottom = bottom,
             layout = layout
         )
+        val refreshContent = shouldRefreshKeyboardGlass(now, signature)
+        val backdrop = if (refreshContent) {
+            prepareKeyboardBackdrop(
+                width = backdropWidth,
+                height = backdropHeight,
+                sourceTop = top,
+                viewHeight = bottom,
+                timelinePlayheadSeconds = timelinePlayheadSeconds,
+                layout = layout
+            )
+        } else {
+            keyboardBackdropBitmap
+        }
         keyboardBackdropBounds.set(0f, 0f, width, backdropHeight.toFloat())
         val saveCount = canvas.save()
         canvas.translate(0f, top)
-        (nativeGlassBlur?.drawBlurredBitmapRegion(
+        val blurred = (nativeGlassBlur?.drawCachedBlurredBitmapRegion(
             canvas,
             backdrop,
             keyboardBackdropBounds,
-            FrostedGlassStyle.RULER_BLUR_RADIUS
-        ) == true) || legacyGlassBlur.drawBlurredBitmapRegion(
+            FrostedGlassStyle.RULER_BLUR_RADIUS,
+            refreshContent
+        ) == true) || legacyGlassBlur.drawCachedBlurredBitmapRegion(
             canvas,
             backdrop,
             keyboardBackdropBounds,
-            FrostedGlassStyle.RULER_BLUR_RADIUS
+            FrostedGlassStyle.RULER_BLUR_RADIUS,
+            refreshContent
         )
+        if (!blurred && backdrop != null && !backdrop.isRecycled) {
+            canvas.drawBitmap(backdrop, 0f, 0f, null)
+        }
         canvas.restoreToCount(saveCount)
+        if (refreshContent && backdrop != null && !backdrop.isRecycled) {
+            keyboardGlassCacheSignature = signature
+            lastKeyboardGlassRefreshNanos = now
+        }
         drawKeyboardFrostVeil(canvas, keyboardGlassBounds)
         canvas.drawDarkFrostedPanel(
             bounds = keyboardGlassBounds,
@@ -870,6 +926,51 @@ class CanvasWaterfallView @JvmOverloads constructor(
         drawKeyboardGlassSheen(canvas, keyboardGlassBounds)
         drawKeyboardFineGrain(canvas, keyboardGlassBounds)
         drawKeyboardGlassEdges(canvas, keyboardGlassBounds)
+    }
+
+    private fun shouldRefreshKeyboardGlass(now: Long, signature: Long): Boolean {
+        if (signature != keyboardGlassCacheSignature || keyboardBackdropBitmap == null) {
+            return true
+        }
+        if (!hasHighRefreshDemand()) {
+            return false
+        }
+        return lastKeyboardGlassRefreshNanos <= 0L ||
+            now - lastKeyboardGlassRefreshNanos >= KEYBOARD_GLASS_ACTIVE_REFRESH_NANOS
+    }
+
+    private fun keyboardGlassSignature(
+        width: Int,
+        height: Int,
+        top: Float,
+        bottom: Float,
+        layout: WaterfallLayout
+    ): Long {
+        var result = 17L
+        result = 31L * result + width
+        result = 31L * result + height
+        result = 31L * result + top.roundToInt()
+        result = 31L * result + bottom.roundToInt()
+        result = 31L * result + octaveDivisions
+        result = 31L * result + keyboardGlassRevision
+        result = 31L * result + signaturePart(layout.pixelsPerSecond)
+        result = 31L * result + signaturePart(layout.pitchZoomScale)
+        result = 31L * result + signaturePart(layout.pitchPanSemitones)
+        result = 31L * result + signaturePart(layout.waterfallOffsetCents)
+        result = 31L * result + (score?.let { System.identityHashCode(it) } ?: 0)
+        return result
+    }
+
+    private fun signaturePart(value: Double): Long {
+        return (value * 1000.0).roundToInt().toLong()
+    }
+
+    private fun invalidateKeyboardGlassCache() {
+        keyboardGlassRevision++
+        keyboardGlassCacheSignature = Long.MIN_VALUE
+        lastKeyboardGlassRefreshNanos = 0L
+        nativeGlassBlur?.resetCache()
+        legacyGlassBlur.resetCache()
     }
 
     private fun drawKeyboardFrostVeil(canvas: Canvas, area: RectF) {
@@ -999,6 +1100,7 @@ class CanvasWaterfallView @JvmOverloads constructor(
         keyboardBackdropBitmap?.recycle()
         keyboardBackdropBitmap = null
         keyboardBackdropCanvas = null
+        nativeGlassBlur?.resetCache()
         keyboardGrainBitmap?.recycle()
         keyboardGrainBitmap = null
         keyboardGrainShader = null
@@ -1302,6 +1404,7 @@ class CanvasWaterfallView @JvmOverloads constructor(
 
     private fun handleDynamicFrame(frameTimeNanos: Long) {
         dynamicFramePosted = false
+        val hadDynamicVisuals = particles.isNotEmpty() || keyImpacts.isNotEmpty() || manualNotes.isNotEmpty()
         val lastFrame = lastDynamicFrameNanos
         lastDynamicFrameNanos = frameTimeNanos
         val dt = if (lastFrame == 0L) {
@@ -1310,8 +1413,12 @@ class CanvasWaterfallView @JvmOverloads constructor(
             ((frameTimeNanos - lastFrame) / 1_000_000_000.0f).coerceIn(0f, 0.08f)
         }
         updateDynamicEffects(dt)
+        val hasDynamicVisuals = particles.isNotEmpty() || keyImpacts.isNotEmpty() || manualNotes.isNotEmpty()
+        if (hadDynamicVisuals && !hasDynamicVisuals) {
+            invalidateKeyboardGlassCache()
+        }
         postInvalidateOnAnimation()
-        if (particles.isNotEmpty() || keyImpacts.isNotEmpty() || manualNotes.isNotEmpty()) {
+        if (hasDynamicVisuals) {
             scheduleDynamicFrame()
         } else {
             lastDynamicFrameNanos = 0L
@@ -1557,5 +1664,6 @@ class CanvasWaterfallView @JvmOverloads constructor(
     companion object {
         private val TRACK_HUES = floatArrayOf(190f, 28f, 132f, 48f, 264f, 158f, 330f, 88f)
         private const val NOTE_TONE_VELOCITY_BUCKETS = 128
+        private const val KEYBOARD_GLASS_ACTIVE_REFRESH_NANOS = 33_333_333L
     }
 }

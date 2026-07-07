@@ -79,7 +79,7 @@ private fun applyNativeFrostedGlassS(view: View, blurRadius: Float) {
 internal class LegacyFrostedGlassBlur(
     private val downsample: Float = FrostedGlassStyle.LEGACY_DOWNSAMPLE,
     blurRounds: Int = FrostedGlassStyle.LEGACY_BLUR_ROUNDS
-) {
+) : FrostedGlassBlur {
     private val blurDelegate = lazy {
         BlurNative().apply {
             setBlurRounds(blurRounds)
@@ -90,14 +90,15 @@ internal class LegacyFrostedGlassBlur(
     private var blurredBitmap: Bitmap? = null
     private var blurCanvas: Canvas? = null
     private var lastSignature: Long = Long.MIN_VALUE
+    private var cachedBitmapRegionReady = false
 
-    fun drawBlurredViewSnapshot(
+    override fun drawBlurredViewSnapshot(
         canvas: Canvas,
         target: View,
         sourceView: View,
         area: RectF,
         radius: Float,
-        magnification: Float = 1f
+        magnification: Float
     ): Boolean {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S ||
             Build.VERSION.SDK_INT < Build.VERSION_CODES.O ||
@@ -149,7 +150,7 @@ internal class LegacyFrostedGlassBlur(
         return true
     }
 
-    fun drawBlurredBitmapRegion(
+    override fun drawBlurredBitmapRegion(
         canvas: Canvas,
         sourceBitmap: Bitmap?,
         area: RectF,
@@ -189,6 +190,55 @@ internal class LegacyFrostedGlassBlur(
         return true
     }
 
+    override fun drawCachedBlurredBitmapRegion(
+        canvas: Canvas,
+        sourceBitmap: Bitmap?,
+        area: RectF,
+        radius: Float,
+        refreshContent: Boolean
+    ): Boolean {
+        val source = sourceBitmap ?: return false
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O ||
+            Build.VERSION.SDK_INT >= Build.VERSION_CODES.S ||
+            source.isRecycled ||
+            area.width() <= 1f ||
+            area.height() <= 1f
+        ) {
+            return false
+        }
+        val scaledWidth = max(1, ceil(area.width() / downsample).toInt())
+        val scaledHeight = max(1, ceil(area.height() / downsample).toInt())
+        ensureBitmaps(scaledWidth, scaledHeight)
+        val downsampled = this.sourceBitmap ?: return false
+        val blurred = blurredBitmap ?: return false
+        val offscreen = blurCanvas ?: return false
+        if (refreshContent || !cachedBitmapRegionReady) {
+            downsampled.eraseColor(Color.TRANSPARENT)
+            val saveCount = offscreen.save()
+            offscreen.scale(scaledWidth / area.width(), scaledHeight / area.height())
+            offscreen.translate(-area.left, -area.top)
+            offscreen.drawBitmap(source, 0f, 0f, null)
+            offscreen.restoreToCount(saveCount)
+            if (!blur.prepare(downsampled, radius / downsample)) {
+                return false
+            }
+            blur.blur(downsampled, blurred)
+            cachedBitmapRegionReady = true
+        }
+        canvas.drawBitmap(
+            blurred,
+            Rect(0, 0, blurred.width, blurred.height),
+            area,
+            null
+        )
+        return true
+    }
+
+    override fun resetCache() {
+        cachedBitmapRegionReady = false
+        lastSignature = Long.MIN_VALUE
+    }
+
     fun release() {
         sourceBitmap?.recycle()
         blurredBitmap?.recycle()
@@ -214,6 +264,7 @@ internal class LegacyFrostedGlassBlur(
         blurredBitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
         blurCanvas = Canvas(sourceBitmap!!)
         lastSignature = Long.MIN_VALUE
+        cachedBitmapRegionReady = false
     }
 
     private fun viewSnapshotSignature(
@@ -255,11 +306,25 @@ internal interface FrostedGlassBlur {
         area: RectF,
         radius: Float
     ): Boolean
+
+    fun drawCachedBlurredBitmapRegion(
+        canvas: Canvas,
+        sourceBitmap: Bitmap?,
+        area: RectF,
+        radius: Float,
+        refreshContent: Boolean
+    ): Boolean = drawBlurredBitmapRegion(canvas, sourceBitmap, area, radius)
+
+    fun resetCache() = Unit
 }
 
 @RequiresApi(Build.VERSION_CODES.S)
 private class NativeFrostedGlassBlur : FrostedGlassBlur {
     private var renderNode: RenderNode? = null
+    private var cachedRegionReady = false
+    private var cachedRegionWidth = 0
+    private var cachedRegionHeight = 0
+    private var cachedRegionRadius = Float.NaN
 
     override fun drawBlurredViewSnapshot(
         canvas: Canvas,
@@ -313,6 +378,65 @@ private class NativeFrostedGlassBlur : FrostedGlassBlur {
         }
     }
 
+    override fun drawCachedBlurredBitmapRegion(
+        canvas: Canvas,
+        sourceBitmap: Bitmap?,
+        area: RectF,
+        radius: Float,
+        refreshContent: Boolean
+    ): Boolean {
+        val source = sourceBitmap ?: return false
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S ||
+            source.isRecycled ||
+            area.width() <= 1f ||
+            area.height() <= 1f
+        ) {
+            return false
+        }
+        return runCatching {
+            val width = max(1, ceil(area.width()).toInt())
+            val height = max(1, ceil(area.height()).toInt())
+            val node = renderNode ?: RenderNode("FrostedGlassBlur").also {
+                renderNode = it
+            }
+            val needsRecording = refreshContent ||
+                !cachedRegionReady ||
+                cachedRegionWidth != width ||
+                cachedRegionHeight != height ||
+                cachedRegionRadius != radius
+            if (needsRecording) {
+                node.setPosition(0, 0, width, height)
+                node.setRenderEffect(
+                    RenderEffect.createBlurEffect(
+                        radius,
+                        radius,
+                        Shader.TileMode.CLAMP
+                    )
+                )
+                val recordingCanvas = node.beginRecording(width, height)
+                recordingCanvas.translate(-area.left, -area.top)
+                recordingCanvas.drawBitmap(source, 0f, 0f, null)
+                node.endRecording()
+                cachedRegionReady = true
+                cachedRegionWidth = width
+                cachedRegionHeight = height
+                cachedRegionRadius = radius
+            }
+            val saveCount = canvas.save()
+            canvas.translate(area.left, area.top)
+            canvas.drawRenderNode(node)
+            canvas.restoreToCount(saveCount)
+            true
+        }.getOrDefault(false)
+    }
+
+    override fun resetCache() {
+        cachedRegionReady = false
+        cachedRegionWidth = 0
+        cachedRegionHeight = 0
+        cachedRegionRadius = Float.NaN
+    }
+
     private fun drawBlurredNode(
         canvas: Canvas,
         area: RectF,
@@ -325,6 +449,7 @@ private class NativeFrostedGlassBlur : FrostedGlassBlur {
             val node = renderNode ?: RenderNode("FrostedGlassBlur").also {
                 renderNode = it
             }
+            resetCache()
             node.setPosition(0, 0, width, height)
             node.setRenderEffect(
                 RenderEffect.createBlurEffect(
@@ -644,7 +769,8 @@ internal class FrostedRulerOverlayView @JvmOverloads constructor(
                     target = this,
                     sourceView = source,
                     area = bounds,
-                    radius = FrostedGlassStyle.RULER_BLUR_RADIUS
+                    radius = FrostedGlassStyle.RULER_BLUR_RADIUS,
+                    magnification = 1f
                 )
             }
             if (!blurred) {

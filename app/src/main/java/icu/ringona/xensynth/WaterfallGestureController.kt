@@ -100,6 +100,12 @@ class WaterfallGestureController(
         rulerPreviewTap = null
     }
 
+    fun hasActiveGesture(): Boolean {
+        return nativeGesture != null ||
+            rulerPreviewTap != null ||
+            activeRulerPreviews.isNotEmpty()
+    }
+
     fun setOffsetCents(value: Float) {
         val next = value.coerceIn(
             -WaterfallMetrics.OFFSET_CENT_RANGE.toFloat(),

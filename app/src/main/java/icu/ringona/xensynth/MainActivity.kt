@@ -194,17 +194,18 @@ class MainActivity : ComponentActivity(), RenderFramePacer.InteractionListener {
             override fun onStateChanged() {
                 if (nativePlaying) {
                     RenderFramePacer.notifyContentActive()
-                    refreshHighRefreshRateRequest(force = true)
                 }
                 if (::waterfallView.isInitialized) {
                     waterfallView.setPlaybackActive(nativePlaying)
                 }
+                refreshHighRefreshRateRequest(force = true)
                 updatePlayButtonIcon()
                 updateStageControls()
                 updateToolbarPlayheadIfNeeded(force = true)
             }
 
             override fun onPlaybackFinished() {
+                refreshHighRefreshRateRequest(force = true)
                 updateStageControls()
                 updateToolbarPlayheadIfNeeded(force = true)
             }
@@ -252,18 +253,19 @@ class MainActivity : ComponentActivity(), RenderFramePacer.InteractionListener {
     private val sampleLoaderExecutor: ExecutorService = Executors.newSingleThreadExecutor()
     private val destroyed = AtomicBoolean(false)
     private lateinit var waterfallGestureController: WaterfallGestureController
+    private var waterfallGestureActive = false
     private var refreshRateExperimentMode = DEFAULT_REFRESH_RATE_EXPERIMENT_MODE
 
     private val highRefreshRateKeepAlive = object : Runnable {
         override fun run() {
             highRefreshRateKeepAlivePosted = false
             refreshHighRefreshRateRequest(force = true)
-            startHighRefreshRateKeepAlive()
         }
     }
     private val highRefreshUiPulse = Choreographer.FrameCallback { frameTimeNanos ->
         highRefreshUiPulsePosted = false
         if (!shouldRunHighRefreshUiPulse()) {
+            refreshHighRefreshRateRequest(force = true)
             return@FrameCallback
         }
         pulseHighRefreshUiFrame(frameTimeNanos)
@@ -344,6 +346,10 @@ class MainActivity : ComponentActivity(), RenderFramePacer.InteractionListener {
     }
 
     override fun onPause() {
+        if (::waterfallGestureController.isInitialized) {
+            waterfallGestureController.cancelTouchState()
+        }
+        setWaterfallGestureActive(false)
         if (::waterfallView.isInitialized) {
             waterfallView.onHostPause()
         }
@@ -371,6 +377,7 @@ class MainActivity : ComponentActivity(), RenderFramePacer.InteractionListener {
         RenderFramePacer.removeInteractionListener(this)
         stopNativeClock()
         waterfallGestureController.cancelTouchState()
+        setWaterfallGestureActive(false)
         if (::waterfallView.isInitialized) {
             waterfallView.onHostDestroy()
         }
@@ -429,7 +436,8 @@ class MainActivity : ComponentActivity(), RenderFramePacer.InteractionListener {
     }
 
     private fun refreshHighRefreshRateRequest(force: Boolean = false) {
-        requestHighestRefreshDisplayMode(force = force)
+        val demandActive = highRefreshDemandActive()
+        requestHighestRefreshDisplayMode(force = force, demandActive = demandActive)
         if (::waterfallView.isInitialized) {
             waterfallView.setRefreshRateHints(
                 surfaceFrameRateEnabled = refreshRateExperimentMode.surfaceFrameRateEnabled,
@@ -437,35 +445,38 @@ class MainActivity : ComponentActivity(), RenderFramePacer.InteractionListener {
             )
             waterfallView.requestHighRefreshRate(force = force)
         }
+        if (demandActive) {
+            startHighRefreshRateKeepAlive()
+            startHighRefreshUiPulse()
+        } else {
+            stopHighRefreshRateKeepAlive()
+            stopHighRefreshUiPulse()
+        }
     }
 
-    private fun requestHighestRefreshDisplayMode(force: Boolean = false) {
+    private fun requestHighestRefreshDisplayMode(force: Boolean = false, demandActive: Boolean) {
         val displayView = if (::waterfallView.isInitialized) {
             waterfallView.view
         } else {
             window.decorView
         }
-        val idleAwareDemandActive = nativePlaying ||
-            RenderFramePacer.hasActiveFrameDemand()
-        val demandActive = if (FORCE_WINDOW_REFRESH_ACTIVE) {
-            true
-        } else {
-            idleAwareDemandActive
-        }
-        val requestActive = demandActive || force
         val rateMode = refreshRateExperimentMode
         val requestedFrameRate = RenderFramePacer.applyWindowPreferredFrameRate(
             window = window,
             displayView = displayView,
-            contentActive = requestActive,
+            contentActive = demandActive,
             force = force,
-            applyWindowRefreshRate = rateMode.windowRefreshRateEnabled,
-            applyViewRequestedFrameRate = rateMode.viewRequestedFrameRateEnabled,
+            applyWindowRefreshRate = demandActive && rateMode.windowRefreshRateEnabled,
+            applyViewRequestedFrameRate = demandActive && rateMode.viewRequestedFrameRateEnabled,
             tag = TAG
         )
-        requestedWindowRefreshRate = if (rateMode.windowRefreshRateEnabled) requestedFrameRate else 0f
-        applyUiRequestedFrameRate(requestedFrameRate, force = force)
-        if (!rateMode.displayModeEnabled) {
+        requestedWindowRefreshRate = if (demandActive && rateMode.windowRefreshRateEnabled) {
+            requestedFrameRate
+        } else {
+            0f
+        }
+        applyUiRequestedFrameRate(if (demandActive) requestedFrameRate else 0f, force = force)
+        if (!demandActive || !rateMode.displayModeEnabled) {
             clearPreferredDisplayModeId()
             return
         }
@@ -491,9 +502,28 @@ class MainActivity : ComponentActivity(), RenderFramePacer.InteractionListener {
                 "target=${HighRefreshRatePolicy.formatFrameRate(targetRefreshRate)}Hz " +
                 "window=${windowRefreshRateLabel()} " +
                 "rateMode=${rateMode.toolbarLabel} ${rateMode.logSummary()} " +
-                "active=$requestActive demand=$demandActive idleDemand=$idleAwareDemandActive " +
+                "active=$demandActive demand=${highRefreshDemandSummary()} " +
                 "supported=${HighRefreshRatePolicy.supportedRefreshSummary(display)}"
         )
+    }
+
+    private fun highRefreshDemandActive(): Boolean {
+        return FORCE_WINDOW_REFRESH_ACTIVE ||
+            nativePlaying ||
+            waterfallGestureActive ||
+            (::waterfallView.isInitialized && waterfallView.hasHighRefreshDemand())
+    }
+
+    private fun highRefreshDemandSummary(): String {
+        val waterfallDemand = if (::waterfallView.isInitialized) {
+            waterfallView.hasHighRefreshDemand()
+        } else {
+            false
+        }
+        return "forced=$FORCE_WINDOW_REFRESH_ACTIVE " +
+            "playing=$nativePlaying " +
+            "gesture=$waterfallGestureActive " +
+            "waterfall=$waterfallDemand"
     }
 
     private fun applyUiRequestedFrameRate(frameRate: Float, force: Boolean) {
@@ -567,7 +597,7 @@ class MainActivity : ComponentActivity(), RenderFramePacer.InteractionListener {
     }
 
     private fun startHighRefreshRateKeepAlive() {
-        if (highRefreshRateKeepAlivePosted || destroyed.get()) {
+        if (highRefreshRateKeepAlivePosted || destroyed.get() || !highRefreshDemandActive()) {
             return
         }
         highRefreshRateKeepAlivePosted = true
@@ -580,7 +610,11 @@ class MainActivity : ComponentActivity(), RenderFramePacer.InteractionListener {
     }
 
     private fun startHighRefreshUiPulse() {
-        if (highRefreshUiPulsePosted || destroyed.get() || !FORCE_WINDOW_REFRESH_ACTIVE) {
+        if (highRefreshUiPulsePosted ||
+            destroyed.get() ||
+            !highRefreshDemandActive() ||
+            !lifecycle.currentState.isAtLeast(androidx.lifecycle.Lifecycle.State.RESUMED)
+        ) {
             return
         }
         highRefreshUiPulsePosted = true
@@ -596,8 +630,8 @@ class MainActivity : ComponentActivity(), RenderFramePacer.InteractionListener {
     }
 
     private fun shouldRunHighRefreshUiPulse(): Boolean {
-        return FORCE_WINDOW_REFRESH_ACTIVE &&
-            !destroyed.get() &&
+        return !destroyed.get() &&
+            highRefreshDemandActive() &&
             lifecycle.currentState.isAtLeast(androidx.lifecycle.Lifecycle.State.RESUMED)
     }
 
@@ -1026,6 +1060,7 @@ class MainActivity : ComponentActivity(), RenderFramePacer.InteractionListener {
     private fun terminatePlaybackFromUi() {
         suppressPlaybackStartBriefly()
         waterfallGestureController.cancelTouchState()
+        setWaterfallGestureActive(false)
         nativeParsedScore = null
         sourceParsedScore = null
         nativePlayheadSeconds = 0.0
@@ -1216,10 +1251,29 @@ class MainActivity : ComponentActivity(), RenderFramePacer.InteractionListener {
             if (event.actionMasked == android.view.MotionEvent.ACTION_DOWN) {
                 clearToolbarFocus?.invoke()
             }
+            val wasDemandActive = highRefreshDemandActive()
             val handled = waterfallGestureController.handleTouch(event)
+            val gestureChanged = setWaterfallGestureActive(waterfallGestureController.hasActiveGesture())
             rulerGlassOverlayView?.postInvalidateOnAnimation()
+            if (gestureChanged || wasDemandActive != highRefreshDemandActive()) {
+                refreshHighRefreshRateRequest(force = true)
+            }
             handled
         }
+    }
+
+    private fun setWaterfallGestureActive(active: Boolean): Boolean {
+        if (waterfallGestureActive == active) {
+            return false
+        }
+        waterfallGestureActive = active
+        if (::waterfallView.isInitialized) {
+            waterfallView.setInteractionActive(active)
+        }
+        if (active) {
+            RenderFramePacer.notifyInteraction()
+        }
+        return true
     }
 
     private fun createWaterfallSurface(): WaterfallSurface {
@@ -1682,6 +1736,7 @@ class MainActivity : ComponentActivity(), RenderFramePacer.InteractionListener {
         val previewPointerId = nextMidiPreviewPointerId()
         waterfallView.beginManualPreview(previewPointerId, midiPreviewNote(key, velocity))
         rulerGlassOverlayView?.postInvalidateOnAnimation()
+        refreshHighRefreshRateRequest(force = true)
         val noteId = if (ensureMidiAudioReady()) {
             nativeAudioController.noteOn(
                 key = playbackKeyForMidiInput(key.pitch),
@@ -1836,6 +1891,7 @@ class MainActivity : ComponentActivity(), RenderFramePacer.InteractionListener {
         if (::waterfallView.isInitialized) {
             waterfallView.releaseManualPreview(note.previewPointerId)
             rulerGlassOverlayView?.postInvalidateOnAnimation()
+            refreshHighRefreshRateRequest(force = true)
         }
     }
 
@@ -1896,7 +1952,7 @@ class MainActivity : ComponentActivity(), RenderFramePacer.InteractionListener {
         const val VOLUME_GESTURE_VISIBLE_MS = 900L
         const val RESET_PLAY_SUPPRESSION_MS = 350L
         const val HIGH_REFRESH_KEEPALIVE_MS = 1_000L
-        const val FORCE_WINDOW_REFRESH_ACTIVE = true
+        const val FORCE_WINDOW_REFRESH_ACTIVE = false
         const val HIGH_REFRESH_UI_REQUEST_NANOS = 250_000_000L
         const val UI_PULSE_LOG_FRAME_INTERVAL = 120
         const val EDO_STATUS_PROTECTION_MS = 700L

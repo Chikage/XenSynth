@@ -55,6 +55,8 @@ interface WaterfallSurface {
     fun requestHighRefreshRate(force: Boolean = false) = Unit
     fun requestHighRefreshFrame(frameTimeNanos: Long) = Unit
     fun setPlaybackActive(active: Boolean) = Unit
+    fun setInteractionActive(active: Boolean) = Unit
+    fun hasHighRefreshDemand(): Boolean = false
 
     fun onHostResume() = Unit
     fun onHostPause() = Unit
