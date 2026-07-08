@@ -29,7 +29,6 @@ import kotlin.math.floor
 import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.pow
-import kotlin.math.round
 import kotlin.math.roundToInt
 import kotlin.math.sin
 
@@ -1198,10 +1197,9 @@ internal class FrostedRulerOverlayView @JvmOverloads constructor(
                     if (x < -1f || x > width + 1f) {
                         return@forEach
                     }
-                    val midiPitch = round(line.pitch).toInt()
-                    val isC4 = midiPitch == 60 && line.isC
+                    val label = guide.labelForPitch(line.pitch, line.isC)
                     val length = keyHeight * WaterfallMetrics.C_TICK_HEIGHT_RATIO * line.ratio
-                    val tickLength = if (isC4) {
+                    val tickLength = if (label != null) {
                         min(length, keyHeight - WaterfallMetrics.C4_LABEL_RESERVED_HEIGHT_DP * density)
                     } else {
                         length
@@ -1213,9 +1211,9 @@ internal class FrostedRulerOverlayView @JvmOverloads constructor(
                     )
                     tickPaint.strokeWidth = line.strokeRatio?.let { 1.4f * it } ?: if (line.isC) 1.4f else 1f
                     val alignedX = drawPixelAlignedVerticalLine(canvas, x, area.top, area.top + tickLength, tickPaint)
-                    if (isC4) {
+                    if (label != null) {
                         canvas.drawText(
-                            "C4",
+                            label,
                             alignedX,
                             area.bottom - WaterfallMetrics.C4_LABEL_BOTTOM_PADDING_DP * density,
                             labelPaint
@@ -1236,8 +1234,8 @@ internal class FrostedRulerOverlayView @JvmOverloads constructor(
             if (!tick.isVisible) {
                 continue
             }
-            val isC4 = tick.midiPitch == 60 && tick.isC
-            val tickLength = if (isC4) {
+            val label = guide.labelForPitch(pitch, tick.isC)
+            val tickLength = if (label != null) {
                 min(tick.length, keyHeight - WaterfallMetrics.C4_LABEL_RESERVED_HEIGHT_DP * density)
             } else {
                 tick.length
@@ -1245,9 +1243,9 @@ internal class FrostedRulerOverlayView @JvmOverloads constructor(
             tickPaint.color = FrostedGlassStyle.rulerHighlight(tick.alpha)
             tickPaint.strokeWidth = tick.strokeWidth
             val alignedX = drawPixelAlignedVerticalLine(canvas, x, area.top, area.top + tickLength, tickPaint)
-            if (isC4) {
+            if (label != null) {
                 canvas.drawText(
-                    "C4",
+                    label,
                     alignedX,
                     area.bottom - WaterfallMetrics.C4_LABEL_BOTTOM_PADDING_DP * density,
                     labelPaint

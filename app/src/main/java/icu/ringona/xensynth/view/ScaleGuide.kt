@@ -10,6 +10,7 @@ import java.io.InputStream
 import java.io.StringReader
 import kotlin.math.abs
 import kotlin.math.floor
+import kotlin.math.ln
 import kotlin.math.roundToInt
 
 class ScaleGuide private constructor(
@@ -31,11 +32,20 @@ class ScaleGuide private constructor(
     val hasKeybind: Boolean
         get() = customScale?.keybind?.isNotEmpty() == true
 
+    val usesFullMidiRange: Boolean
+        get() = customScale?.type == CustomScaleType.Full
+
     fun keyboundPitchForMidiPitch(midiPitch: Int): Double? {
-        val keybind = customScale?.keybind ?: return null
-        val pitchClass = positiveModulo(midiPitch, OCTAVE_SEMITONES.toInt())
-        val cents = keybind[pitchClass] ?: return null
-        return midiPitch - pitchClass + cents / 100.0
+        val scale = customScale ?: return null
+        val keybind = scale.keybind
+        return when (scale.type) {
+            CustomScaleType.Octave -> {
+                val pitchClass = positiveModulo(midiPitch, OCTAVE_SEMITONES.toInt())
+                val cents = keybind[pitchClass] ?: return null
+                midiPitch - pitchClass + cents / 100.0
+            }
+            CustomScaleType.Full -> keybind[midiPitch]
+        }
     }
 
     fun playbackPitchForMidiPitch(midiPitch: Int): Double {
@@ -47,6 +57,23 @@ class ScaleGuide private constructor(
             return true
         }
         return scaleMarks.containsKey(edo.coerceAtLeast(0))
+    }
+
+    fun labelForPitch(pitch: Double, isC: Boolean): String? {
+        if (!isC) {
+            return null
+        }
+        customScale?.let { scale ->
+            if (scale.type == CustomScaleType.Full) {
+                return if (abs(pitch - scale.referencePitch) <= STEP_EPSILON) {
+                    FULL_REFERENCE_LABEL
+                } else {
+                    null
+                }
+            }
+        }
+        val midiPitch = kotlin.math.round(pitch).toInt()
+        return if (midiPitch == C4_MIDI_PITCH) C4_LABEL else null
     }
 
     fun linesForVisibleRange(
@@ -239,6 +266,10 @@ class ScaleGuide private constructor(
         minPitchSpacing: Double,
         consumer: ScaleLineConsumer
     ) {
+        if (scale.type == CustomScaleType.Full) {
+            forEachFullCustomLineInVisibleRange(scale, minPitch, maxPitch, minPitchSpacing, consumer)
+            return
+        }
         val firstOctave = floor(minPitch / OCTAVE_SEMITONES).toInt() - 1
         val lastOctave = floor(maxPitch / OCTAVE_SEMITONES).toInt() + 1
         if (lastOctave < firstOctave) {
@@ -262,6 +293,34 @@ class ScaleGuide private constructor(
                 consumer.onLine(pitch, mark.ratio, mark.ratio, true, mark.isC)
                 lastDrawnPitch = pitch
             }
+        }
+    }
+
+    private fun forEachFullCustomLineInVisibleRange(
+        scale: CustomScale,
+        minPitch: Double,
+        maxPitch: Double,
+        minPitchSpacing: Double,
+        consumer: ScaleLineConsumer
+    ) {
+        val spacing = sanitizedMinPitchSpacing(minPitchSpacing)
+        var lastDrawnPitch = Double.NEGATIVE_INFINITY
+        scale.marks.forEach { mark ->
+            val pitch = scale.referencePitch + mark.pitchOffset
+            if (pitch < MIDI_PITCH_MIN.toDouble() || pitch > MIDI_PITCH_MAX.toDouble()) {
+                return@forEach
+            }
+            if (pitch < minPitch - OCTAVE_SEMITONES || pitch > maxPitch + OCTAVE_SEMITONES) {
+                return@forEach
+            }
+            if (mark.ratio <= 0f) {
+                return@forEach
+            }
+            if (!mark.isC && pitch - lastDrawnPitch < spacing) {
+                return@forEach
+            }
+            consumer.onLine(pitch, mark.ratio, mark.ratio, true, mark.isC)
+            lastDrawnPitch = pitch
         }
     }
 
@@ -302,6 +361,14 @@ class ScaleGuide private constructor(
     }
 
     private fun customMarkForPitch(scale: CustomScale, pitch: Double): CustomMark? {
+        if (scale.type == CustomScaleType.Full) {
+            scale.marks.forEach { mark ->
+                if (abs(pitch - (scale.referencePitch + mark.pitchOffset)) <= STEP_EPSILON) {
+                    return mark
+                }
+            }
+            return null
+        }
         val octave = floor(pitch / OCTAVE_SEMITONES).toInt()
         for (candidateOctave in (octave - 1)..(octave + 1)) {
             val basePitch = candidateOctave * OCTAVE_SEMITONES
@@ -315,6 +382,9 @@ class ScaleGuide private constructor(
     }
 
     private fun nearestCustomPitch(scale: CustomScale, rawPitch: Double): CustomPitch? {
+        if (scale.type == CustomScaleType.Full) {
+            return nearestFullCustomPitch(scale, rawPitch)
+        }
         var best: CustomPitch? = null
         val octave = floor(rawPitch / OCTAVE_SEMITONES).toInt()
         for (candidateOctave in (octave - 1)..(octave + 1)) {
@@ -339,6 +409,30 @@ class ScaleGuide private constructor(
         return best
     }
 
+    private fun nearestFullCustomPitch(scale: CustomScale, rawPitch: Double): CustomPitch? {
+        var best: CustomPitch? = null
+        scale.marks.forEachIndexed { index, mark ->
+            val pitch = scale.referencePitch + mark.pitchOffset
+            if (pitch < MIDI_PITCH_MIN.toDouble() || pitch > MIDI_PITCH_MAX.toDouble()) {
+                return@forEachIndexed
+            }
+            val distance = abs(rawPitch - pitch)
+            val current = best
+            if (current == null ||
+                distance < current.distance - STEP_EPSILON ||
+                (abs(distance - current.distance) <= STEP_EPSILON && pitch > current.pitch)
+            ) {
+                best = CustomPitch(
+                    pitch = pitch,
+                    distance = distance,
+                    index = index,
+                    octave = 0
+                )
+            }
+        }
+        return best
+    }
+
     private fun neighborCustomPitch(
         scale: CustomScale,
         index: Int,
@@ -349,6 +443,13 @@ class ScaleGuide private constructor(
             return null
         }
         val nextIndex = index + direction
+        if (scale.type == CustomScaleType.Full) {
+            return if (nextIndex in scale.marks.indices) {
+                scale.referencePitch + scale.marks[nextIndex].pitchOffset
+            } else {
+                null
+            }
+        }
         return when {
             nextIndex in scale.marks.indices -> {
                 octave * OCTAVE_SEMITONES + scale.marks[nextIndex].pitchOffset
@@ -437,9 +538,16 @@ class ScaleGuide private constructor(
 
     private data class CustomScale(
         val profileName: String,
+        val type: CustomScaleType,
+        val referencePitch: Double,
         val marks: List<CustomMark>,
         val keybind: Map<Int, Double>
     )
+
+    private enum class CustomScaleType {
+        Octave,
+        Full
+    }
 
     private data class CustomMark(
         val cents: Double,
@@ -468,6 +576,13 @@ class ScaleGuide private constructor(
         private const val MINOR_TICK_STROKE_WIDTH = 1f
         private const val PROFILE_MAX_CHARS = 8
         private const val DEFAULT_PROFILE_NAME = "TUN"
+        private const val C4_LABEL = "C4"
+        private const val FULL_REFERENCE_LABEL = "O"
+        private const val C4_MIDI_PITCH = 60
+        private const val A4_MIDI_PITCH = 69.0
+        private const val A4_FREQUENCY_HZ = 440.0
+        private const val MIDI_PITCH_MIN = 0
+        private const val MIDI_PITCH_MAX = 127
         private val NATURAL_PITCH_CLASSES = setOf(0, 2, 4, 5, 7, 9, 11)
 
         fun fromResources(context: Context): ScaleGuide {
@@ -507,16 +622,21 @@ class ScaleGuide private constructor(
         fun fromJsonString(json: String): ScaleGuide {
             val root = JSONObject(json)
             val profileName = normalizedProfileName(root.optString("profile", DEFAULT_PROFILE_NAME))
+            val type = parseCustomScaleType(root)
+            val referencePitch = when (type) {
+                CustomScaleType.Octave -> C4_MIDI_PITCH.toDouble()
+                CustomScaleType.Full -> parseFullReferencePitch(root)
+            }
             val scaleObject = when (val rawScale = root.opt("Scale") ?: root.opt("scale")) {
                 is JSONObject -> rawScale
                 else -> throw IllegalArgumentException("JSON tuning must contain a Scale object")
             }
             val keybind = when (val rawKeybind = root.opt("Keybind") ?: root.opt("keybind")) {
                 null -> emptyMap()
-                is JSONObject -> parseCustomKeybind(rawKeybind)
+                is JSONObject -> parseCustomKeybind(rawKeybind, type, referencePitch)
                 else -> throw IllegalArgumentException("JSON tuning Keybind must be an object")
             }
-            return fromCustomProfile(profileName, parseCustomMarks(scaleObject), keybind)
+            return fromCustomProfile(profileName, parseCustomMarks(scaleObject), keybind, type, referencePitch)
         }
 
         internal fun fromCustomProfile(
@@ -524,12 +644,55 @@ class ScaleGuide private constructor(
             marks: Map<Double, Float>,
             keybind: Map<Int, Double> = emptyMap()
         ): ScaleGuide {
-            val customMarks = buildCustomMarks(marks)
+            return fromCustomProfile(
+                profileName = profileName,
+                marks = marks,
+                keybind = keybind,
+                type = CustomScaleType.Octave,
+                referencePitch = C4_MIDI_PITCH.toDouble()
+            )
+        }
+
+        internal fun fromFullCustomProfile(
+            profileName: String,
+            referencePitch: Double,
+            marks: Map<Double, Float>,
+            keybindCents: Map<Int, Double> = emptyMap()
+        ): ScaleGuide {
+            val keybind = keybindCents.mapValues { (midiPitch, cents) ->
+                require(midiPitch in MIDI_PITCH_MIN..MIDI_PITCH_MAX) {
+                    "Keybind key '$midiPitch' must be between 0 and 127"
+                }
+                val targetPitch = referencePitch + cents / 100.0
+                require(targetPitch >= MIDI_PITCH_MIN.toDouble() && targetPitch <= MIDI_PITCH_MAX.toDouble()) {
+                    "Keybind value for '$midiPitch' maps outside MIDI pitch range 0..127"
+                }
+                targetPitch
+            }
+            return fromCustomProfile(
+                profileName = profileName,
+                marks = marks,
+                keybind = keybind,
+                type = CustomScaleType.Full,
+                referencePitch = referencePitch
+            )
+        }
+
+        private fun fromCustomProfile(
+            profileName: String,
+            marks: Map<Double, Float>,
+            keybind: Map<Int, Double>,
+            type: CustomScaleType,
+            referencePitch: Double
+        ): ScaleGuide {
+            val customMarks = buildCustomMarks(marks, type, referencePitch)
             return ScaleGuide(
                 markRatios = mapOf('0' to 1f, HIDDEN_MARK to 0f, MUTE_TOUCH_MARK to 0f),
                 scaleMarks = emptyMap(),
                 customScale = CustomScale(
                     profileName = normalizedProfileName(profileName),
+                    type = type,
+                    referencePitch = referencePitch,
                     marks = customMarks,
                     keybind = keybind.toSortedMap()
                 )
@@ -586,7 +749,18 @@ class ScaleGuide private constructor(
             return marks
         }
 
-        private fun parseCustomKeybind(keybindObject: JSONObject): Map<Int, Double> {
+        private fun parseCustomKeybind(
+            keybindObject: JSONObject,
+            type: CustomScaleType,
+            referencePitch: Double
+        ): Map<Int, Double> {
+            return when (type) {
+                CustomScaleType.Octave -> parseOctaveCustomKeybind(keybindObject)
+                CustomScaleType.Full -> parseFullCustomKeybind(keybindObject, referencePitch)
+            }
+        }
+
+        private fun parseOctaveCustomKeybind(keybindObject: JSONObject): Map<Int, Double> {
             val bindings = linkedMapOf<Int, Double>()
             val keys = keybindObject.keys()
             while (keys.hasNext()) {
@@ -601,6 +775,29 @@ class ScaleGuide private constructor(
                     "Keybind value for '$key' must be greater than or equal to 0 and less than 1200 cents"
                 }
                 bindings[pitchClass] = cents
+            }
+            return bindings
+        }
+
+        private fun parseFullCustomKeybind(
+            keybindObject: JSONObject,
+            referencePitch: Double
+        ): Map<Int, Double> {
+            val bindings = linkedMapOf<Int, Double>()
+            val keys = keybindObject.keys()
+            while (keys.hasNext()) {
+                val key = keys.next()
+                val midiPitch = key.toIntOrNull()
+                    ?: throw IllegalArgumentException("Keybind key '$key' is not a MIDI pitch")
+                require(midiPitch in MIDI_PITCH_MIN..MIDI_PITCH_MAX) {
+                    "Keybind key '$key' must be between 0 and 127"
+                }
+                val cents = customKeybindCents(keybindObject.get(key), key)
+                val targetPitch = referencePitch + cents / 100.0
+                require(targetPitch >= MIDI_PITCH_MIN.toDouble() && targetPitch <= MIDI_PITCH_MAX.toDouble()) {
+                    "Keybind value for '$key' maps outside MIDI pitch range 0..127"
+                }
+                bindings[midiPitch] = targetPitch
             }
             return bindings
         }
@@ -625,7 +822,18 @@ class ScaleGuide private constructor(
             return ratio
         }
 
-        private fun buildCustomMarks(marks: Map<Double, Float>): List<CustomMark> {
+        private fun buildCustomMarks(
+            marks: Map<Double, Float>,
+            type: CustomScaleType,
+            referencePitch: Double
+        ): List<CustomMark> {
+            return when (type) {
+                CustomScaleType.Octave -> buildOctaveCustomMarks(marks)
+                CustomScaleType.Full -> buildFullCustomMarks(marks, referencePitch)
+            }
+        }
+
+        private fun buildOctaveCustomMarks(marks: Map<Double, Float>): List<CustomMark> {
             val customMarks = mutableListOf(CustomMark(cents = 0.0, ratio = 1f, isC = true))
             marks
                 .asSequence()
@@ -642,6 +850,100 @@ class ScaleGuide private constructor(
                     )
                 }
             return customMarks
+        }
+
+        private fun buildFullCustomMarks(marks: Map<Double, Float>, referencePitch: Double): List<CustomMark> {
+            val customMarks = mutableListOf<CustomMark>()
+            var hasReferenceMark = false
+            marks
+                .asSequence()
+                .sortedBy { (cents, _) -> cents }
+                .forEach { (cents, ratio) ->
+                    require(cents.isFinite()) {
+                        "Scale cents must be finite"
+                    }
+                    val normalizedCents = if (abs(cents) <= STEP_EPSILON) 0.0 else cents
+                    val pitch = referencePitch + normalizedCents / 100.0
+                    if (pitch < MIDI_PITCH_MIN.toDouble() || pitch > MIDI_PITCH_MAX.toDouble()) {
+                        return@forEach
+                    }
+                    val isReference = abs(normalizedCents) <= STEP_EPSILON
+                    if (isReference) {
+                        hasReferenceMark = true
+                    }
+                    customMarks += CustomMark(
+                        cents = normalizedCents,
+                        ratio = ratio.coerceIn(0f, 1f),
+                        isC = isReference
+                    )
+                }
+            if (!hasReferenceMark &&
+                referencePitch >= MIDI_PITCH_MIN.toDouble() &&
+                referencePitch <= MIDI_PITCH_MAX.toDouble()
+            ) {
+                customMarks += CustomMark(cents = 0.0, ratio = 1f, isC = true)
+            }
+            return customMarks.sortedBy { mark -> mark.cents }
+        }
+
+        private fun parseCustomScaleType(root: JSONObject): CustomScaleType {
+            val rawType = when {
+                root.has("type") -> root.opt("type")
+                root.has("Type") -> root.opt("Type")
+                else -> null
+            }
+            val type = rawType
+                ?.takeUnless { it == JSONObject.NULL }
+                ?.toString()
+                ?.trim()
+                ?.lowercase()
+                .orEmpty()
+            return when (type) {
+                "", "octave" -> CustomScaleType.Octave
+                "full" -> CustomScaleType.Full
+                else -> throw IllegalArgumentException("JSON tuning type '$type' is not supported")
+            }
+        }
+
+        private fun parseFullReferencePitch(root: JSONObject): Double {
+            val rawOffset = jsonOffsetValue(root)
+                ?: throw IllegalArgumentException("JSON tuning type 'full' must contain an offset frequency")
+            val frequencyHz = parseFrequencyHz(rawOffset)
+            require(frequencyHz > 0.0) {
+                "JSON tuning full offset frequency must be greater than 0 Hz"
+            }
+            val pitch = A4_MIDI_PITCH + OCTAVE_SEMITONES * (ln(frequencyHz / A4_FREQUENCY_HZ) / ln(2.0))
+            require(!pitch.isNaN() && !pitch.isInfinite()) {
+                "JSON tuning full offset frequency must map to a finite MIDI pitch"
+            }
+            return pitch
+        }
+
+        private fun jsonOffsetValue(root: JSONObject): Any? {
+            return when {
+                root.has("offset") -> root.opt("offset")
+                root.has("Offset") -> root.opt("Offset")
+                else -> null
+            }?.takeUnless { it == JSONObject.NULL }
+        }
+
+        private fun parseFrequencyHz(value: Any): Double {
+            val frequency = when (value) {
+                is Number -> value.toDouble()
+                else -> {
+                    val text = value.toString().trim()
+                    val normalized = if (text.lowercase().endsWith("hz")) {
+                        text.dropLast(2).trim()
+                    } else {
+                        text
+                    }
+                    normalized.toDoubleOrNull()
+                }
+            } ?: throw IllegalArgumentException("JSON tuning full offset is not a Hz frequency")
+            require(!frequency.isNaN() && !frequency.isInfinite()) {
+                "JSON tuning full offset frequency must be finite"
+            }
+            return frequency
         }
 
         private fun normalizedProfileName(raw: String): String {

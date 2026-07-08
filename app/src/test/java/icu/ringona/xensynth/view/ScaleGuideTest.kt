@@ -134,6 +134,65 @@ class ScaleGuideTest {
         assertEquals(72.0, guide.playbackPitchForMidiPitch(72), 0.0001)
     }
 
+    @Test
+    fun fullProfileDrawsAbsoluteCentsFromReferencePitch() {
+        val guide = ScaleGuide.fromFullCustomProfile(
+            profileName = "full",
+            referencePitch = 69.0,
+            marks = mapOf(
+                -1200.0 to 0.5f,
+                0.0 to 0.7f,
+                1200.0 to 0.8f,
+                5900.0 to 1.0f
+            )
+        )
+
+        val lines = guide.linesForVisibleRange(12, 0.0, 127.0)
+        val referenceLine = lines.single { it.isC }
+
+        assertEquals(69.0, referenceLine.pitch, 0.0001)
+        assertEquals(0.7f, referenceLine.ratio, 0.0001f)
+        assertEquals("O", guide.labelForPitch(referenceLine.pitch, referenceLine.isC))
+        assertTrue(lines.any { kotlin.math.abs(it.pitch - 57.0) < 0.0001 && !it.isC })
+        assertTrue(lines.any { kotlin.math.abs(it.pitch - 81.0) < 0.0001 && !it.isC })
+        assertFalse(lines.any { it.pitch > 127.0 })
+    }
+
+    @Test
+    fun fullProfileTouchPitchDoesNotRepeatAcrossOctaves() {
+        val guide = ScaleGuide.fromFullCustomProfile(
+            profileName = "full",
+            referencePitch = 69.0,
+            marks = mapOf(
+                0.0 to 1.0f,
+                1200.0 to 0.8f
+            )
+        )
+
+        assertEquals(81.0, guide.touchPitchForRaw(12, 82.0) ?: -1.0, 0.0001)
+        assertEquals(81.0, guide.touchPitchForRaw(12, 93.0) ?: -1.0, 0.0001)
+    }
+
+    @Test
+    fun fullProfileKeybindUsesMidiKeysAndReferenceCents() {
+        val guide = ScaleGuide.fromFullCustomProfile(
+            profileName = "full",
+            referencePitch = 69.0,
+            marks = mapOf(0.0 to 1.0f),
+            keybindCents = mapOf(
+                60 to 0.0,
+                61 to -1200.0,
+                62 to 100.0
+            )
+        )
+
+        assertTrue(guide.hasKeybind)
+        assertEquals(69.0, guide.playbackPitchForMidiPitch(60), 0.0001)
+        assertEquals(57.0, guide.playbackPitchForMidiPitch(61), 0.0001)
+        assertEquals(70.0, guide.playbackPitchForMidiPitch(62), 0.0001)
+        assertEquals(63.0, guide.playbackPitchForMidiPitch(63), 0.0001)
+    }
+
     private fun guide(
         marks: Map<Char, Float> = emptyMap(),
         scales: Map<Int, String>

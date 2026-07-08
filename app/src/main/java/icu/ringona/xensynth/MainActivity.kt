@@ -1403,9 +1403,11 @@ class MainActivity : ComponentActivity(), RenderFramePacer.InteractionListener {
     private fun loadTuningJson(name: String, bytes: ByteArray) {
         runCatching {
             scoreContentParser.parseTuning(bytes)
-        }.onSuccess { guide ->
+        }.onSuccess { tuning ->
+            val guide = tuning.scaleGuide
             currentScaleGuide = guide
             waterfallView.setScaleGuide(guide)
+            onOffsetCentsChanged(tuning.offsetCents.toFloat())
             rulerGlassOverlayView?.invalidate()
             applyCurrentKeybindToScore()
             val profileName = guide.profileName ?: CUSTOM_TUNING_FALLBACK_PROFILE
