@@ -20,6 +20,25 @@ class ScaleGuideTest {
     }
 
     @Test
+    fun promotedEdoStepsUseSecondLevelMarks() {
+        val guide = guide(
+            marks = mapOf('2' to 0.6f),
+            scales = mapOf(
+                27 to "033332333322333313333233332",
+                29 to "03333233332323333133332333323"
+            )
+        )
+
+        val step21Tick = guide.tickForPitch(27, 21 * 12.0 / 27.0, 100f)
+        val step22Tick = guide.tickForPitch(29, 22 * 12.0 / 29.0, 100f)
+
+        assertTrue(step21Tick.isVisible)
+        assertTrue(step22Tick.isVisible)
+        assertEquals(50.4f, step21Tick.length, 0.0001f)
+        assertEquals(50.4f, step22Tick.length, 0.0001f)
+    }
+
+    @Test
     fun sMarkerHidesTickAndSplitsTouchSpace() {
         val guide = guide(scales = mapOf(4 to "0S0N"))
 
