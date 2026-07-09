@@ -83,18 +83,49 @@ class ScoreContentParserTest {
         val guide = ScaleGuide.fromCustomProfile("demo", mapOf(0.0 to 1f))
         val parser = parser(tuningParser = { guide })
 
-        assertSame(guide, parser.parseTuning("{}".encodeToByteArray()))
+        val result = parser.parseTuning("{}".encodeToByteArray())
+
+        assertSame(guide, result.scaleGuide)
+        assertEquals(0.0, result.offsetCents, 0.0001)
+    }
+
+    @Test
+    fun parsesTuningOffsetFromJson() {
+        var parsedJson = ""
+        val parser = parser(
+            tuningOffsetParser = { json ->
+                parsedJson = json
+                30.0
+            }
+        )
+
+        val result = parser.parseTuning(
+            """
+            {
+              "profile": "demo",
+              "offset": "+30",
+              "Scale": {
+                "100": 0.8
+              }
+            }
+            """.trimIndent().encodeToByteArray()
+        )
+
+        assertTrue(parsedJson.contains("\"offset\""))
+        assertEquals(30.0, result.offsetCents, 0.0001)
     }
 
     private fun parser(
         converter: (ByteArray, String) -> ByteArray = { bytes, _ -> bytes },
         midiParser: (ByteArray, String) -> ParsedScore = { _, _ -> score() },
-        tuningParser: (String) -> ScaleGuide = { ScaleGuide.fromCustomProfile("test", mapOf(0.0 to 1f)) }
+        tuningParser: (String) -> ScaleGuide = { ScaleGuide.fromCustomProfile("test", mapOf(0.0 to 1f)) },
+        tuningOffsetParser: (String) -> Double = { 0.0 }
     ): ScoreContentParser {
         return ScoreContentParser(
             museScoreConverter = converter,
             midiParser = midiParser,
-            tuningParser = tuningParser
+            tuningParser = tuningParser,
+            tuningOffsetParser = tuningOffsetParser
         )
     }
 

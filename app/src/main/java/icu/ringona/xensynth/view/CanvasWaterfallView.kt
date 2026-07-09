@@ -326,11 +326,15 @@ class CanvasWaterfallView @JvmOverloads constructor(
         val velocity = (WaterfallMetrics.RULER_MIN_VELOCITY + normalized * (127 - WaterfallMetrics.RULER_MIN_VELOCITY))
             .roundToInt()
             .coerceIn(1, 127)
+        val midiPitch = pitch.roundToInt().coerceIn(
+            WaterfallMetrics.DRAWABLE_MIN_PITCH,
+            WaterfallMetrics.DRAWABLE_MAX_PITCH
+        )
         return WaterfallPreviewNote(
             pitch = pitch,
             visualPitch = visualPitch,
-            midiPitch = pitch.roundToInt().coerceIn(WaterfallMetrics.MIN_PITCH, WaterfallMetrics.MAX_PITCH),
-            cents = (pitch - pitch.roundToInt()) * 100.0,
+            midiPitch = midiPitch,
+            cents = (pitch - midiPitch) * 100.0,
             velocity = velocity,
             track = 0
         )
@@ -796,10 +800,9 @@ class CanvasWaterfallView @JvmOverloads constructor(
             if (x < -1f || x > width + 1f) {
                 return@forEachLineInVisibleRange
             }
-            val midiPitch = round(pitch).toInt()
-            val isC4 = midiPitch == 60 && isC
+            val label = scaleGuide.labelForPitch(pitch, isC)
             val length = keyHeight * WaterfallMetrics.C_TICK_HEIGHT_RATIO * ratio
-            val tickLength = if (isC4) {
+            val tickLength = if (label != null) {
                 min(length, keyHeight - WaterfallMetrics.C4_LABEL_RESERVED_HEIGHT_DP * resources.displayMetrics.density)
             } else {
                 length
@@ -809,9 +812,9 @@ class CanvasWaterfallView @JvmOverloads constructor(
             )
             keyboardLinePaint.strokeWidth = if (hasStrokeRatio) 1.4f * strokeRatio else if (isC) 1.4f else 1f
             val alignedX = drawPixelAlignedVerticalLine(canvas, x, top, top + tickLength, keyboardLinePaint)
-            if (isC4) {
+            if (label != null) {
                 canvas.drawText(
-                    "C4",
+                    label,
                     alignedX,
                     bottom - WaterfallMetrics.C4_LABEL_BOTTOM_PADDING_DP * resources.displayMetrics.density,
                     keyboardTextPaint
@@ -840,8 +843,8 @@ class CanvasWaterfallView @JvmOverloads constructor(
             if (!tick.isVisible) {
                 continue
             }
-            val isC4 = tick.midiPitch == 60 && tick.isC
-            val tickLength = if (isC4) {
+            val label = scaleGuide.labelForPitch(pitch, tick.isC)
+            val tickLength = if (label != null) {
                 min(tick.length, keyHeight - WaterfallMetrics.C4_LABEL_RESERVED_HEIGHT_DP * resources.displayMetrics.density)
             } else {
                 tick.length
@@ -849,9 +852,9 @@ class CanvasWaterfallView @JvmOverloads constructor(
             keyboardLinePaint.color = FrostedGlassStyle.rulerHighlight(tick.alpha)
             keyboardLinePaint.strokeWidth = tick.strokeWidth
             val alignedX = drawPixelAlignedVerticalLine(canvas, x, top, top + tickLength, keyboardLinePaint)
-            if (isC4) {
+            if (label != null) {
                 canvas.drawText(
-                    "C4",
+                    label,
                     alignedX,
                     bottom - WaterfallMetrics.C4_LABEL_BOTTOM_PADDING_DP * resources.displayMetrics.density,
                     keyboardTextPaint
@@ -1482,12 +1485,22 @@ class CanvasWaterfallView @JvmOverloads constructor(
     }
 
     private fun quantizePitchToEdo(rawPitch: Double): Double? {
+        val minPitch = if (scaleGuide.usesFullMidiRange) {
+            WaterfallMetrics.DRAWABLE_MIN_PITCH.toDouble()
+        } else {
+            WaterfallMetrics.MIN_PITCH.toDouble()
+        }
+        val maxPitch = if (scaleGuide.usesFullMidiRange) {
+            WaterfallMetrics.DRAWABLE_MAX_PITCH.toDouble()
+        } else {
+            WaterfallMetrics.MAX_PITCH.toDouble()
+        }
         if (octaveDivisions <= 0 && !scaleGuide.isCustom) {
-            return rawPitch.coerceIn(WaterfallMetrics.MIN_PITCH.toDouble(), WaterfallMetrics.MAX_PITCH.toDouble())
+            return rawPitch.coerceIn(minPitch, maxPitch)
         }
         return scaleGuide
             .touchPitchForRaw(octaveDivisions, rawPitch)
-            ?.coerceIn(WaterfallMetrics.MIN_PITCH.toDouble(), WaterfallMetrics.MAX_PITCH.toDouble())
+            ?.coerceIn(minPitch, maxPitch)
     }
 
     private fun stickyRulerPitch(rawPitch: Double, snappedPitch: Double, stickyVisualPitch: Double?): Double {

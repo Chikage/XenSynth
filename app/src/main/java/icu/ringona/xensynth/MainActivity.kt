@@ -142,6 +142,8 @@ import kotlin.math.roundToInt
 
 private const val COMPACT_SLIDER_WIDTH_DP = 184
 private const val TOOLBAR_TITLE_MAX_WIDTH_DP = 192
+private const val TUNING_PROFILE_MARQUEE_VISIBLE_CHARS = 6
+private const val COMPACT_MONOSPACE_CHAR_WIDTH_DP = 7
 private const val TOOLBAR_PLAYHEAD_UPDATE_NANOS = 100_000_000L
 private const val SHOW_REFRESH_DIAGNOSTIC_CONTROLS = false
 
@@ -1403,9 +1405,11 @@ class MainActivity : ComponentActivity(), RenderFramePacer.InteractionListener {
     private fun loadTuningJson(name: String, bytes: ByteArray) {
         runCatching {
             scoreContentParser.parseTuning(bytes)
-        }.onSuccess { guide ->
+        }.onSuccess { tuning ->
+            val guide = tuning.scaleGuide
             currentScaleGuide = guide
             waterfallView.setScaleGuide(guide)
+            onOffsetCentsChanged(tuning.offsetCents.toFloat())
             rulerGlassOverlayView?.invalidate()
             applyCurrentKeybindToScore()
             val profileName = guide.profileName ?: CUSTOM_TUNING_FALLBACK_PROFILE
@@ -2224,6 +2228,7 @@ private fun XenToolbar(
                 inputValue = state.edo.toString(),
                 valueEditable = state.tuningValueEditable,
                 marqueeDisplayValue = !state.tuningValueEditable,
+                marqueeDisplayWidth = (TUNING_PROFILE_MARQUEE_VISIBLE_CHARS * COMPACT_MONOSPACE_CHAR_WIDTH_DP).dp,
                 width = metricControlWidth,
                 sliderValue = state.edoProgress,
                 range = 0f..MainActivity.EDO_MAX.toFloat(),
@@ -2654,6 +2659,7 @@ private fun EditableMetricSliderTile(
     inputValue: String,
     valueEditable: Boolean,
     marqueeDisplayValue: Boolean = false,
+    marqueeDisplayWidth: Dp? = null,
     width: Int,
     sliderValue: Float,
     range: ClosedFloatingPointRange<Float>,
@@ -2801,7 +2807,8 @@ private fun EditableMetricSliderTile(
                             color = if (enabled) XenToolbarText else XenMuted,
                             fontSize = 12.sp,
                             lineHeight = 13.sp,
-                            marquee = marqueeDisplayValue
+                            marquee = marqueeDisplayValue,
+                            marqueeWidth = marqueeDisplayWidth
                         )
                     }
                 }
@@ -3282,18 +3289,22 @@ private fun CompactMetricText(
     color: ComposeColor,
     fontSize: TextUnit,
     lineHeight: TextUnit,
-    marquee: Boolean = false
+    marquee: Boolean = false,
+    marqueeWidth: Dp? = null
 ) {
+    val baseModifier = when {
+        marqueeWidth != null -> Modifier.width(marqueeWidth)
+        marquee -> Modifier.fillMaxWidth()
+        else -> Modifier
+    }
     val modifier = if (marquee) {
-        Modifier
-            .fillMaxWidth()
-            .basicMarquee(
-                iterations = Int.MAX_VALUE,
-                repeatDelayMillis = 1_200,
-                initialDelayMillis = 800
-            )
+        baseModifier.basicMarquee(
+            iterations = Int.MAX_VALUE,
+            repeatDelayMillis = 1_200,
+            initialDelayMillis = 800
+        )
     } else {
-        Modifier
+        baseModifier
     }
     Text(
         modifier = modifier,

@@ -64,9 +64,9 @@ class ScaleGuideTest {
     }
 
     @Test
-    fun customProfileTruncatesAndDrawsCentsMarks() {
+    fun customProfileKeepsLongNameAndDrawsCentsMarks() {
         val guide = ScaleGuide.fromCustomProfile(
-            profileName = "longname9",
+            profileName = "longprofile9",
             marks = mapOf(203.91 to 0.8f)
         )
 
@@ -75,7 +75,7 @@ class ScaleGuideTest {
         val customLine = lines.first { kotlin.math.abs(it.pitch - 62.0391) < 0.0001 }
 
         assertTrue(guide.isCustom)
-        assertEquals("longname", guide.profileName)
+        assertEquals("longprofile9", guide.profileName)
         assertEquals(1f, cLine.ratio, 0.0001f)
         assertEquals(0.8f, customLine.ratio, 0.0001f)
         assertEquals(0.8f, customLine.strokeRatio ?: -1f, 0.0001f)
@@ -151,6 +151,84 @@ class ScaleGuideTest {
         assertEquals(62.0391, guide.playbackPitchForMidiPitch(62), 0.0001)
         assertEquals(70.8827, guide.playbackPitchForMidiPitch(71), 0.0001)
         assertEquals(72.0, guide.playbackPitchForMidiPitch(72), 0.0001)
+    }
+
+    @Test
+    fun fullProfileDrawsAbsoluteCentsFromReferencePitch() {
+        val guide = ScaleGuide.fromFullCustomProfile(
+            profileName = "full",
+            referencePitch = 69.0,
+            marks = mapOf(
+                -1200.0 to 0.5f,
+                0.0 to 0.7f,
+                1200.0 to 0.8f,
+                5900.0 to 1.0f
+            )
+        )
+
+        val lines = guide.linesForVisibleRange(12, 0.0, 127.0)
+        val referenceLine = lines.single { it.isC }
+
+        assertEquals(69.0, referenceLine.pitch, 0.0001)
+        assertEquals(0.7f, referenceLine.ratio, 0.0001f)
+        assertEquals("O", guide.labelForPitch(referenceLine.pitch, referenceLine.isC))
+        assertTrue(lines.any { kotlin.math.abs(it.pitch - 57.0) < 0.0001 && !it.isC })
+        assertTrue(lines.any { kotlin.math.abs(it.pitch - 81.0) < 0.0001 && !it.isC })
+        assertFalse(lines.any { it.pitch > 127.0 })
+    }
+
+    @Test
+    fun fullProfileTouchPitchDoesNotRepeatAcrossOctaves() {
+        val guide = ScaleGuide.fromFullCustomProfile(
+            profileName = "full",
+            referencePitch = 69.0,
+            marks = mapOf(
+                0.0 to 1.0f,
+                1200.0 to 0.8f
+            )
+        )
+
+        assertEquals(81.0, guide.touchPitchForRaw(12, 82.0) ?: -1.0, 0.0001)
+        assertEquals(81.0, guide.touchPitchForRaw(12, 93.0) ?: -1.0, 0.0001)
+    }
+
+    @Test
+    fun fullProfileKeybindUsesMidiKeysAndReferenceCents() {
+        val guide = ScaleGuide.fromFullCustomProfile(
+            profileName = "full",
+            referencePitch = 69.0,
+            marks = mapOf(0.0 to 1.0f),
+            keybindCents = mapOf(
+                60 to 0.0,
+                61 to -1200.0,
+                62 to 100.0
+            )
+        )
+
+        assertTrue(guide.hasKeybind)
+        assertEquals(69.0, guide.playbackPitchForMidiPitch(60), 0.0001)
+        assertEquals(57.0, guide.playbackPitchForMidiPitch(61), 0.0001)
+        assertEquals(70.0, guide.playbackPitchForMidiPitch(62), 0.0001)
+        assertEquals(63.0, guide.playbackPitchForMidiPitch(63), 0.0001)
+    }
+
+    @Test
+    fun fullOffsetSupportsDefaultFrequencyNoteNameAndCentsForms() {
+        assertEquals(60.0, ScaleGuide.fullReferencePitchFromOffset(null), 0.0001)
+        assertEquals(69.0, ScaleGuide.fullReferencePitchFromOffset(440), 0.0001)
+        assertEquals(69.0, ScaleGuide.fullReferencePitchFromOffset("440"), 0.0001)
+        assertEquals(69.0, ScaleGuide.fullReferencePitchFromOffset("440Hz"), 0.0001)
+        assertEquals(60.0, ScaleGuide.fullReferencePitchFromOffset("C4"), 0.0001)
+        assertEquals(61.291, ScaleGuide.fullReferencePitchFromOffset("C#4+29.1(c)"), 0.0001)
+        assertEquals(61.291, ScaleGuide.fullReferencePitchFromOffset("C#4+29.1"), 0.0001)
+        assertEquals(58.75, ScaleGuide.fullReferencePitchFromOffset("B3-25c"), 0.0001)
+        assertEquals(60.0, ScaleGuide.fullReferencePitchFromOffset("6000c"), 0.0001)
+    }
+
+    @Test
+    fun fullOffsetNoteNameCentsNormalizeToNearestStandardPitch() {
+        assertEquals(61.291, ScaleGuide.fullReferencePitchFromOffset("C4+129.1"), 0.0001)
+        assertEquals(58.7, ScaleGuide.fullReferencePitchFromOffset("C4-130c"), 0.0001)
     }
 
     private fun guide(
