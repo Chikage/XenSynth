@@ -11,7 +11,7 @@ MIDX / MIDI 2.0 waterfall files.
 - Orientation: sensor landscape
 - File access: Android Storage Access Framework, plus `ACTION_VIEW` handling for MIDI-like files
 - MIDI-related manifest capability: optional `android.software.midi` and USB host feature declarations
-- Waterfall engine: native Android renderer and playback controller
+- Waterfall engine: OpenGL ES 3.0 renderer with an automatic Canvas fallback
 - Supported score inputs: `.mid`, `.midi`, `.midx`, `.midix`, `.midi2`, `.mscz`, `.mscx`
 - MuseScore conversion helper: `MsczToMidx` can emit `.midx` with microtonal offsets or plain `.mid/.midi`
 - Sound mode: native Oboe / FluidSynth playback with the bundled SoundFont
@@ -19,6 +19,15 @@ MIDX / MIDI 2.0 waterfall files.
 The app no longer embeds a WebView waterfall runtime; score parsing,
 visualization, gestures, transport, and audio scheduling all run in the native
 Android layer.
+
+## Waterfall Rendering
+
+On devices reporting OpenGL ES 3.0 or newer, the waterfall background, pitch
+grid, measure lines, score notes, manual notes, and playhead are rendered by a
+batched GLES backend. The existing Android overlay continues to draw the glass
+ruler, labels, impacts, and particles. Devices without ES 3.0 keep using the
+previous hardware-accelerated Canvas renderer; GLES support is declared as an
+optional manifest feature, so it does not filter those devices at install time.
 
 ## Build
 

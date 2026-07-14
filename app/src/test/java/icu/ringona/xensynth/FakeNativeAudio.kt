@@ -10,12 +10,14 @@ class FakeNativeAudio : NativeAudio {
     var throwOnIsStarted = false
     var throwOnRestart = false
     var nextNoteId: Int? = 1
+    var loadBuiltinSf2Result = true
     var setupCalls = 0
     var startCalls = 0
     var restartCalls = 0
     var teardownCalls = 0
     var allSoundOffCalls = 0
     var setGainCalls = 0
+    var loadBuiltinSf2Calls = 0
     var lastGain = 0f
     val noteOns = mutableListOf<NoteOnCall>()
     val noteOffs = mutableListOf<Int>()
@@ -54,7 +56,10 @@ class FakeNativeAudio : NativeAudio {
 
     override fun loadSf2(path: String): Boolean = true
 
-    override fun soundFontKey(): ByteArray = ByteArray(32)
+    override fun loadBuiltinSf2(): Boolean {
+        loadBuiltinSf2Calls++
+        return loadBuiltinSf2Result
+    }
 
     override fun unloadSf2() = Unit
 

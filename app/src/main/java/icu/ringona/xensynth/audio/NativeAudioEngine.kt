@@ -17,7 +17,7 @@ object NativeAudioEngine : NativeAudio {
 
     override fun loadSf2(path: String): Boolean = loadSf2Native(path)
 
-    override fun soundFontKey(): ByteArray = soundFontKeyNative()
+    override fun loadBuiltinSf2(): Boolean = loadBuiltinSf2Native()
 
     override fun unloadSf2() = unloadSf2Native()
 
@@ -68,7 +68,7 @@ object NativeAudioEngine : NativeAudio {
 
     private external fun loadSf2Native(filePath: String): Boolean
 
-    private external fun soundFontKeyNative(): ByteArray
+    private external fun loadBuiltinSf2Native(): Boolean
 
     private external fun unloadSf2Native()
 

@@ -702,6 +702,7 @@ internal class FrostedRulerOverlayView @JvmOverloads constructor(
     private var octaveDivisionsProvider: (() -> Int)? = null
     private var impactProvider: (() -> List<WaterfallRulerImpact>)? = null
     private var particleProvider: (() -> List<WaterfallRulerParticle>)? = null
+    private var particleClipTopProvider: (() -> Float)? = null
     private var captureBitmap: Bitmap? = null
     private var grainBitmap: Bitmap? = null
     private var grainShader: BitmapShader? = null
@@ -748,6 +749,11 @@ internal class FrostedRulerOverlayView @JvmOverloads constructor(
 
     fun setRulerParticleProvider(provider: () -> List<WaterfallRulerParticle>) {
         particleProvider = provider
+        invalidate()
+    }
+
+    fun setRulerParticleClipTopProvider(provider: () -> Float) {
+        particleClipTopProvider = provider
         invalidate()
     }
 
@@ -1116,14 +1122,15 @@ internal class FrostedRulerOverlayView @JvmOverloads constructor(
             particlePaint.blendMode = BlendMode.PLUS
             particleCorePaint.blendMode = BlendMode.PLUS
         }
+        val clipTop = particleClipTopProvider?.invoke()?.coerceIn(0f, height.toFloat()) ?: area.top
         val saveCount = canvas.save()
-        canvas.clipRect(area)
+        canvas.clipRect(0f, clipTop, width.toFloat(), height.toFloat())
         var drewParticle = false
         particles.forEach { particle ->
             val maxLife = particle.maxLife.takeIf { it > 0f } ?: return@forEach
             val x = particle.x
             val y = area.top + particle.yFromRulerTop
-            if (x < -12f || x > width + 12f || y < area.top - 24f || y > area.bottom + 24f) {
+            if (x < -12f || x > width + 12f || y < clipTop - 24f || y > height + 24f) {
                 return@forEach
             }
             val lifeRatio = (particle.life / maxLife).coerceIn(0f, 1f)

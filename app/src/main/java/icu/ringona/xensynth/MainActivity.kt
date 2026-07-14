@@ -122,6 +122,7 @@ import icu.ringona.xensynth.view.CanvasWaterfallView
 import icu.ringona.xensynth.view.FrostedGlassFrameLayout
 import icu.ringona.xensynth.view.FrostedRulerOverlayView
 import icu.ringona.xensynth.view.HighRefreshRatePolicy
+import icu.ringona.xensynth.view.OpenGlWaterfallView
 import icu.ringona.xensynth.view.RenderFramePacer
 import icu.ringona.xensynth.view.ScaleGuide
 import icu.ringona.xensynth.view.WaterfallBackdropView
@@ -309,7 +310,7 @@ class MainActivity : ComponentActivity(), RenderFramePacer.InteractionListener {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         scoreLoader = ScoreLoader(contentResolver)
-        defaultSoundFontLoader = DefaultSoundFontLoader(cacheDir, assets)
+        defaultSoundFontLoader = DefaultSoundFontLoader(cacheDir)
         defaultScaleGuide = ScaleGuide.fromResources(this)
         currentScaleGuide = defaultScaleGuide
         loadPersistedSettings()
@@ -1003,7 +1004,15 @@ class MainActivity : ComponentActivity(), RenderFramePacer.InteractionListener {
             )
             setRulerImpactProvider { waterfallView.rulerImpacts() }
             setRulerParticleProvider { waterfallView.rulerParticles() }
-            visibility = if (surface is CanvasWaterfallView) View.GONE else View.VISIBLE
+            setRulerParticleClipTopProvider {
+                val currentSurface = waterfallView
+                val surfaceLocation = IntArray(2)
+                val overlayLocation = IntArray(2)
+                currentSurface.view.getLocationInWindow(surfaceLocation)
+                getLocationInWindow(overlayLocation)
+                (surfaceLocation[1] - overlayLocation[1]).toFloat()
+            }
+            visibility = if (surface.rendersRulerInternally) View.GONE else View.VISIBLE
             layoutParams = FrameLayout.LayoutParams(
                 FrameLayout.LayoutParams.MATCH_PARENT,
                 FrameLayout.LayoutParams.MATCH_PARENT
@@ -1014,7 +1023,7 @@ class MainActivity : ComponentActivity(), RenderFramePacer.InteractionListener {
     private fun updateRulerGlassOverlay(surface: WaterfallSurface = waterfallView) {
         rulerGlassOverlayView?.apply {
             appBackgroundView?.let(::setBackdropSource)
-            visibility = if (surface is CanvasWaterfallView) {
+            visibility = if (surface.rendersRulerInternally) {
                 View.GONE
             } else {
                 View.VISIBLE
@@ -1315,9 +1324,87 @@ class MainActivity : ComponentActivity(), RenderFramePacer.InteractionListener {
     }
 
     private fun createWaterfallSurface(): WaterfallSurface {
-        val surface = createCanvasWaterfallSurface()
+        val surface = createOpenGlWaterfallSurface() ?: createCanvasWaterfallSurface().also {
+            Log.i(TAG, "Using Canvas waterfall renderer")
+        }
         configureWaterfallSurface(surface)
         return surface
+    }
+
+    private fun createOpenGlWaterfallSurface(): WaterfallSurface? {
+        if (!OpenGlWaterfallView.isSupported(this)) {
+            Log.w(TAG, "OpenGL ES 3.0 preflight failed; falling back to Canvas renderer")
+            return null
+        }
+        return runCatching {
+            OpenGlWaterfallView(this).apply {
+                setBackgroundColor(Color.TRANSPARENT)
+                onRendererFailure = ::fallbackToCanvasWaterfallSurface
+            }
+        }.onSuccess {
+            Log.i(TAG, "Using OpenGL ES waterfall renderer")
+        }.onFailure { error ->
+            Log.w(TAG, "OpenGL ES waterfall renderer creation failed; falling back to Canvas", error)
+        }.getOrNull()
+    }
+
+    private fun fallbackToCanvasWaterfallSurface(error: Throwable) {
+        if (destroyed.get() || !::waterfallView.isInitialized) {
+            return
+        }
+        val failedSurface = waterfallView as? OpenGlWaterfallView ?: return
+        if (!::waterfallHost.isInitialized) {
+            window.decorView.post { fallbackToCanvasWaterfallSurface(error) }
+            return
+        }
+
+        Log.e(TAG, "OpenGL renderer failed at runtime; switching to Canvas", error)
+        val displayState = failedSurface.displayState()
+        if (::waterfallGestureController.isInitialized) {
+            waterfallGestureController.cancelTouchState()
+        }
+        setWaterfallGestureActive(false)
+        stopTrackedMidiNotes()
+        failedSurface.onRendererFailure = null
+        failedSurface.view.setOnTouchListener(null)
+        failedSurface.onHostPause()
+        failedSurface.onHostDestroy()
+
+        val failedView = failedSurface.view
+        val existingIndex = waterfallHost.indexOfChild(failedView)
+        val failedIndex = if (existingIndex >= 0) existingIndex else waterfallHost.childCount
+        val failedLayoutParams = failedView.layoutParams ?: FrameLayout.LayoutParams(
+            FrameLayout.LayoutParams.MATCH_PARENT,
+            FrameLayout.LayoutParams.MATCH_PARENT
+        )
+        waterfallHost.removeView(failedView)
+
+        val fallback = createCanvasWaterfallSurface()
+        configureWaterfallSurface(fallback)
+        fallback.setScore(nativeParsedScore)
+        fallback.setDisplayState(
+            pixels = displayState.pixelsPerSecond,
+            pitchScale = displayState.pitchZoomScale,
+            pitchPan = displayState.pitchPanSemitones,
+            offsetCents = displayState.waterfallOffsetCents
+        )
+        fallback.syncPlayhead(nativePlayheadSeconds)
+        fallback.setPlaybackActive(nativePlaying)
+        fallback.setRefreshRateHints(
+            surfaceFrameRateEnabled = refreshRateExperimentMode.surfaceFrameRateEnabled,
+            viewFrameRateEnabled = refreshRateExperimentMode.viewRequestedFrameRateEnabled
+        )
+
+        waterfallView = fallback
+        waterfallGestureController = createWaterfallGestureController(fallback)
+        waterfallHost.addView(fallback.view, failedIndex, failedLayoutParams)
+        bindWaterfallTouchListener(fallback)
+        updateRulerGlassOverlay(fallback)
+        if (lifecycle.currentState.isAtLeast(androidx.lifecycle.Lifecycle.State.RESUMED)) {
+            fallback.onHostResume()
+        }
+        setStatusText("OpenGL renderer unavailable; using Canvas")
+        refreshHighRefreshRateRequest(force = true)
     }
 
     private fun createCanvasWaterfallSurface(): WaterfallSurface {

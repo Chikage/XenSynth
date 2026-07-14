@@ -4,11 +4,14 @@
 #include <array>
 #include <atomic>
 #include <cmath>
+#include <cstdio>
 #include <cstdint>
+#include <cstring>
 #include <list>
 #include <limits>
 #include <memory>
 #include <mutex>
+#include <vector>
 
 #include <android/log.h>
 #include <oboe/Oboe.h>
@@ -16,7 +19,13 @@
 
 namespace {
 
+extern "C" {
+extern const uint8_t xen_soundfont_blob_start[];
+extern const uint8_t xen_soundfont_blob_end[];
+}
+
 constexpr const char *TAG = "XenAudioEngine";
+constexpr const char *kBuiltinSoundFontUri = "memory://xensynth/builtin.sf2";
 constexpr int32_t kChannelCount = 2;
 constexpr int32_t kSourceMidiChannelCount = 16;
 constexpr int32_t kFluidMidiChannelCount = 256;
@@ -44,6 +53,13 @@ constexpr int32_t kFluidChorusVoiceCount = 3;
 constexpr double kFluidChorusLevel = 0.16;
 constexpr double kFluidChorusSpeed = 0.24;
 constexpr double kFluidChorusDepthMs = 0.72;
+constexpr size_t kSoundFontNonceBytes = 12;
+constexpr size_t kSoundFontGcmTagBytes = 16;
+constexpr jint kGcmTagBits = static_cast<jint>(kSoundFontGcmTagBytes * 8);
+constexpr jint kCipherDecryptMode = 2;
+constexpr std::array<uint8_t, 8> kSoundFontPackageMagic = {
+        0x9d, 0x72, 0xb4, 0x1e, 0x43, 0xe8, 0x0d, 0xa6
+};
 constexpr std::array<uint8_t, 32> kSoundFontKeyMask = {
         0xdf, 0xa1, 0x09, 0xd1, 0x9a, 0x2e, 0x08, 0x36,
         0xf0, 0xce, 0xe7, 0x5e, 0x6f, 0x8a, 0x68, 0x6e,
@@ -97,6 +113,304 @@ struct FluidNote {
     bool started = false;
     bool releasing = false;
 };
+
+struct EmbeddedSoundFontCursor {
+    const uint8_t *data = nullptr;
+    size_t size = 0;
+    size_t offset = 0;
+};
+
+static const uint8_t *embeddedSoundFontData = nullptr;
+static size_t embeddedSoundFontSize = 0;
+
+static std::array<jbyte, 32> buildSoundFontKey();
+
+static void secureClear(void *data, size_t size) {
+    auto *bytes = static_cast<volatile uint8_t *>(data);
+    while (size-- > 0) {
+        *bytes++ = 0;
+    }
+}
+
+static void secureClearAndRelease(std::vector<uint8_t> &data) {
+    if (!data.empty()) {
+        secureClear(data.data(), data.size());
+    }
+    std::vector<uint8_t>().swap(data);
+}
+
+static bool clearJniException(JNIEnv *env, const char *operation) {
+    if (!env->ExceptionCheck()) {
+        return false;
+    }
+    env->ExceptionClear();
+    __android_log_print(ANDROID_LOG_ERROR, TAG, "SoundFont decrypt failed during %s", operation);
+    return true;
+}
+
+static bool isSoundFontData(const std::vector<uint8_t> &data) {
+    if (data.size() < 12 ||
+        std::memcmp(data.data(), "RIFF", 4) != 0 ||
+        std::memcmp(data.data() + 8, "sfbk", 4) != 0) {
+        return false;
+    }
+    const uint32_t riffSize = static_cast<uint32_t>(data[4]) |
+                              (static_cast<uint32_t>(data[5]) << 8u) |
+                              (static_cast<uint32_t>(data[6]) << 16u) |
+                              (static_cast<uint32_t>(data[7]) << 24u);
+    return static_cast<uint64_t>(riffSize) + 8u == data.size();
+}
+
+static bool decryptEmbeddedSoundFont(JNIEnv *env, std::vector<uint8_t> &plaintext) {
+    const uintptr_t blobStart = reinterpret_cast<uintptr_t>(xen_soundfont_blob_start);
+    const uintptr_t blobEnd = reinterpret_cast<uintptr_t>(xen_soundfont_blob_end);
+    constexpr size_t packageHeaderBytes = kSoundFontPackageMagic.size() + kSoundFontNonceBytes;
+    if (blobEnd <= blobStart) {
+        return false;
+    }
+    const size_t packageSize = blobEnd - blobStart;
+    if (packageSize <= packageHeaderBytes + kSoundFontGcmTagBytes ||
+        std::memcmp(xen_soundfont_blob_start,
+                    kSoundFontPackageMagic.data(),
+                    kSoundFontPackageMagic.size()) != 0) {
+        __android_log_print(ANDROID_LOG_ERROR, TAG, "Embedded SoundFont package is invalid");
+        return false;
+    }
+
+    const size_t encryptedSize = packageSize - packageHeaderBytes;
+    const size_t plaintextSize = encryptedSize - kSoundFontGcmTagBytes;
+    if (encryptedSize > static_cast<size_t>(std::numeric_limits<jint>::max()) ||
+        plaintextSize > static_cast<size_t>(std::numeric_limits<jint>::max())) {
+        __android_log_print(ANDROID_LOG_ERROR, TAG, "Embedded SoundFont package is too large");
+        return false;
+    }
+
+    plaintext.resize(encryptedSize);
+    if (env->PushLocalFrame(24) != JNI_OK) {
+        secureClearAndRelease(plaintext);
+        return false;
+    }
+
+    bool decrypted = false;
+    auto key = buildSoundFontKey();
+    do {
+        jbyteArray keyArray = env->NewByteArray(static_cast<jsize>(key.size()));
+        if (clearJniException(env, "key allocation") || keyArray == nullptr) {
+            break;
+        }
+        env->SetByteArrayRegion(keyArray, 0, static_cast<jsize>(key.size()), key.data());
+        if (clearJniException(env, "key copy")) {
+            break;
+        }
+
+        jbyteArray nonceArray = env->NewByteArray(static_cast<jsize>(kSoundFontNonceBytes));
+        if (clearJniException(env, "nonce allocation") || nonceArray == nullptr) {
+            break;
+        }
+        env->SetByteArrayRegion(
+                nonceArray,
+                0,
+                static_cast<jsize>(kSoundFontNonceBytes),
+                reinterpret_cast<const jbyte *>(
+                        xen_soundfont_blob_start + kSoundFontPackageMagic.size()));
+        if (clearJniException(env, "nonce copy")) {
+            break;
+        }
+
+        jclass secretKeySpecClass = env->FindClass("javax/crypto/spec/SecretKeySpec");
+        if (clearJniException(env, "AES key class lookup") || secretKeySpecClass == nullptr) {
+            break;
+        }
+        jmethodID secretKeySpecConstructor = env->GetMethodID(
+                secretKeySpecClass,
+                "<init>",
+                "([BLjava/lang/String;)V");
+        if (clearJniException(env, "AES key constructor lookup") ||
+            secretKeySpecConstructor == nullptr) {
+            break;
+        }
+        jstring aesName = env->NewStringUTF("AES");
+        if (clearJniException(env, "AES name allocation") || aesName == nullptr) {
+            break;
+        }
+        jobject secretKey = env->NewObject(
+                secretKeySpecClass,
+                secretKeySpecConstructor,
+                keyArray,
+                aesName);
+        if (clearJniException(env, "AES key creation") || secretKey == nullptr) {
+            break;
+        }
+        std::array<jbyte, 32> clearedKey{};
+        env->SetByteArrayRegion(
+                keyArray,
+                0,
+                static_cast<jsize>(clearedKey.size()),
+                clearedKey.data());
+        if (clearJniException(env, "temporary key clearing")) {
+            break;
+        }
+
+        jclass gcmParameterSpecClass = env->FindClass("javax/crypto/spec/GCMParameterSpec");
+        if (clearJniException(env, "GCM class lookup") || gcmParameterSpecClass == nullptr) {
+            break;
+        }
+        jmethodID gcmParameterSpecConstructor = env->GetMethodID(
+                gcmParameterSpecClass,
+                "<init>",
+                "(I[B)V");
+        if (clearJniException(env, "GCM constructor lookup") ||
+            gcmParameterSpecConstructor == nullptr) {
+            break;
+        }
+        jobject gcmParameterSpec = env->NewObject(
+                gcmParameterSpecClass,
+                gcmParameterSpecConstructor,
+                kGcmTagBits,
+                nonceArray);
+        if (clearJniException(env, "GCM parameter creation") || gcmParameterSpec == nullptr) {
+            break;
+        }
+
+        jclass cipherClass = env->FindClass("javax/crypto/Cipher");
+        if (clearJniException(env, "cipher class lookup") || cipherClass == nullptr) {
+            break;
+        }
+        jmethodID getInstance = env->GetStaticMethodID(
+                cipherClass,
+                "getInstance",
+                "(Ljava/lang/String;)Ljavax/crypto/Cipher;");
+        if (clearJniException(env, "cipher factory lookup") || getInstance == nullptr) {
+            break;
+        }
+        jstring transformation = env->NewStringUTF("AES/GCM/NoPadding");
+        if (clearJniException(env, "cipher name allocation") || transformation == nullptr) {
+            break;
+        }
+        jobject cipher = env->CallStaticObjectMethod(cipherClass, getInstance, transformation);
+        if (clearJniException(env, "cipher creation") || cipher == nullptr) {
+            break;
+        }
+
+        jmethodID init = env->GetMethodID(
+                cipherClass,
+                "init",
+                "(ILjava/security/Key;Ljava/security/spec/AlgorithmParameterSpec;)V");
+        if (clearJniException(env, "cipher initialization lookup") || init == nullptr) {
+            break;
+        }
+        env->CallVoidMethod(cipher, init, kCipherDecryptMode, secretKey, gcmParameterSpec);
+        if (clearJniException(env, "cipher initialization")) {
+            break;
+        }
+
+        jmethodID doFinal = env->GetMethodID(
+                cipherClass,
+                "doFinal",
+                "(Ljava/nio/ByteBuffer;Ljava/nio/ByteBuffer;)I");
+        if (clearJniException(env, "cipher finalization lookup") || doFinal == nullptr) {
+            break;
+        }
+        jobject inputBuffer = env->NewDirectByteBuffer(
+                const_cast<uint8_t *>(xen_soundfont_blob_start + packageHeaderBytes),
+                static_cast<jlong>(encryptedSize));
+        if (clearJniException(env, "encrypted buffer setup") || inputBuffer == nullptr) {
+            break;
+        }
+        jobject outputBuffer = env->NewDirectByteBuffer(
+                plaintext.data(),
+                static_cast<jlong>(plaintext.size()));
+        if (clearJniException(env, "plaintext buffer setup") || outputBuffer == nullptr) {
+            break;
+        }
+        const jint written = env->CallIntMethod(cipher, doFinal, inputBuffer, outputBuffer);
+        if (clearJniException(env, "authenticated decryption") ||
+            written != static_cast<jint>(plaintextSize)) {
+            break;
+        }
+        plaintext.resize(plaintextSize);
+        decrypted = isSoundFontData(plaintext);
+        if (!decrypted) {
+            __android_log_print(ANDROID_LOG_ERROR, TAG, "Decrypted SoundFont validation failed");
+        }
+    } while (false);
+
+    secureClear(key.data(), key.size());
+    env->PopLocalFrame(nullptr);
+    if (!decrypted) {
+        secureClearAndRelease(plaintext);
+    }
+    return decrypted;
+}
+
+static void *openEmbeddedSoundFont(const char *filename) {
+    if (filename == nullptr || std::strcmp(filename, kBuiltinSoundFontUri) != 0 ||
+        embeddedSoundFontData == nullptr || embeddedSoundFontSize == 0) {
+        return nullptr;
+    }
+    return new EmbeddedSoundFontCursor{
+            embeddedSoundFontData,
+            embeddedSoundFontSize,
+            0
+    };
+}
+
+static int readEmbeddedSoundFont(void *buffer, fluid_long_long_t count, void *handle) {
+    auto *cursor = static_cast<EmbeddedSoundFontCursor *>(handle);
+    if (cursor == nullptr || buffer == nullptr || count < 0 ||
+        cursor->offset > cursor->size ||
+        static_cast<uint64_t>(count) > cursor->size - cursor->offset) {
+        return FLUID_FAILED;
+    }
+    std::memcpy(buffer, cursor->data + cursor->offset, static_cast<size_t>(count));
+    cursor->offset += static_cast<size_t>(count);
+    return FLUID_OK;
+}
+
+static int seekEmbeddedSoundFont(void *handle, fluid_long_long_t offset, int origin) {
+    auto *cursor = static_cast<EmbeddedSoundFontCursor *>(handle);
+    if (cursor == nullptr || cursor->size > static_cast<size_t>(
+            std::numeric_limits<fluid_long_long_t>::max())) {
+        return FLUID_FAILED;
+    }
+    fluid_long_long_t base = 0;
+    switch (origin) {
+        case SEEK_SET:
+            break;
+        case SEEK_CUR:
+            base = static_cast<fluid_long_long_t>(cursor->offset);
+            break;
+        case SEEK_END:
+            base = static_cast<fluid_long_long_t>(cursor->size);
+            break;
+        default:
+            return FLUID_FAILED;
+    }
+    if ((offset > 0 && base > std::numeric_limits<fluid_long_long_t>::max() - offset) ||
+        (offset < 0 && offset < -base)) {
+        return FLUID_FAILED;
+    }
+    const fluid_long_long_t next = base + offset;
+    if (next < 0 || static_cast<uint64_t>(next) > cursor->size) {
+        return FLUID_FAILED;
+    }
+    cursor->offset = static_cast<size_t>(next);
+    return FLUID_OK;
+}
+
+static fluid_long_long_t tellEmbeddedSoundFont(void *handle) {
+    auto *cursor = static_cast<EmbeddedSoundFontCursor *>(handle);
+    if (cursor == nullptr || cursor->offset > static_cast<size_t>(
+            std::numeric_limits<fluid_long_long_t>::max())) {
+        return FLUID_FAILED;
+    }
+    return static_cast<fluid_long_long_t>(cursor->offset);
+}
+
+static int closeEmbeddedSoundFont(void *handle) {
+    delete static_cast<EmbeddedSoundFontCursor *>(handle);
+    return FLUID_OK;
+}
 
 static bool isPianoProgram(int32_t program) {
     return program >= 0 && program <= 7;
@@ -252,6 +566,41 @@ public:
         applyPitchCalibrationLocked();
         fluid.loading.store(false, std::memory_order_release);
         __android_log_print(ANDROID_LOG_INFO, TAG, "sf2 loaded: %s", path);
+        return true;
+    }
+
+    bool loadBuiltinSf2(JNIEnv *env) {
+        std::vector<uint8_t> decryptedSoundFont;
+        if (env == nullptr || !decryptEmbeddedSoundFont(env, decryptedSoundFont)) {
+            return false;
+        }
+
+        std::lock_guard<std::mutex> lock(controlMutex);
+        if (!openFluidSynthLocked() || fluid.synth == nullptr) {
+            secureClearAndRelease(decryptedSoundFont);
+            return false;
+        }
+        unloadSf2Locked();
+        builtinSoundFont.swap(decryptedSoundFont);
+        embeddedSoundFontData = builtinSoundFont.data();
+        embeddedSoundFontSize = builtinSoundFont.size();
+        fluid.loading.store(true, std::memory_order_release);
+        const int soundfontId = fluid_synth_sfload(fluid.synth, kBuiltinSoundFontUri, 1);
+        if (soundfontId == FLUID_FAILED) {
+            __android_log_print(ANDROID_LOG_ERROR, TAG, "embedded sf2 load failed");
+            fluid.loading.store(false, std::memory_order_release);
+            clearBuiltinSoundFontLocked();
+            return false;
+        }
+        fluid.soundfontId = soundfontId;
+        selectDefaultProgramsLocked();
+        applyPitchCalibrationLocked();
+        fluid.loading.store(false, std::memory_order_release);
+        __android_log_print(
+                ANDROID_LOG_INFO,
+                TAG,
+                "embedded sf2 loaded from authenticated native memory (%zu bytes)",
+                builtinSoundFont.size());
         return true;
     }
 
@@ -503,6 +852,23 @@ private:
             closeFluidSynthLocked();
             return false;
         }
+        fluid_sfloader_t *embeddedLoader = new_fluid_defsfloader(fluid.settings);
+        if (embeddedLoader == nullptr ||
+            fluid_sfloader_set_callbacks(
+                    embeddedLoader,
+                    openEmbeddedSoundFont,
+                    readEmbeddedSoundFont,
+                    seekEmbeddedSoundFont,
+                    tellEmbeddedSoundFont,
+                    closeEmbeddedSoundFont) != FLUID_OK) {
+            if (embeddedLoader != nullptr) {
+                delete_fluid_sfloader(embeddedLoader);
+            }
+            __android_log_print(ANDROID_LOG_ERROR, TAG, "Could not register embedded sf2 loader");
+            closeFluidSynthLocked();
+            return false;
+        }
+        fluid_synth_add_sfloader(fluid.synth, embeddedLoader);
         fluidMidiChannelCount = clampInt(
                 fluid_synth_count_midi_channels(fluid.synth),
                 kSourceMidiChannelCount,
@@ -547,6 +913,7 @@ private:
         fluidMidiChannelCount = kSourceMidiChannelCount;
         playbackChannelCursor = 0;
         channelIsolationAvailable = false;
+        clearBuiltinSoundFontLocked();
     }
 
     void unloadSf2Locked() {
@@ -562,6 +929,13 @@ private:
             playbackChannelCursor = 0;
             fluid.loading.store(false, std::memory_order_release);
         }
+        clearBuiltinSoundFontLocked();
+    }
+
+    void clearBuiltinSoundFontLocked() {
+        embeddedSoundFontData = nullptr;
+        embeddedSoundFontSize = 0;
+        secureClearAndRelease(builtinSoundFont);
     }
 
     void selectDefaultProgramsLocked() {
@@ -873,6 +1247,7 @@ private:
     std::array<FluidProgramState, kFluidMidiChannelCount> fluidPrograms{};
     std::array<FluidTuningState, kFluidMidiChannelCount> fluidTunings{};
     std::list<FluidNote> activeFluidNotes;
+    std::vector<uint8_t> builtinSoundFont;
     int32_t fluidNoteId = 0;
     int32_t fluidMidiChannelCount = kSourceMidiChannelCount;
     int32_t playbackChannelCursor = 0;
@@ -926,15 +1301,9 @@ Java_icu_ringona_xensynth_audio_NativeAudioEngine_loadSf2Native(
     return loaded;
 }
 
-JNIEXPORT jbyteArray JNICALL
-Java_icu_ringona_xensynth_audio_NativeAudioEngine_soundFontKeyNative(JNIEnv *env, jclass) {
-    auto key = buildSoundFontKey();
-    jbyteArray result = env->NewByteArray(static_cast<jsize>(key.size()));
-    if (result != nullptr) {
-        env->SetByteArrayRegion(result, 0, static_cast<jsize>(key.size()), key.data());
-    }
-    key.fill(0);
-    return result;
+JNIEXPORT jboolean JNICALL
+Java_icu_ringona_xensynth_audio_NativeAudioEngine_loadBuiltinSf2Native(JNIEnv *env, jclass) {
+    return engine.loadBuiltinSf2(env);
 }
 
 JNIEXPORT void JNICALL

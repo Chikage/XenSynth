@@ -7,7 +7,7 @@ interface NativeAudio {
     fun restart(): Boolean
     fun isStarted(): Boolean
     fun loadSf2(path: String): Boolean
-    fun soundFontKey(): ByteArray
+    fun loadBuiltinSf2(): Boolean
     fun unloadSf2()
     fun hasSoundFont(): Boolean
     fun noteOn(

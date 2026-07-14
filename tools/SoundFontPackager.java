@@ -1,11 +1,11 @@
 import javax.crypto.Cipher;
 import javax.crypto.spec.GCMParameterSpec;
 import javax.crypto.spec.SecretKeySpec;
-import java.io.ByteArrayOutputStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.security.SecureRandom;
+import java.util.Arrays;
 
 public final class SoundFontPackager {
     private static final byte[] MAGIC = new byte[] {
@@ -19,31 +19,55 @@ public final class SoundFontPackager {
     }
 
     public static void main(String[] args) throws Exception {
-        if (args.length != 3) {
-            System.err.println("Usage: java SoundFontPackager <input> <output> <hex-encoded-32-byte-key>");
+        if (args.length != 2 && args.length != 3) {
+            System.err.println("Usage: java SoundFontPackager <input> <output> [hex-encoded-32-byte-key]");
+            System.err.println("Or set XENSYNTH_SF_KEY_HEX and omit the key argument.");
             System.exit(2);
         }
 
-        byte[] key = hexToBytes(args[2]);
+        String encodedKey = args.length == 3 ? args[2] : System.getenv("XENSYNTH_SF_KEY_HEX");
+        if (encodedKey == null || encodedKey.isBlank()) {
+            throw new IllegalArgumentException("Missing AES-256 key");
+        }
+        byte[] key = hexToBytes(encodedKey.trim());
         if (key.length != 32) {
+            Arrays.fill(key, (byte) 0);
             throw new IllegalArgumentException("AES-256 key must be 32 bytes");
         }
 
-        byte[] nonce = new byte[NONCE_BYTES];
-        new SecureRandom().nextBytes(nonce);
-
-        Cipher cipher = Cipher.getInstance("AES/GCM/NoPadding");
-        cipher.init(Cipher.ENCRYPT_MODE, new SecretKeySpec(key, "AES"), new GCMParameterSpec(GCM_TAG_BITS, nonce));
-        Path inputPath = Paths.get(args[0]);
-        Path outputPath = Paths.get(args[1]);
-        byte[] encrypted = cipher.doFinal(Files.readAllBytes(inputPath));
-
-        ByteArrayOutputStream output = new ByteArrayOutputStream(MAGIC.length + nonce.length + encrypted.length);
-        output.write(MAGIC);
-        output.write(nonce);
-        output.write(encrypted);
-        Files.createDirectories(outputPath.toAbsolutePath().getParent());
-        Files.write(outputPath, output.toByteArray());
+        byte[] plaintext = null;
+        byte[] encrypted = null;
+        byte[] packaged = null;
+        try {
+            byte[] nonce = new byte[NONCE_BYTES];
+            new SecureRandom().nextBytes(nonce);
+            Cipher cipher = Cipher.getInstance("AES/GCM/NoPadding");
+            cipher.init(
+                    Cipher.ENCRYPT_MODE,
+                    new SecretKeySpec(key, "AES"),
+                    new GCMParameterSpec(GCM_TAG_BITS, nonce));
+            Path inputPath = Paths.get(args[0]);
+            Path outputPath = Paths.get(args[1]);
+            plaintext = Files.readAllBytes(inputPath);
+            encrypted = cipher.doFinal(plaintext);
+            packaged = new byte[MAGIC.length + nonce.length + encrypted.length];
+            System.arraycopy(MAGIC, 0, packaged, 0, MAGIC.length);
+            System.arraycopy(nonce, 0, packaged, MAGIC.length, nonce.length);
+            System.arraycopy(encrypted, 0, packaged, MAGIC.length + nonce.length, encrypted.length);
+            Files.createDirectories(outputPath.toAbsolutePath().getParent());
+            Files.write(outputPath, packaged);
+        } finally {
+            Arrays.fill(key, (byte) 0);
+            if (plaintext != null) {
+                Arrays.fill(plaintext, (byte) 0);
+            }
+            if (encrypted != null) {
+                Arrays.fill(encrypted, (byte) 0);
+            }
+            if (packaged != null) {
+                Arrays.fill(packaged, (byte) 0);
+            }
+        }
     }
 
     private static byte[] hexToBytes(String hex) {

@@ -2,6 +2,8 @@ cmake_minimum_required(VERSION 3.22.1)
 
 project(XenSynthNative)
 
+enable_language(ASM)
+
 set(CMAKE_SHARED_LINKER_FLAGS
         "${CMAKE_SHARED_LINKER_FLAGS} -Wl,-z,max-page-size=16384 -Wl,-z,common-page-size=16384")
 
@@ -24,8 +26,30 @@ include_directories(
         ${CMAKE_CURRENT_SOURCE_DIR}/oboe/include
 )
 
+set(SOUNDFONT_BLOB "${CMAKE_CURRENT_SOURCE_DIR}/soundfont/7f3a9c1d.bin")
+if (NOT EXISTS "${SOUNDFONT_BLOB}")
+    message(FATAL_ERROR "Encrypted SoundFont blob is missing: ${SOUNDFONT_BLOB}")
+endif ()
+
+file(READ "${SOUNDFONT_BLOB}" SOUNDFONT_BLOB_MAGIC OFFSET 0 LIMIT 8 HEX)
+if (NOT SOUNDFONT_BLOB_MAGIC STREQUAL "9d72b41e43e80da6")
+    message(FATAL_ERROR "Refusing to embed an unrecognized or unencrypted SoundFont blob")
+endif ()
+
+set(EMBEDDED_SOUNDFONT_ASM "${CMAKE_CURRENT_BINARY_DIR}/EmbeddedSoundFont.S")
+configure_file(
+        ${CMAKE_CURRENT_SOURCE_DIR}/EmbeddedSoundFont.S.in
+        ${EMBEDDED_SOUNDFONT_ASM}
+        @ONLY
+)
+set_source_files_properties(
+        ${EMBEDDED_SOUNDFONT_ASM}
+        PROPERTIES OBJECT_DEPENDS "${SOUNDFONT_BLOB}"
+)
+
 add_library(xenaudio SHARED
         XenAudioEngine.cpp
+        ${EMBEDDED_SOUNDFONT_ASM}
         )
 
 add_library(QmBlur SHARED

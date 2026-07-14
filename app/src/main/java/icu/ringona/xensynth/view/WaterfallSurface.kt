@@ -6,6 +6,9 @@ import icu.ringona.xensynth.midi.ParsedScore
 interface WaterfallSurface {
     val view: View
 
+    val rendersRulerInternally: Boolean
+        get() = true
+
     fun surfaceWidth(): Int = view.width
 
     fun surfaceHeight(): Int = view.height
