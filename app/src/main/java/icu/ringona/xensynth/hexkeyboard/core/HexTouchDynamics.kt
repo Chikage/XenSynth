@@ -1,14 +1,11 @@
 package icu.ringona.xensynth.hexkeyboard.core
 
-import kotlin.math.abs
-import kotlin.math.cos
 import kotlin.math.exp
 import kotlin.math.hypot
+import kotlin.math.ln
 import kotlin.math.max
 import kotlin.math.pow
 import kotlin.math.roundToInt
-import kotlin.math.sin
-import kotlin.math.sqrt
 
 data class TouchForce(
     val normalized: Float,
@@ -69,6 +66,58 @@ internal data class CalibratedTouchPressure(
     val confidence: Double,
 )
 
+internal data class CalibratedTouchArea(
+    val change: Double,
+    val confidence: Double,
+)
+
+private data class RobustSignalBounds(
+    val minimum: Double,
+    val maximum: Double,
+)
+
+private class RobustSignalWindow(
+    capacity: Int,
+) {
+    private val values = FloatArray(capacity)
+    private var nextIndex = 0
+    var count: Int = 0
+        private set
+
+    fun add(value: Float) {
+        values[nextIndex] = value
+        nextIndex = (nextIndex + 1) % values.size
+        count = minOf(count + 1, values.size)
+    }
+
+    fun bounds(trimSingleOutlier: Boolean): RobustSignalBounds {
+        var minimum = Float.POSITIVE_INFINITY
+        var secondMinimum = Float.POSITIVE_INFINITY
+        var maximum = Float.NEGATIVE_INFINITY
+        var secondMaximum = Float.NEGATIVE_INFINITY
+        repeat(count) { index ->
+            val value = values[index]
+            if (value <= minimum) {
+                secondMinimum = minimum
+                minimum = value
+            } else if (value < secondMinimum) {
+                secondMinimum = value
+            }
+            if (value >= maximum) {
+                secondMaximum = maximum
+                maximum = value
+            } else if (value > secondMaximum) {
+                secondMaximum = value
+            }
+        }
+        return if (trimSingleOutlier) {
+            RobustSignalBounds(secondMinimum.toDouble(), secondMaximum.toDouble())
+        } else {
+            RobustSignalBounds(minimum.toDouble(), maximum.toDouble())
+        }
+    }
+}
+
 /**
  * Learns whether an Android pointer's pressure axis carries a useful signal.
  *
@@ -79,9 +128,7 @@ internal data class CalibratedTouchPressure(
 internal class TouchPressureCalibrator {
     private var startTimeMillis: Long? = null
     private var sampleCount = 0
-    private val recentPressures = FloatArray(PRESSURE_WINDOW_SIZE)
-    private var storedPressureCount = 0
-    private var nextPressureIndex = 0
+    private val recentPressures = RobustSignalWindow(PRESSURE_WINDOW_SIZE)
     private var confidence = 0.0
 
     fun sample(
@@ -95,12 +142,12 @@ internal class TouchPressureCalibrator {
             ?: DEFAULT_RAW_PRESSURE
         val startedAt = startTimeMillis ?: uptimeMillis.also { startTimeMillis = it }
         sampleCount += 1
-        recentPressures[nextPressureIndex] = pressure
-        nextPressureIndex = (nextPressureIndex + 1) % recentPressures.size
-        storedPressureCount = minOf(storedPressureCount + 1, recentPressures.size)
+        recentPressures.add(pressure)
 
-        val (pressureFloor, pressureCeiling) = robustPressureBounds()
-        val observedRange = pressureCeiling - pressureFloor
+        val bounds = recentPressures.bounds(
+            trimSingleOutlier = recentPressures.count >= MIN_FINGER_PRESSURE_SAMPLES,
+        )
+        val observedRange = bounds.maximum - bounds.minimum
         val elapsedMillis = (uptimeMillis - startedAt).coerceAtLeast(0L)
         val observedConfidence = if (
             sampleCount >= MIN_FINGER_PRESSURE_SAMPLES &&
@@ -121,7 +168,7 @@ internal class TouchPressureCalibrator {
             .coerceIn(0f, 1f)
             .toDouble()
             .pow(HARDWARE_PRESSURE_GAMMA)
-        val adaptiveFloor = pressureFloor - ADAPTIVE_PRESSURE_MARGIN
+        val adaptiveFloor = bounds.minimum - ADAPTIVE_PRESSURE_MARGIN
         val adaptiveSpan = max(
             observedRange + ADAPTIVE_PRESSURE_MARGIN * 2.0,
             MIN_ADAPTIVE_PRESSURE_SPAN,
@@ -134,33 +181,6 @@ internal class TouchPressureCalibrator {
             normalized = if (hardwarePressureHint) fixedNormalized else adaptiveNormalized,
             confidence = confidence,
         )
-    }
-
-    private fun robustPressureBounds(): Pair<Double, Double> {
-        var minimum = Float.POSITIVE_INFINITY
-        var secondMinimum = Float.POSITIVE_INFINITY
-        var maximum = Float.NEGATIVE_INFINITY
-        var secondMaximum = Float.NEGATIVE_INFINITY
-        repeat(storedPressureCount) { index ->
-            val pressure = recentPressures[index]
-            if (pressure <= minimum) {
-                secondMinimum = minimum
-                minimum = pressure
-            } else if (pressure < secondMinimum) {
-                secondMinimum = pressure
-            }
-            if (pressure >= maximum) {
-                secondMaximum = maximum
-                maximum = pressure
-            } else if (pressure > secondMaximum) {
-                secondMaximum = pressure
-            }
-        }
-        return if (storedPressureCount >= MIN_FINGER_PRESSURE_SAMPLES) {
-            secondMinimum.toDouble() to secondMaximum.toDouble()
-        } else {
-            minimum.toDouble() to maximum.toDouble()
-        }
     }
 
     private companion object {
@@ -179,72 +199,100 @@ internal class TouchPressureCalibrator {
     }
 }
 
-class PseudoPressureTracker internal constructor(
-    private val pressureCalibrator: TouchPressureCalibrator,
-) {
-    constructor() : this(TouchPressureCalibrator())
-
+/** Uses relative finger-pad growth as a location-independent fallback signal. */
+internal class TouchAreaCalibrator {
     private var startTimeMillis: Long? = null
+    private var referenceArea: Double? = null
+    private var sampleCount = 0
+    private val recentAreas = RobustSignalWindow(AREA_WINDOW_SIZE)
+    private var confidence = 0.0
+
+    fun sample(rawArea: Float, uptimeMillis: Long): CalibratedTouchArea {
+        val area = rawArea
+            .takeIf { it.isFinite() && it > MIN_VALID_CONTACT_AREA }
+            ?.toDouble()
+            ?: return CalibratedTouchArea(change = 0.0, confidence = 0.0)
+        val startedAt = startTimeMillis ?: uptimeMillis.also { startTimeMillis = it }
+        val reference = referenceArea ?: area.also { referenceArea = it }
+        sampleCount += 1
+        recentAreas.add(area.toFloat())
+
+        val bounds = recentAreas.bounds(
+            trimSingleOutlier = recentAreas.count >= MIN_AREA_SAMPLES,
+        )
+        val relativeRange = if (bounds.minimum > MIN_VALID_CONTACT_AREA) {
+            bounds.maximum / bounds.minimum - 1.0
+        } else {
+            0.0
+        }
+        val elapsedMillis = (uptimeMillis - startedAt).coerceAtLeast(0L)
+        val observedConfidence = if (
+            sampleCount >= MIN_AREA_SAMPLES && elapsedMillis >= MIN_AREA_OBSERVATION_MILLIS
+        ) {
+            ((relativeRange - AREA_RELATIVE_RANGE_FLOOR) / AREA_CONFIDENCE_SPAN)
+                .coerceIn(0.0, 1.0)
+        } else {
+            0.0
+        }
+        confidence = max(confidence, observedConfidence)
+
+        return CalibratedTouchArea(
+            change = (ln(area / reference) / LOG_FULL_SCALE_AREA_RATIO).coerceIn(-1.0, 1.0),
+            confidence = confidence,
+        )
+    }
+
+    private companion object {
+        const val MIN_VALID_CONTACT_AREA = 0.0001f
+        const val AREA_WINDOW_SIZE = 12
+        const val MIN_AREA_SAMPLES = 5
+        const val MIN_AREA_OBSERVATION_MILLIS = 64L
+        const val AREA_RELATIVE_RANGE_FLOOR = 0.08
+        const val AREA_CONFIDENCE_SPAN = 0.22
+        val LOG_FULL_SCALE_AREA_RATIO = ln(1.55)
+    }
+}
+
+internal class TouchDynamicsCalibrator {
+    val pressure = TouchPressureCalibrator()
+    val contactArea = TouchAreaCalibrator()
+}
+
+class PseudoPressureTracker internal constructor(
+    private val calibrator: TouchDynamicsCalibrator,
+) {
+    constructor() : this(TouchDynamicsCalibrator())
+
     private var lastTimeMillis: Long? = null
-    private var lastPoint: HexPoint? = null
     private var filteredForce: Double? = null
-    private var initialHexRadius: Double? = null
-    private var initialPseudoForce: Double? = null
     private var strikeForce: Double? = null
 
     fun sample(
         rawPressure: Float,
+        rawContactArea: Float = Float.NaN,
         uptimeMillis: Long,
-        point: HexPoint,
-        keyCenter: HexPoint,
-        keyRadius: Double,
-        keyRotationDegrees: Double = 0.0,
         hardwarePressureHint: Boolean = false,
     ): TouchForce {
-        val safeRadius = keyRadius.coerceAtLeast(1.0)
-        val startedAt = startTimeMillis ?: uptimeMillis.also { startTimeMillis = it }
         val previousTime = lastTimeMillis
-        val previousPoint = lastPoint
-        val elapsedMillis = (uptimeMillis - startedAt).coerceAtLeast(0L)
         val deltaMillis = previousTime
             ?.let { (uptimeMillis - it).coerceIn(0L, MAX_FILTER_DELTA_MILLIS) }
             ?: 0L
 
-        val hexRadius = normalizedHexRadius(
-            point = point,
-            center = keyCenter,
-            radius = safeRadius,
-            rotationDegrees = keyRotationDegrees,
-        )
-        val centerProximity = (1.0 - hexRadius).coerceIn(0.0, 1.0)
-        val placementForce = initialPseudoForce ?: (
-            BASE_FORCE + PLACEMENT_WEIGHT * centerProximity.pow(PLACEMENT_GAMMA)
-            ).coerceIn(0.0, 1.0).also { initialPseudoForce = it }
-        val startedHexRadius = initialHexRadius ?: hexRadius.also { initialHexRadius = it }
-        val inwardTravel = ((startedHexRadius - hexRadius) / INWARD_TRAVEL_SCALE)
-            .coerceIn(-1.0, 1.0)
-        val holdProgress = (elapsedMillis.toDouble() / HOLD_RAMP_MILLIS).coerceIn(0.0, 1.0)
-        val speedInRadiiPerSecond = if (previousPoint != null && deltaMillis > 0L) {
-            hypot(point.x - previousPoint.x, point.y - previousPoint.y) /
-                safeRadius / (deltaMillis / 1_000.0)
-        } else {
-            FAST_SLIDE_RADII_PER_SECOND
-        }
-        val stability = (1.0 - speedInRadiiPerSecond / FAST_SLIDE_RADII_PER_SECOND)
-            .coerceIn(0.0, 1.0)
-        val pseudoForce = (
-            placementForce +
-                INWARD_TRAVEL_WEIGHT * inwardTravel +
-                HOLD_WEIGHT * sqrt(holdProgress) * stability
-            ).coerceIn(0.0, 1.0)
-
-        val calibratedPressure = pressureCalibrator.sample(
+        val calibratedPressure = calibrator.pressure.sample(
             rawPressure = rawPressure,
             uptimeMillis = uptimeMillis,
             hardwarePressureHint = hardwarePressureHint,
         )
-        val targetForce = pseudoForce +
-            (calibratedPressure.normalized - pseudoForce) * calibratedPressure.confidence
+        val calibratedArea = calibrator.contactArea.sample(
+            rawArea = rawContactArea,
+            uptimeMillis = uptimeMillis,
+        )
+        val areaForce = (FALLBACK_FORCE + CONTACT_AREA_FORCE_SPAN * calibratedArea.change)
+            .coerceIn(0.0, 1.0)
+        val fallbackForce = FALLBACK_FORCE +
+            (areaForce - FALLBACK_FORCE) * calibratedArea.confidence
+        val targetForce = fallbackForce +
+            (calibratedPressure.normalized - fallbackForce) * calibratedPressure.confidence
         val initialStrikeForce = strikeForce ?: targetForce.also { strikeForce = it }
         val previousFilteredForce = filteredForce
         val force = if (previousFilteredForce == null) {
@@ -263,7 +311,6 @@ class PseudoPressureTracker internal constructor(
 
         filteredForce = force
         lastTimeMillis = uptimeMillis
-        lastPoint = point
 
         return TouchForce(
             normalized = force.toFloat(),
@@ -280,14 +327,8 @@ class PseudoPressureTracker internal constructor(
     }
 
     private companion object {
-        const val HOLD_RAMP_MILLIS = 420.0
-        const val FAST_SLIDE_RADII_PER_SECOND = 7.0
-        const val BASE_FORCE = 0.24
-        const val PLACEMENT_WEIGHT = 0.52
-        const val PLACEMENT_GAMMA = 0.80
-        const val INWARD_TRAVEL_SCALE = 0.55
-        const val INWARD_TRAVEL_WEIGHT = 0.38
-        const val HOLD_WEIGHT = 0.05
+        const val FALLBACK_FORCE = 0.64
+        const val CONTACT_AREA_FORCE_SPAN = 0.36
         const val HARDWARE_CONFIDENCE_THRESHOLD = 0.50
         const val FORCE_ATTACK_MILLIS = 24.0
         const val FORCE_RELEASE_MILLIS = 72.0
@@ -301,26 +342,3 @@ class PseudoPressureTracker internal constructor(
         const val EXPRESSION_GAMMA = 0.92
     }
 }
-
-private fun normalizedHexRadius(
-    point: HexPoint,
-    center: HexPoint,
-    radius: Double,
-    rotationDegrees: Double,
-): Double {
-    val angle = Math.toRadians(-rotationDegrees)
-    val cosine = cos(angle)
-    val sine = sin(angle)
-    val deltaX = point.x - center.x
-    val deltaY = point.y - center.y
-    val localX = deltaX * cosine - deltaY * sine
-    val localY = deltaX * sine + deltaY * cosine
-    val apothem = radius * SQRT_THREE_OVER_TWO
-    return maxOf(
-        abs(localY),
-        abs(SQRT_THREE_OVER_TWO * localX + 0.5 * localY),
-        abs(-SQRT_THREE_OVER_TWO * localX + 0.5 * localY),
-    ) / apothem
-}
-
-private val SQRT_THREE_OVER_TWO = sqrt(3.0) / 2.0

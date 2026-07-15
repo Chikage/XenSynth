@@ -3,6 +3,7 @@ package icu.ringona.xensynth.hexkeyboard.ui
 import android.graphics.Paint
 import android.graphics.Typeface
 import android.os.SystemClock
+import android.view.MotionEvent
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.fillMaxSize
@@ -39,7 +40,7 @@ import icu.ringona.xensynth.hexkeyboard.core.HexPoint
 import icu.ringona.xensynth.hexkeyboard.core.HexaKeyboardLayout
 import icu.ringona.xensynth.hexkeyboard.core.HexTouchHitTester
 import icu.ringona.xensynth.hexkeyboard.core.PseudoPressureTracker
-import icu.ringona.xensynth.hexkeyboard.core.TouchPressureCalibrator
+import icu.ringona.xensynth.hexkeyboard.core.TouchDynamicsCalibrator
 import icu.ringona.xensynth.hexkeyboard.core.TouchForce
 import icu.ringona.xensynth.hexkeyboard.playback.KeyboardPlaybackNote
 import icu.ringona.xensynth.hexkeyboard.playback.KeyboardPlaybackTimeline
@@ -125,7 +126,7 @@ fun HexKeyboardCanvas(
     val activeCoordinates = remember(layout) { mutableStateMapOf<Long, AxialCoordinate>() }
     val activeForces = remember(layout) { mutableStateMapOf<Long, Float>() }
     val forceTrackers = remember(layout) { mutableMapOf<Long, PseudoPressureTracker>() }
-    val pressureCalibrators = remember(layout) { mutableMapOf<Long, TouchPressureCalibrator>() }
+    val touchCalibrators = remember(layout) { mutableMapOf<Long, TouchDynamicsCalibrator>() }
     val lastExpressions = remember(layout) { mutableMapOf<Long, Int>() }
     val lastExpressionTimes = remember(layout) { mutableMapOf<Long, Long>() }
     val lastRawPressures = remember(layout) { mutableMapOf<Long, Float>() }
@@ -139,7 +140,7 @@ fun HexKeyboardCanvas(
             activeCoordinates.clear()
             activeForces.clear()
             forceTrackers.clear()
-            pressureCalibrators.clear()
+            touchCalibrators.clear()
             lastExpressions.clear()
             lastExpressionTimes.clear()
             lastRawPressures.clear()
@@ -233,6 +234,7 @@ fun HexKeyboardCanvas(
                                 uptimeMillis: Long,
                                 pressed: Boolean,
                                 rawPressure: Float,
+                                rawContactArea: Float,
                                 hardwarePressureHint: Boolean,
                             ) {
                                 val modelPoint = transform.model(position)
@@ -251,9 +253,9 @@ fun HexKeyboardCanvas(
                                 val keyChanged = previousCoordinate != nextCoordinate
                                 if (keyChanged) {
                                     if (nextKey != null && pseudoPressureEnabled) {
-                                        val calibrator = pressureCalibrators.getOrPut(
+                                        val calibrator = touchCalibrators.getOrPut(
                                             pointerId,
-                                            ::TouchPressureCalibrator,
+                                            ::TouchDynamicsCalibrator,
                                         )
                                         forceTrackers[pointerId] = PseudoPressureTracker(calibrator)
                                     } else {
@@ -263,19 +265,15 @@ fun HexKeyboardCanvas(
                                 val force = if (nextKey != null && pseudoPressureEnabled) {
                                     forceTrackers.getOrPut(pointerId) {
                                         PseudoPressureTracker(
-                                            pressureCalibrators.getOrPut(
+                                            touchCalibrators.getOrPut(
                                                 pointerId,
-                                                ::TouchPressureCalibrator,
+                                                ::TouchDynamicsCalibrator,
                                             ),
                                         )
                                     }.sample(
                                         rawPressure = rawPressure,
+                                        rawContactArea = rawContactArea,
                                         uptimeMillis = uptimeMillis,
-                                        point = modelPoint,
-                                        keyCenter = nextKey.center,
-                                        keyRadius = layout.configuration.radius.toDouble(),
-                                        keyRotationDegrees =
-                                            layout.configuration.rotationDegrees.toDouble(),
                                         hardwarePressureHint = hardwarePressureHint,
                                     )
                                 } else if (nextKey != null) {
@@ -333,20 +331,31 @@ fun HexKeyboardCanvas(
 
                             while (true) {
                                 val event = awaitPointerEvent(PointerEventPass.Initial)
-                                event.changes.forEach { change ->
+                                val motionEvent = event.motionEvent
+                                event.changes.forEachIndexed { changeIndex, change ->
                                     val pointerId = change.id.value
+                                    val motionPointerIndex = changeIndex.takeIf {
+                                        motionEvent != null && it < motionEvent.pointerCount
+                                    } ?: -1
                                     val hardwarePressureHint =
                                         change.type == PointerType.Stylus || change.type == PointerType.Eraser
                                     val historicalPressure = lastRawPressures[pointerId] ?: change.pressure
 
                                     if (change.previousPressed) {
-                                        change.historical.forEach { historical ->
+                                        change.historical.forEachIndexed { historyIndex, historical ->
                                             processSample(
                                                 pointerId = pointerId,
                                                 position = historical.position,
                                                 uptimeMillis = historical.uptimeMillis,
                                                 pressed = true,
-                                                rawPressure = historicalPressure,
+                                                rawPressure = motionEvent?.historicalPressure(
+                                                    pointerIndex = motionPointerIndex,
+                                                    historyIndex = historyIndex,
+                                                ) ?: historicalPressure,
+                                                rawContactArea = motionEvent?.historicalContactArea(
+                                                    pointerIndex = motionPointerIndex,
+                                                    historyIndex = historyIndex,
+                                                ) ?: Float.NaN,
                                                 hardwarePressureHint = hardwarePressureHint,
                                             )
                                         }
@@ -361,11 +370,13 @@ fun HexKeyboardCanvas(
                                         uptimeMillis = change.uptimeMillis,
                                         pressed = change.pressed,
                                         rawPressure = change.pressure,
+                                        rawContactArea = motionEvent?.contactArea(motionPointerIndex)
+                                            ?: Float.NaN,
                                         hardwarePressureHint = hardwarePressureHint,
                                     )
                                     if (!change.pressed) {
                                         forceTrackers.remove(pointerId)
-                                        pressureCalibrators.remove(pointerId)
+                                        touchCalibrators.remove(pointerId)
                                         lastRawPressures.remove(pointerId)
                                     }
                                     change.consume()
@@ -380,7 +391,7 @@ fun HexKeyboardCanvas(
                         activeCoordinates.clear()
                         activeForces.clear()
                         forceTrackers.clear()
-                        pressureCalibrators.clear()
+                        touchCalibrators.clear()
                         lastExpressions.clear()
                         lastExpressionTimes.clear()
                         lastRawPressures.clear()
@@ -965,6 +976,43 @@ private fun toneColor(index: Int, count: Int, saturation: Float, value: Float): 
 private fun toneHue(index: Int, count: Int): Float {
     val safeCount = max(1, count)
     return Math.floorMod(index, safeCount).toFloat() / safeCount.toFloat() * 360f
+}
+
+private fun MotionEvent.contactArea(pointerIndex: Int): Float {
+    if (pointerIndex !in 0 until pointerCount) return Float.NaN
+    return contactArea(
+        major = getTouchMajor(pointerIndex),
+        minor = getTouchMinor(pointerIndex),
+        fallbackSize = getSize(pointerIndex),
+    )
+}
+
+private fun MotionEvent.historicalContactArea(
+    pointerIndex: Int,
+    historyIndex: Int,
+): Float {
+    if (pointerIndex !in 0 until pointerCount || historyIndex !in 0 until historySize) {
+        return Float.NaN
+    }
+    return contactArea(
+        major = getHistoricalTouchMajor(pointerIndex, historyIndex),
+        minor = getHistoricalTouchMinor(pointerIndex, historyIndex),
+        fallbackSize = getHistoricalSize(pointerIndex, historyIndex),
+    )
+}
+
+private fun MotionEvent.historicalPressure(pointerIndex: Int, historyIndex: Int): Float? {
+    if (pointerIndex !in 0 until pointerCount || historyIndex !in 0 until historySize) return null
+    return getHistoricalPressure(pointerIndex, historyIndex)
+}
+
+private fun contactArea(major: Float, minor: Float, fallbackSize: Float): Float {
+    val ellipseArea = major * minor
+    return when {
+        ellipseArea.isFinite() && ellipseArea > 0f -> ellipseArea
+        fallbackSize.isFinite() && fallbackSize > 0f -> fallbackSize
+        else -> Float.NaN
+    }
 }
 
 private fun hexagonPath(center: Offset, radius: Float, rotationDegrees: Float): Path = Path().apply {

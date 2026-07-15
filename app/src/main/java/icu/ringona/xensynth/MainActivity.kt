@@ -1498,6 +1498,7 @@ class MainActivity : ComponentActivity(), RenderFramePacer.InteractionListener {
             .putBoolean(PREF_HEX_PSEUDO_PRESSURE, HEX_PSEUDO_PRESSURE_DEFAULT)
             .putString(PREF_HEX_DISPLAY_MODE, HEX_DISPLAY_MODE_DEFAULT)
             .putInt(PREF_REVERB, REVERB_DEFAULT)
+            .putFloat(PREF_VOLUME_GAIN, VOLUME_GAIN_DEFAULT)
             .putInt(PREF_AUDIO_LATENCY_MS, AUDIO_LATENCY_DEFAULT_MS)
             .apply()
         Toast.makeText(this, "Settings restored to defaults", Toast.LENGTH_SHORT).show()
@@ -1697,6 +1698,7 @@ class MainActivity : ComponentActivity(), RenderFramePacer.InteractionListener {
 
                 override fun setVolumeGain(gain: Float) {
                     applyVolumeGain(gain, showGestureFeedback = true)
+                    persistVolumeGain(volumeGain)
                 }
             }
         )
@@ -1892,6 +1894,8 @@ class MainActivity : ComponentActivity(), RenderFramePacer.InteractionListener {
         }
         reverbValue = prefs.getInt(PREF_REVERB, REVERB_DEFAULT)
             .coerceIn(REVERB_MIN, REVERB_MAX)
+        volumeGain = prefs.getFloat(PREF_VOLUME_GAIN, VOLUME_GAIN_DEFAULT)
+            .coerceIn(VOLUME_GAIN_MIN, VOLUME_GAIN_MAX)
         audioLatencyMs = roundedAudioLatencyMs(
             prefs.getInt(PREF_AUDIO_LATENCY_MS, AUDIO_LATENCY_DEFAULT_MS).toFloat()
         )
@@ -2020,6 +2024,12 @@ class MainActivity : ComponentActivity(), RenderFramePacer.InteractionListener {
     private fun persistReverb(value: Int) {
         settingsPreferences().edit()
             .putInt(PREF_REVERB, value.coerceIn(REVERB_MIN, REVERB_MAX))
+            .apply()
+    }
+
+    private fun persistVolumeGain(value: Float) {
+        settingsPreferences().edit()
+            .putFloat(PREF_VOLUME_GAIN, value.coerceIn(VOLUME_GAIN_MIN, VOLUME_GAIN_MAX))
             .apply()
     }
 
@@ -2458,6 +2468,7 @@ class MainActivity : ComponentActivity(), RenderFramePacer.InteractionListener {
         const val PREF_HEX_PSEUDO_PRESSURE = "hex_pseudo_pressure_enabled"
         const val PREF_HEX_DISPLAY_MODE = "hex_display_mode"
         const val PREF_REVERB = "reverb"
+        const val PREF_VOLUME_GAIN = "volume_gain"
         const val PREF_AUDIO_LATENCY_MS = "audio_latency_ms"
         const val SPEED_MIN = 0.2
         const val SPEED_MAX = 4.0
@@ -3615,9 +3626,9 @@ private fun ToolbarSettingsMenu(
                 .width(settingsMenuWidthDp.dp)
         ) {
             if (hexagonalSettings) {
+                layoutSettings()
                 Row(modifier = Modifier.fillMaxWidth()) {
                     Column(modifier = Modifier.weight(1f)) {
-                        layoutSettings()
                         CompactHexSliderSetting(
                             label = "COLUMNS",
                             value = hexColumnsSliderValue.roundToInt().toString(),
