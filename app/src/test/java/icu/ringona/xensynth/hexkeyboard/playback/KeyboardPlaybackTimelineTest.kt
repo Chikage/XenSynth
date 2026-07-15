@@ -5,6 +5,7 @@ import icu.ringona.xensynth.hexkeyboard.core.HexaKeyboardConfiguration
 import icu.ringona.xensynth.hexkeyboard.core.HexaKeyboardLayoutEngine
 import icu.ringona.xensynth.midi.ParsedScore
 import icu.ringona.xensynth.midi.WaterfallNote
+import kotlin.math.roundToInt
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -26,6 +27,30 @@ class KeyboardPlaybackTimelineTest {
             kotlin.math.abs(visualMidiPitch(it, layout.configuration.period) - 60.37)
         }
         assertEquals(minimumDistance, kotlin.math.abs(keyPitch - 60.37), 0.000_001)
+    }
+
+    @Test
+    fun `playback pitch snapping uses the pitch of the same nearest key`() {
+        val score = scoreOf(note(audioPitch = 60.37, end = 2.0))
+        val layout = HexaKeyboardLayoutEngine.build(
+            HexaKeyboardConfiguration.Default.copy(period = 53),
+        )
+        val visualNote = score.snapToKeyboard(layout).notes.single()
+        val expectedPitch = visualMidiPitch(
+            layout.cellAt(visualNote.coordinate)!!,
+            layout.configuration.period,
+        )
+
+        val snappedScore = score.snapPlaybackPitchesToKeyboard(layout)
+
+        assertEquals(60.37, score.notes.single().pitch, 0.000_001)
+        assertEquals(expectedPitch, snappedScore.notes.single().pitch, 0.000_001)
+        assertEquals(expectedPitch, snappedScore.longNotes.single().pitch, 0.000_001)
+        assertEquals(
+            (expectedPitch - expectedPitch.roundToInt()) * 100.0,
+            snappedScore.notes.single().cents,
+            0.000_001,
+        )
     }
 
     @Test

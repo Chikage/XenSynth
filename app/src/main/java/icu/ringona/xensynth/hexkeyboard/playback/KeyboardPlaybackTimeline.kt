@@ -8,6 +8,7 @@ import icu.ringona.xensynth.midi.WaterfallNote
 import kotlin.math.PI
 import kotlin.math.abs
 import kotlin.math.exp
+import kotlin.math.roundToInt
 import kotlin.math.sin
 
 internal const val PLAYBACK_PREVIEW_SECONDS_MIN = 0.0
@@ -129,6 +130,37 @@ fun ParsedScore.snapToKeyboard(
     )
 }
 
+/**
+ * Rewrites score pitches to the nearest visible key while retaining note timing and metadata.
+ */
+internal fun ParsedScore.snapPlaybackPitchesToKeyboard(
+    layout: HexaKeyboardLayout,
+    pitchForKey: (HexKey) -> Double? = { key ->
+        visualMidiPitch(key, layout.configuration.period)
+    }
+): ParsedScore {
+    if (notes.isEmpty() || layout.cells.isEmpty()) return this
+    val pitchIndex = KeyboardPitchIndex(layout.cells, pitchForKey)
+
+    fun WaterfallNote.snapped(): WaterfallNote {
+        val snappedPitch = pitchIndex.nearestPitch(pitch) ?: return this
+        if (snappedPitch == pitch) return this
+        return copy(
+            pitch = snappedPitch,
+            cents = (snappedPitch - snappedPitch.roundToInt()) * 100.0,
+        )
+    }
+
+    return copy(
+        notes = notes
+            .map { it.snapped() }
+            .sortedWith(compareBy<WaterfallNote> { it.start }.thenBy { it.pitch }),
+        longNotes = longNotes
+            .map { it.snapped() }
+            .sortedWith(compareBy<WaterfallNote> { it.start }.thenBy { it.pitch }),
+    )
+}
+
 fun KeyboardPlaybackTimeline.visualFrameAt(
     positionSeconds: Double,
     activeScoreIndices: Set<Int>,
@@ -239,7 +271,11 @@ private class KeyboardPitchIndex(
         .sortedBy { it.pitch }
         .toList()
 
-    fun nearest(audioPitch: Double): HexKey? {
+    fun nearest(audioPitch: Double): HexKey? = nearestCandidate(audioPitch)?.key
+
+    fun nearestPitch(audioPitch: Double): Double? = nearestCandidate(audioPitch)?.pitch
+
+    private fun nearestCandidate(audioPitch: Double): PitchCandidate? {
         if (candidates.isEmpty() || !audioPitch.isFinite()) return null
         var low = 0
         var high = candidates.size
@@ -250,16 +286,16 @@ private class KeyboardPitchIndex(
         val above = candidates.getOrNull(low)
         val below = candidates.getOrNull(low - 1)
         return when {
-            above == null -> below?.key
-            below == null -> above.key
-            abs(above.pitch - audioPitch) < abs(audioPitch - below.pitch) -> above.key
-            abs(above.pitch - audioPitch) > abs(audioPitch - below.pitch) -> below.key
-            centerDistanceSquared(above.key) < centerDistanceSquared(below.key) -> above.key
-            centerDistanceSquared(above.key) > centerDistanceSquared(below.key) -> below.key
-            above.key.coordinate.q < below.key.coordinate.q -> above.key
-            above.key.coordinate.q > below.key.coordinate.q -> below.key
-            above.key.coordinate.r <= below.key.coordinate.r -> above.key
-            else -> below.key
+            above == null -> below
+            below == null -> above
+            abs(above.pitch - audioPitch) < abs(audioPitch - below.pitch) -> above
+            abs(above.pitch - audioPitch) > abs(audioPitch - below.pitch) -> below
+            centerDistanceSquared(above.key) < centerDistanceSquared(below.key) -> above
+            centerDistanceSquared(above.key) > centerDistanceSquared(below.key) -> below
+            above.key.coordinate.q < below.key.coordinate.q -> above
+            above.key.coordinate.q > below.key.coordinate.q -> below
+            above.key.coordinate.r <= below.key.coordinate.r -> above
+            else -> below
         }
     }
 

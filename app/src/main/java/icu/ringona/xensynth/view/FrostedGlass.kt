@@ -21,6 +21,7 @@ import android.util.AttributeSet
 import android.view.PixelCopy
 import android.view.SurfaceView
 import android.view.View
+import android.view.ViewTreeObserver
 import android.widget.FrameLayout
 import androidx.annotation.RequiresApi
 import com.qmdeve.blurview.BlurNative
@@ -91,6 +92,8 @@ internal class LegacyFrostedGlassBlur(
     private var blurCanvas: Canvas? = null
     private var lastSignature: Long = Long.MIN_VALUE
     private var cachedBitmapRegionReady = false
+    private val targetWindowLocation = IntArray(2)
+    private val sourceWindowLocation = IntArray(2)
 
     override fun drawBlurredViewSnapshot(
         canvas: Canvas,
@@ -115,21 +118,29 @@ internal class LegacyFrostedGlassBlur(
         val source = sourceBitmap ?: return false
         val blurred = blurredBitmap ?: return false
         val offscreen = blurCanvas ?: return false
-        val signature = viewSnapshotSignature(target, sourceView, area, scaledWidth, scaledHeight)
+        target.getLocationInWindow(targetWindowLocation)
+        sourceView.getLocationInWindow(sourceWindowLocation)
+        val signature = viewSnapshotSignature(
+            target = target,
+            sourceView = sourceView,
+            area = area,
+            width = scaledWidth,
+            height = scaledHeight,
+            radius = radius,
+            magnification = magnification,
+            targetLocation = targetWindowLocation,
+            sourceLocation = sourceWindowLocation
+        )
         if (signature != lastSignature) {
             source.eraseColor(Color.TRANSPARENT)
-            val targetLocation = IntArray(2)
-            val sourceLocation = IntArray(2)
-            target.getLocationInWindow(targetLocation)
-            sourceView.getLocationInWindow(sourceLocation)
             val saveCount = offscreen.save()
             offscreen.scale(scaledWidth / area.width(), scaledHeight / area.height())
             if (magnification != 1f) {
                 offscreen.scale(magnification, magnification, area.width() * 0.5f, area.height() * 0.5f)
             }
             offscreen.translate(
-                sourceLocation[0] - targetLocation[0] - area.left,
-                sourceLocation[1] - targetLocation[1] - area.top
+                sourceWindowLocation[0] - targetWindowLocation[0] - area.left,
+                sourceWindowLocation[1] - targetWindowLocation[1] - area.top
             )
             runCatching {
                 sourceView.draw(offscreen)
@@ -269,21 +280,122 @@ internal class LegacyFrostedGlassBlur(
         sourceView: View,
         area: RectF,
         width: Int,
-        height: Int
+        height: Int,
+        radius: Float,
+        magnification: Float,
+        targetLocation: IntArray,
+        sourceLocation: IntArray
     ): Long {
         var result = 17L
+        result = 31L * result + System.identityHashCode(target).toLong()
+        result = 31L * result + System.identityHashCode(sourceView).toLong()
         result = 31L * result + target.width
         result = 31L * result + target.height
         result = 31L * result + sourceView.width
         result = 31L * result + sourceView.height
+        result = 31L * result + targetLocation[0]
+        result = 31L * result + targetLocation[1]
+        result = 31L * result + sourceLocation[0]
+        result = 31L * result + sourceLocation[1]
         result = 31L * result + area.left.roundToInt()
         result = 31L * result + area.top.roundToInt()
         result = 31L * result + area.right.roundToInt()
         result = 31L * result + area.bottom.roundToInt()
         result = 31L * result + width
         result = 31L * result + height
+        result = 31L * result + radius.toBits()
+        result = 31L * result + magnification.toBits()
         result = 31L * result + sourceView.drawingTime
         return result
+    }
+}
+
+/**
+ * Keeps cached backdrop snapshots aligned while fullscreen insets and the first layout settle.
+ * A child display list is not necessarily rebuilt when an ancestor moves, so observing pre-draw
+ * geometry is required to invalidate the frosted layer without waiting for user interaction.
+ */
+private class BackdropGeometryObserver(
+    private val target: View,
+    private val onGeometryChanged: () -> Unit
+) : ViewTreeObserver.OnPreDrawListener {
+    private val targetLocation = IntArray(2)
+    private val sourceLocation = IntArray(2)
+    private var source: View? = null
+    private var observedViewTree: ViewTreeObserver? = null
+    private var hasGeometry = false
+    private var targetX = 0
+    private var targetY = 0
+    private var targetWidth = 0
+    private var targetHeight = 0
+    private var sourceX = 0
+    private var sourceY = 0
+    private var sourceWidth = 0
+    private var sourceHeight = 0
+
+    fun setSource(nextSource: View?) {
+        if (source === nextSource) {
+            return
+        }
+        source = nextSource
+        hasGeometry = false
+    }
+
+    fun attach() {
+        detach()
+        val observer = target.viewTreeObserver
+        if (observer.isAlive) {
+            observer.addOnPreDrawListener(this)
+            observedViewTree = observer
+        }
+        hasGeometry = false
+    }
+
+    fun detach() {
+        observedViewTree?.let { observer ->
+            if (observer.isAlive) {
+                observer.removeOnPreDrawListener(this)
+            }
+        }
+        observedViewTree = null
+        hasGeometry = false
+    }
+
+    override fun onPreDraw(): Boolean {
+        val currentSource = source ?: return true
+        target.getLocationInWindow(targetLocation)
+        currentSource.getLocationInWindow(sourceLocation)
+        val nextTargetX = targetLocation[0]
+        val nextTargetY = targetLocation[1]
+        val nextTargetWidth = target.width
+        val nextTargetHeight = target.height
+        val nextSourceX = sourceLocation[0]
+        val nextSourceY = sourceLocation[1]
+        val nextSourceWidth = currentSource.width
+        val nextSourceHeight = currentSource.height
+        val geometryChanged = hasGeometry && (
+            targetX != nextTargetX ||
+                targetY != nextTargetY ||
+                targetWidth != nextTargetWidth ||
+                targetHeight != nextTargetHeight ||
+                sourceX != nextSourceX ||
+                sourceY != nextSourceY ||
+                sourceWidth != nextSourceWidth ||
+                sourceHeight != nextSourceHeight
+            )
+        targetX = nextTargetX
+        targetY = nextTargetY
+        targetWidth = nextTargetWidth
+        targetHeight = nextTargetHeight
+        sourceX = nextSourceX
+        sourceY = nextSourceY
+        sourceWidth = nextSourceWidth
+        sourceHeight = nextSourceHeight
+        hasGeometry = true
+        if (geometryChanged) {
+            onGeometryChanged()
+        }
+        return true
     }
 }
 
@@ -491,6 +603,7 @@ internal class FrostedGlassFrameLayout @JvmOverloads constructor(
     private var backdropSource: View? = null
     private var grainBitmap: Bitmap? = null
     private var grainShader: BitmapShader? = null
+    private val backdropGeometryObserver = BackdropGeometryObserver(this, ::refreshBackdrop)
 
     var blurRadius: Float = FrostedGlassStyle.toolbarBlurRadiusPx(resources.displayMetrics.density)
         set(value) {
@@ -504,7 +617,15 @@ internal class FrostedGlassFrameLayout @JvmOverloads constructor(
 
     fun setBackdropSource(source: View) {
         backdropSource = source
-        invalidate()
+        backdropGeometryObserver.setSource(source)
+        refreshBackdrop()
+    }
+
+    override fun onAttachedToWindow() {
+        super.onAttachedToWindow()
+        backdropGeometryObserver.setSource(backdropSource)
+        backdropGeometryObserver.attach()
+        postOnAnimation { refreshBackdrop() }
     }
 
     override fun draw(canvas: Canvas) {
@@ -549,11 +670,18 @@ internal class FrostedGlassFrameLayout @JvmOverloads constructor(
     }
 
     override fun onDetachedFromWindow() {
+        backdropGeometryObserver.detach()
         legacyBlur.release()
         grainBitmap?.recycle()
         grainBitmap = null
         grainShader = null
         super.onDetachedFromWindow()
+    }
+
+    private fun refreshBackdrop() {
+        nativeBlur?.resetCache()
+        legacyBlur.resetCache()
+        invalidate()
     }
 
     private fun drawFineGrain(canvas: Canvas) {
@@ -707,6 +835,7 @@ internal class FrostedRulerOverlayView @JvmOverloads constructor(
     private var captureInFlight = false
     private var lastCaptureMs = 0L
     private var surfaceSnapshotRetryPosted = false
+    private val backdropGeometryObserver = BackdropGeometryObserver(this, ::refreshBackdrop)
     private val surfaceSnapshotRetryRunnable = Runnable {
         surfaceSnapshotRetryPosted = false
         invalidate()
@@ -720,7 +849,15 @@ internal class FrostedRulerOverlayView @JvmOverloads constructor(
 
     fun setBackdropSource(source: View) {
         backdropSource = source
-        invalidate()
+        backdropGeometryObserver.setSource(source)
+        refreshBackdrop()
+    }
+
+    override fun onAttachedToWindow() {
+        super.onAttachedToWindow()
+        backdropGeometryObserver.setSource(backdropSource)
+        backdropGeometryObserver.attach()
+        postOnAnimation { refreshBackdrop() }
     }
 
     fun setRulerTopProvider(provider: () -> Float) {
@@ -812,6 +949,7 @@ internal class FrostedRulerOverlayView @JvmOverloads constructor(
     }
 
     override fun onDetachedFromWindow() {
+        backdropGeometryObserver.detach()
         legacyBlur.release()
         captureBitmap?.recycle()
         captureBitmap = null
@@ -822,6 +960,12 @@ internal class FrostedRulerOverlayView @JvmOverloads constructor(
         removeCallbacks(surfaceSnapshotRetryRunnable)
         surfaceSnapshotRetryPosted = false
         super.onDetachedFromWindow()
+    }
+
+    private fun refreshBackdrop() {
+        nativeBlur?.resetCache()
+        legacyBlur.resetCache()
+        invalidate()
     }
 
     private fun drawPendingRulerBackdrop(canvas: Canvas, area: RectF) {

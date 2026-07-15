@@ -29,6 +29,7 @@ import icu.ringona.xensynth.hexkeyboard.playback.PLAYBACK_COMPLETION_BURST_SECON
 import icu.ringona.xensynth.hexkeyboard.playback.PLAYBACK_PREVIEW_SECONDS
 import icu.ringona.xensynth.hexkeyboard.playback.PLAYBACK_PREVIEW_SECONDS_MAX
 import icu.ringona.xensynth.hexkeyboard.playback.PLAYBACK_PREVIEW_SECONDS_MIN
+import icu.ringona.xensynth.hexkeyboard.playback.snapPlaybackPitchesToKeyboard
 import icu.ringona.xensynth.hexkeyboard.playback.snapToKeyboard
 import icu.ringona.xensynth.hexkeyboard.ui.HexKeyboardCanvas
 import icu.ringona.xensynth.hexkeyboard.ui.KeyboardDisplayMode
@@ -54,6 +55,24 @@ internal fun hexKeyboardPlaybackPitch(
 ): Double? {
     return scaleGuide.touchPitchForRaw(edo, hexKeyboardRawPitch(step, edo))
         ?.minus(offsetCents / 100.0)
+}
+
+internal fun hexKeyboardPitchForKey(
+    key: HexKey,
+    edo: Int,
+    scaleGuide: ScaleGuide?,
+    offsetCents: Double = 0.0,
+): Double? {
+    return if (scaleGuide == null) {
+        hexKeyboardRawPitch(key.step, edo) - offsetCents / 100.0
+    } else {
+        hexKeyboardPlaybackPitch(
+            step = key.step,
+            edo = edo,
+            scaleGuide = scaleGuide,
+            offsetCents = offsetCents,
+        )
+    }
 }
 
 @Stable
@@ -126,6 +145,18 @@ internal class HexKeyboardHostState {
         this.score = score
     }
 
+    fun snapScorePitchesToKeys(score: ParsedScore): ParsedScore {
+        val layout = HexaKeyboardLayoutEngine.build(configuration)
+        return score.snapPlaybackPitchesToKeyboard(layout) { key ->
+            hexKeyboardPitchForKey(
+                key = key,
+                edo = edo,
+                scaleGuide = scaleGuide,
+                offsetCents = pitchOffsetCents,
+            )
+        }
+    }
+
     fun updatePlayhead(seconds: Double) {
         playheadSeconds = seconds
     }
@@ -190,20 +221,13 @@ internal fun HexKeyboardHost(
         state.scaleGuide,
         state.pitchOffsetCents
     ) {
-        val guide = state.scaleGuide
-        if (guide == null) {
-            state.score?.snapToKeyboard(layout) { key ->
-                hexKeyboardRawPitch(key.step, state.edo) - state.pitchOffsetCents / 100.0
-            }
-        } else {
-            state.score?.snapToKeyboard(layout) { key ->
-                hexKeyboardPlaybackPitch(
-                    step = key.step,
-                    edo = state.edo,
-                    scaleGuide = guide,
-                    offsetCents = state.pitchOffsetCents
-                )
-            }
+        state.score?.snapToKeyboard(layout) { key ->
+            hexKeyboardPitchForKey(
+                key = key,
+                edo = state.edo,
+                scaleGuide = state.scaleGuide,
+                offsetCents = state.pitchOffsetCents,
+            )
         }
     }
     var visualTailSeconds by remember(state.score) { mutableDoubleStateOf(0.0) }

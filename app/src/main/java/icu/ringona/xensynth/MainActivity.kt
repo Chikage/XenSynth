@@ -151,6 +151,7 @@ private const val COMPACT_SLIDER_WIDTH_DP = 184
 private const val HEX_SETTINGS_MENU_WIDTH_DP = 352
 private const val HEX_SETTINGS_VALUE_ROW_HEIGHT_DP = 20
 private const val HEX_SETTINGS_SLIDER_HEIGHT_DP = 24
+private const val HEX_SETTINGS_TOGGLE_HEIGHT_DP = 32
 private const val TOOLBAR_TITLE_MAX_WIDTH_DP = 192
 private const val TUNING_PROFILE_MARQUEE_VISIBLE_CHARS = 6
 private const val COMPACT_MONOSPACE_CHAR_WIDTH_DP = 7
@@ -182,6 +183,9 @@ class MainActivity : ComponentActivity(), RenderFramePacer.InteractionListener {
     private var highRefreshUiStatsFrameCount = 0
     private var startupUnthrottledUntilNanos = 0L
     private val highRefreshRateHandler = Handler(Looper.getMainLooper())
+    private val hexPlaybackPitchSnapRefresh = Runnable {
+        refreshHexPlaybackPitchSnapIfNeeded()
+    }
     private var displayDiagnosticsRegistered = false
     private var lastDisplayModeDiagnosticKey: String? = null
     private lateinit var scoreLoader: ScoreLoader
@@ -272,6 +276,7 @@ class MainActivity : ComponentActivity(), RenderFramePacer.InteractionListener {
     private var hexTouchSensitivityPercent = HEX_TOUCH_SENSITIVITY_DEFAULT
     private var hexPreviewSeconds = HEX_PREVIEW_SECONDS_DEFAULT
     private var hexPseudoPressureEnabled = HEX_PSEUDO_PRESSURE_DEFAULT
+    private var hexPlaybackPitchSnapEnabled = HEX_PLAYBACK_PITCH_SNAP_DEFAULT
     private val nativePlaying: Boolean
         get() = nativePlayback.playing
     private var nativeLoading: Boolean
@@ -408,6 +413,7 @@ class MainActivity : ComponentActivity(), RenderFramePacer.InteractionListener {
         updateMidiInputStatus(detail = null)
         stopHighRefreshRateKeepAlive()
         stopHighRefreshUiPulse()
+        highRefreshRateHandler.removeCallbacks(hexPlaybackPitchSnapRefresh)
         clearPreferredDisplayMode()
         logDisplayModeDiagnostic("onPause", force = true)
         unregisterDisplayModeDiagnostics()
@@ -926,6 +932,7 @@ class MainActivity : ComponentActivity(), RenderFramePacer.InteractionListener {
                         onHexTouchSensitivityChanged = ::onHexTouchSensitivityChanged,
                         onHexPreviewSecondsChanged = ::onHexPreviewSecondsChanged,
                         onHexPseudoPressureChanged = ::onHexPseudoPressureChanged,
+                        onHexPlaybackPitchSnapChanged = ::onHexPlaybackPitchSnapChanged,
                         onHexKeyboardPan = hexKeyboardState::panBy,
                         onHexKeyboardZoom = hexKeyboardState::zoomBy,
                         onAudioLatencyChanged = ::onAudioLatencyChanged,
@@ -1232,8 +1239,12 @@ class MainActivity : ComponentActivity(), RenderFramePacer.InteractionListener {
     }
 
     private fun updateNativeOffsetDisplay(cents: Double) {
+        val previousCents = hexKeyboardState.pitchOffsetCents
         hexKeyboardState.updatePitchOffset(cents)
         playbackUi.updateOffsetDisplay(cents)
+        if (abs(previousCents - hexKeyboardState.pitchOffsetCents) > 0.000_001) {
+            scheduleHexPlaybackPitchSnapRefresh()
+        }
     }
 
     private fun applyVolumeGain(gain: Float, showGestureFeedback: Boolean = false) {
@@ -1335,6 +1346,7 @@ class MainActivity : ComponentActivity(), RenderFramePacer.InteractionListener {
         syncKeyboardSettingsUiState()
         persistKeyboardSettings()
         applyKeyboardLayoutVisibility()
+        applyCurrentKeybindToScore()
     }
 
     private fun onHexColumnsChanged(value: Float) {
@@ -1345,6 +1357,7 @@ class MainActivity : ComponentActivity(), RenderFramePacer.InteractionListener {
         syncKeyboardSettingsUiState()
         syncHexKeyboardRuntimeSettings()
         persistKeyboardSettings()
+        refreshHexPlaybackPitchSnapIfNeeded()
     }
 
     private fun onHexRowsChanged(value: Float) {
@@ -1355,6 +1368,7 @@ class MainActivity : ComponentActivity(), RenderFramePacer.InteractionListener {
         syncKeyboardSettingsUiState()
         syncHexKeyboardRuntimeSettings()
         persistKeyboardSettings()
+        refreshHexPlaybackPitchSnapIfNeeded()
     }
 
     private fun onHexStepQChanged(value: Float) {
@@ -1365,6 +1379,7 @@ class MainActivity : ComponentActivity(), RenderFramePacer.InteractionListener {
         syncKeyboardSettingsUiState()
         syncHexKeyboardRuntimeSettings()
         persistKeyboardSettings()
+        refreshHexPlaybackPitchSnapIfNeeded()
     }
 
     private fun onHexStepRChanged(value: Float) {
@@ -1375,6 +1390,7 @@ class MainActivity : ComponentActivity(), RenderFramePacer.InteractionListener {
         syncKeyboardSettingsUiState()
         syncHexKeyboardRuntimeSettings()
         persistKeyboardSettings()
+        refreshHexPlaybackPitchSnapIfNeeded()
     }
 
     private fun onHexOctaveGroupingChanged(enabled: Boolean) {
@@ -1413,6 +1429,14 @@ class MainActivity : ComponentActivity(), RenderFramePacer.InteractionListener {
         syncKeyboardSettingsUiState()
         syncHexKeyboardRuntimeSettings()
         persistKeyboardSettings()
+    }
+
+    private fun onHexPlaybackPitchSnapChanged(enabled: Boolean) {
+        if (hexPlaybackPitchSnapEnabled == enabled) return
+        hexPlaybackPitchSnapEnabled = enabled
+        syncKeyboardSettingsUiState()
+        persistKeyboardSettings()
+        applyCurrentKeybindToScore()
     }
 
     private fun onAudioLatencyChanged(value: Float) {
@@ -1476,11 +1500,13 @@ class MainActivity : ComponentActivity(), RenderFramePacer.InteractionListener {
         hexTouchSensitivityPercent = HEX_TOUCH_SENSITIVITY_DEFAULT
         hexPreviewSeconds = HEX_PREVIEW_SECONDS_DEFAULT
         hexPseudoPressureEnabled = HEX_PSEUDO_PRESSURE_DEFAULT
+        hexPlaybackPitchSnapEnabled = HEX_PLAYBACK_PITCH_SNAP_DEFAULT
         syncKeyboardSettingsUiState()
         releaseHexKeyboardNotes(immediate = true)
         hexKeyboardState.resetViewport()
         syncHexKeyboardRuntimeSettings()
         applyKeyboardLayoutVisibility()
+        applyCurrentKeybindToScore()
         applyReverbMix(REVERB_DEFAULT)
         applyAudioLatency(AUDIO_LATENCY_DEFAULT_MS, resetScheduler = true)
         settingsPreferences().edit()
@@ -1496,6 +1522,7 @@ class MainActivity : ComponentActivity(), RenderFramePacer.InteractionListener {
             .putInt(PREF_HEX_TOUCH_SENSITIVITY, HEX_TOUCH_SENSITIVITY_DEFAULT)
             .putFloat(PREF_HEX_PREVIEW_SECONDS, HEX_PREVIEW_SECONDS_DEFAULT.toFloat())
             .putBoolean(PREF_HEX_PSEUDO_PRESSURE, HEX_PSEUDO_PRESSURE_DEFAULT)
+            .putBoolean(PREF_HEX_PLAYBACK_PITCH_SNAP, HEX_PLAYBACK_PITCH_SNAP_DEFAULT)
             .putString(PREF_HEX_DISPLAY_MODE, HEX_DISPLAY_MODE_DEFAULT)
             .putInt(PREF_REVERB, REVERB_DEFAULT)
             .putFloat(PREF_VOLUME_GAIN, VOLUME_GAIN_DEFAULT)
@@ -1792,7 +1819,7 @@ class MainActivity : ComponentActivity(), RenderFramePacer.InteractionListener {
             scoreContentParser.parseScore(name, bytes)
         }.onSuccess { parsed ->
             sourceParsedScore = parsed
-            val playbackScore = parsed.withKeybind(currentScaleGuide)
+            val playbackScore = playbackScoreFor(parsed)
             nativeParsedScore = playbackScore
             nativePlayheadSeconds = 0.0
             nativeFinished = false
@@ -1838,6 +1865,7 @@ class MainActivity : ComponentActivity(), RenderFramePacer.InteractionListener {
             persistKeyboardSettings()
         }
         syncHexKeyboardRuntimeSettings()
+        refreshHexPlaybackPitchSnapIfNeeded()
         persistEdo(next)
         waterfallView.setOctaveDivisions(next)
         rulerGlassOverlayView?.invalidate()
@@ -1887,6 +1915,10 @@ class MainActivity : ComponentActivity(), RenderFramePacer.InteractionListener {
             PREF_HEX_PSEUDO_PRESSURE,
             HEX_PSEUDO_PRESSURE_DEFAULT
         )
+        hexPlaybackPitchSnapEnabled = prefs.getBoolean(
+            PREF_HEX_PLAYBACK_PITCH_SNAP,
+            HEX_PLAYBACK_PITCH_SNAP_DEFAULT
+        )
         if (prefs.getString(PREF_HEX_DISPLAY_MODE, null) != HEX_DISPLAY_MODE_DEFAULT) {
             prefs.edit()
                 .putString(PREF_HEX_DISPLAY_MODE, HEX_DISPLAY_MODE_DEFAULT)
@@ -1929,6 +1961,7 @@ class MainActivity : ComponentActivity(), RenderFramePacer.InteractionListener {
         shellUiState.hexTouchSensitivityPercent = hexTouchSensitivityPercent
         shellUiState.hexPreviewSeconds = hexPreviewSeconds
         shellUiState.hexPseudoPressureEnabled = hexPseudoPressureEnabled
+        shellUiState.hexPlaybackPitchSnapEnabled = hexPlaybackPitchSnapEnabled
     }
 
     private fun persistKeyboardSettings() {
@@ -1942,6 +1975,7 @@ class MainActivity : ComponentActivity(), RenderFramePacer.InteractionListener {
             .putInt(PREF_HEX_TOUCH_SENSITIVITY, hexTouchSensitivityPercent)
             .putFloat(PREF_HEX_PREVIEW_SECONDS, hexPreviewSeconds.toFloat())
             .putBoolean(PREF_HEX_PSEUDO_PRESSURE, hexPseudoPressureEnabled)
+            .putBoolean(PREF_HEX_PLAYBACK_PITCH_SNAP, hexPlaybackPitchSnapEnabled)
             .putString(PREF_HEX_DISPLAY_MODE, HEX_DISPLAY_MODE_DEFAULT)
             .apply()
     }
@@ -2059,7 +2093,7 @@ class MainActivity : ComponentActivity(), RenderFramePacer.InteractionListener {
 
     private fun applyCurrentKeybindToScore() {
         val source = sourceParsedScore ?: return
-        val playbackScore = source.withKeybind(currentScaleGuide)
+        val playbackScore = playbackScoreFor(source)
         nativeParsedScore = playbackScore
         waterfallView.setScore(playbackScore)
         if (!applyInitialWaterfallLeadIn()) {
@@ -2067,6 +2101,46 @@ class MainActivity : ComponentActivity(), RenderFramePacer.InteractionListener {
         }
         resetNativeAudioScheduler()
         applyNativeParsedScore(playbackScore)
+    }
+
+    private fun playbackScoreFor(source: ParsedScore): ParsedScore {
+        val keyboundScore = source.withKeybind(currentScaleGuide)
+        return if (
+            keyboardLayoutMode == KeyboardLayoutMode.Hexagonal &&
+            hexPlaybackPitchSnapEnabled
+        ) {
+            hexKeyboardState.snapScorePitchesToKeys(keyboundScore)
+        } else {
+            keyboundScore
+        }
+    }
+
+    private fun refreshHexPlaybackPitchSnapIfNeeded() {
+        highRefreshRateHandler.removeCallbacks(hexPlaybackPitchSnapRefresh)
+        if (
+            keyboardLayoutMode != KeyboardLayoutMode.Hexagonal ||
+            !hexPlaybackPitchSnapEnabled
+        ) {
+            return
+        }
+        val source = sourceParsedScore ?: return
+        nativeParsedScore = playbackScoreFor(source)
+        resetNativeAudioScheduler()
+    }
+
+    private fun scheduleHexPlaybackPitchSnapRefresh() {
+        if (
+            keyboardLayoutMode != KeyboardLayoutMode.Hexagonal ||
+            !hexPlaybackPitchSnapEnabled ||
+            sourceParsedScore == null
+        ) {
+            return
+        }
+        highRefreshRateHandler.removeCallbacks(hexPlaybackPitchSnapRefresh)
+        highRefreshRateHandler.postDelayed(
+            hexPlaybackPitchSnapRefresh,
+            HEX_PLAYBACK_PITCH_SNAP_REFRESH_DELAY_MS,
+        )
     }
 
     private fun stopNativeClock() {
@@ -2466,6 +2540,7 @@ class MainActivity : ComponentActivity(), RenderFramePacer.InteractionListener {
         const val PREF_HEX_TOUCH_SENSITIVITY = "hex_touch_sensitivity_percent"
         const val PREF_HEX_PREVIEW_SECONDS = "hex_preview_seconds"
         const val PREF_HEX_PSEUDO_PRESSURE = "hex_pseudo_pressure_enabled"
+        const val PREF_HEX_PLAYBACK_PITCH_SNAP = "hex_playback_pitch_snap_enabled"
         const val PREF_HEX_DISPLAY_MODE = "hex_display_mode"
         const val PREF_REVERB = "reverb"
         const val PREF_VOLUME_GAIN = "volume_gain"
@@ -2522,6 +2597,8 @@ class MainActivity : ComponentActivity(), RenderFramePacer.InteractionListener {
         const val HEX_PREVIEW_SECONDS_DEFAULT = PLAYBACK_PREVIEW_SECONDS
         const val HEX_PREVIEW_SECONDS_STEPS = 29
         const val HEX_PSEUDO_PRESSURE_DEFAULT = true
+        const val HEX_PLAYBACK_PITCH_SNAP_DEFAULT = false
+        const val HEX_PLAYBACK_PITCH_SNAP_REFRESH_DELAY_MS = 80L
         const val HEX_DISPLAY_MODE_DEFAULT = "pitch"
         const val MIDI_PREVIEW_POINTER_BASE = 20_000
         const val MIDI_PREVIEW_POINTER_MAX = 120_000
@@ -2639,6 +2716,7 @@ private fun XenToolbar(
     onHexTouchSensitivityChanged: (Float) -> Unit,
     onHexPreviewSecondsChanged: (Float) -> Unit,
     onHexPseudoPressureChanged: (Boolean) -> Unit,
+    onHexPlaybackPitchSnapChanged: (Boolean) -> Unit,
     onHexKeyboardPan: (Offset) -> Unit,
     onHexKeyboardZoom: (Float) -> Unit,
     onAudioLatencyChanged: (Float) -> Unit,
@@ -2810,6 +2888,7 @@ private fun XenToolbar(
                 onHexTouchSensitivityChanged = onHexTouchSensitivityChanged,
                 onHexPreviewSecondsChanged = onHexPreviewSecondsChanged,
                 onHexPseudoPressureChanged = onHexPseudoPressureChanged,
+                onHexPlaybackPitchSnapChanged = onHexPlaybackPitchSnapChanged,
                 onAudioLatencyChanged = onAudioLatencyChanged,
                 onReverbChanged = onReverbChanged,
                 onResetSettingsToDefaults = onResetSettingsToDefaults,
@@ -3393,6 +3472,7 @@ private fun ToolbarSettingsMenu(
     onHexTouchSensitivityChanged: (Float) -> Unit,
     onHexPreviewSecondsChanged: (Float) -> Unit,
     onHexPseudoPressureChanged: (Boolean) -> Unit,
+    onHexPlaybackPitchSnapChanged: (Boolean) -> Unit,
     onAudioLatencyChanged: (Float) -> Unit,
     onReverbChanged: (Float) -> Unit,
     onResetSettingsToDefaults: () -> Unit,
@@ -3716,16 +3796,21 @@ private fun ToolbarSettingsMenu(
                             checked = state.hexPseudoPressureEnabled,
                             enabled = true,
                             onCheckedChange = onHexPseudoPressureChanged,
-                            height = (HEX_SETTINGS_VALUE_ROW_HEIGHT_DP +
-                                HEX_SETTINGS_SLIDER_HEIGHT_DP).dp
+                            height = HEX_SETTINGS_TOGGLE_HEIGHT_DP.dp
+                        )
+                        SettingsToggleRow(
+                            label = "PITCH SNAP",
+                            checked = state.hexPlaybackPitchSnapEnabled,
+                            enabled = true,
+                            onCheckedChange = onHexPlaybackPitchSnapChanged,
+                            height = HEX_SETTINGS_TOGGLE_HEIGHT_DP.dp
                         )
                         SettingsToggleRow(
                             label = "OCTAVE GROUPS",
                             checked = state.hexOctaveGroupingEnabled,
                             enabled = true,
                             onCheckedChange = onHexOctaveGroupingChanged,
-                            height = (HEX_SETTINGS_VALUE_ROW_HEIGHT_DP +
-                                HEX_SETTINGS_SLIDER_HEIGHT_DP).dp
+                            height = HEX_SETTINGS_TOGGLE_HEIGHT_DP.dp
                         )
                         audioEffectSettings()
                     }
