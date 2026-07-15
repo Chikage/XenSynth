@@ -173,7 +173,7 @@ internal class HexKeyboardHostState {
 @Composable
 internal fun HexKeyboardHost(
     state: HexKeyboardHostState,
-    onKeyDown: (pointerId: Long, key: HexKey, velocity: Int) -> Unit,
+    onKeyDown: (pointerId: Long, key: HexKey, velocity: Int, expression: Int) -> Unit,
     onKeyPressure: (pointerId: Long, expression: Int) -> Unit,
     onKeyUp: (pointerId: Long) -> Unit
 ) {
@@ -257,13 +257,13 @@ internal fun HexKeyboardHost(
         playbackPreviewSeconds = state.previewSeconds,
         activePlaybackNoteIndices = activeScoreIndices,
         modifier = Modifier.fillMaxSize(),
-        onKeyDown = { pointerId, key, velocity, eventTimeMillis ->
+        onKeyDown = { pointerId, key, velocity, expression, eventTimeMillis ->
             touchSelection = touchSelection.press(
                 pointerId = pointerId,
                 coordinate = key.coordinate,
                 eventTimeMillis = eventTimeMillis
             )
-            onKeyDown(pointerId, key, velocity)
+            onKeyDown(pointerId, key, velocity, expression)
         },
         onKeyPressure = onKeyPressure,
         onKeyUp = { pointerId, eventTimeMillis, retainForChord ->

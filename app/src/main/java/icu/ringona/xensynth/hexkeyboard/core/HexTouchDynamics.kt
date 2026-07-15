@@ -1,9 +1,13 @@
 package icu.ringona.xensynth.hexkeyboard.core
 
+import kotlin.math.abs
+import kotlin.math.cos
 import kotlin.math.exp
 import kotlin.math.hypot
+import kotlin.math.max
 import kotlin.math.pow
 import kotlin.math.roundToInt
+import kotlin.math.sin
 import kotlin.math.sqrt
 
 data class TouchForce(
@@ -60,14 +64,133 @@ object HexTouchHitTester {
     private const val SWITCH_MARGIN_SCALE = 0.12
 }
 
-class PseudoPressureTracker {
+internal data class CalibratedTouchPressure(
+    val normalized: Double,
+    val confidence: Double,
+)
+
+/**
+ * Learns whether an Android pointer's pressure axis carries a useful signal.
+ *
+ * Styluses are trusted immediately. Finger input must demonstrate a meaningful
+ * range over multiple samples so devices that report a constant value such as
+ * 0.5 are not mistaken for pressure-sensitive hardware.
+ */
+internal class TouchPressureCalibrator {
+    private var startTimeMillis: Long? = null
+    private var sampleCount = 0
+    private val recentPressures = FloatArray(PRESSURE_WINDOW_SIZE)
+    private var storedPressureCount = 0
+    private var nextPressureIndex = 0
+    private var confidence = 0.0
+
+    fun sample(
+        rawPressure: Float,
+        uptimeMillis: Long,
+        hardwarePressureHint: Boolean,
+    ): CalibratedTouchPressure {
+        val pressure = rawPressure
+            .takeIf(Float::isFinite)
+            ?.coerceIn(0f, MAX_RAW_PRESSURE)
+            ?: DEFAULT_RAW_PRESSURE
+        val startedAt = startTimeMillis ?: uptimeMillis.also { startTimeMillis = it }
+        sampleCount += 1
+        recentPressures[nextPressureIndex] = pressure
+        nextPressureIndex = (nextPressureIndex + 1) % recentPressures.size
+        storedPressureCount = minOf(storedPressureCount + 1, recentPressures.size)
+
+        val (pressureFloor, pressureCeiling) = robustPressureBounds()
+        val observedRange = pressureCeiling - pressureFloor
+        val elapsedMillis = (uptimeMillis - startedAt).coerceAtLeast(0L)
+        val observedConfidence = if (
+            sampleCount >= MIN_FINGER_PRESSURE_SAMPLES &&
+            elapsedMillis >= MIN_FINGER_PRESSURE_OBSERVATION_MILLIS
+        ) {
+            ((observedRange - FINGER_PRESSURE_RANGE_FLOOR) /
+                FINGER_PRESSURE_RANGE_CONFIDENCE_SPAN).coerceIn(0.0, 1.0)
+        } else {
+            0.0
+        }
+        confidence = if (hardwarePressureHint) {
+            1.0
+        } else {
+            max(confidence, observedConfidence)
+        }
+
+        val fixedNormalized = ((pressure - HARDWARE_PRESSURE_FLOOR) / HARDWARE_PRESSURE_SPAN)
+            .coerceIn(0f, 1f)
+            .toDouble()
+            .pow(HARDWARE_PRESSURE_GAMMA)
+        val adaptiveFloor = pressureFloor - ADAPTIVE_PRESSURE_MARGIN
+        val adaptiveSpan = max(
+            observedRange + ADAPTIVE_PRESSURE_MARGIN * 2.0,
+            MIN_ADAPTIVE_PRESSURE_SPAN,
+        )
+        val adaptiveNormalized = ((pressure - adaptiveFloor) / adaptiveSpan)
+            .coerceIn(0.0, 1.0)
+            .pow(HARDWARE_PRESSURE_GAMMA)
+
+        return CalibratedTouchPressure(
+            normalized = if (hardwarePressureHint) fixedNormalized else adaptiveNormalized,
+            confidence = confidence,
+        )
+    }
+
+    private fun robustPressureBounds(): Pair<Double, Double> {
+        var minimum = Float.POSITIVE_INFINITY
+        var secondMinimum = Float.POSITIVE_INFINITY
+        var maximum = Float.NEGATIVE_INFINITY
+        var secondMaximum = Float.NEGATIVE_INFINITY
+        repeat(storedPressureCount) { index ->
+            val pressure = recentPressures[index]
+            if (pressure <= minimum) {
+                secondMinimum = minimum
+                minimum = pressure
+            } else if (pressure < secondMinimum) {
+                secondMinimum = pressure
+            }
+            if (pressure >= maximum) {
+                secondMaximum = maximum
+                maximum = pressure
+            } else if (pressure > secondMaximum) {
+                secondMaximum = pressure
+            }
+        }
+        return if (storedPressureCount >= MIN_FINGER_PRESSURE_SAMPLES) {
+            secondMinimum.toDouble() to secondMaximum.toDouble()
+        } else {
+            minimum.toDouble() to maximum.toDouble()
+        }
+    }
+
+    private companion object {
+        const val DEFAULT_RAW_PRESSURE = 1f
+        const val MAX_RAW_PRESSURE = 1.5f
+        const val PRESSURE_WINDOW_SIZE = 12
+        const val MIN_FINGER_PRESSURE_SAMPLES = 5
+        const val MIN_FINGER_PRESSURE_OBSERVATION_MILLIS = 64L
+        const val FINGER_PRESSURE_RANGE_FLOOR = 0.07
+        const val FINGER_PRESSURE_RANGE_CONFIDENCE_SPAN = 0.18
+        const val HARDWARE_PRESSURE_FLOOR = 0.03f
+        const val HARDWARE_PRESSURE_SPAN = 0.82f
+        const val HARDWARE_PRESSURE_GAMMA = 0.72
+        const val ADAPTIVE_PRESSURE_MARGIN = 0.02
+        const val MIN_ADAPTIVE_PRESSURE_SPAN = 0.30
+    }
+}
+
+class PseudoPressureTracker internal constructor(
+    private val pressureCalibrator: TouchPressureCalibrator,
+) {
+    constructor() : this(TouchPressureCalibrator())
+
     private var startTimeMillis: Long? = null
     private var lastTimeMillis: Long? = null
     private var lastPoint: HexPoint? = null
     private var filteredForce: Double? = null
-    private var minimumPressure = Float.POSITIVE_INFINITY
-    private var maximumPressure = Float.NEGATIVE_INFINITY
-    private var hardwarePressureObserved = false
+    private var initialHexRadius: Double? = null
+    private var initialPseudoForce: Double? = null
+    private var strikeForce: Double? = null
 
     fun sample(
         rawPressure: Float,
@@ -75,6 +198,7 @@ class PseudoPressureTracker {
         point: HexPoint,
         keyCenter: HexPoint,
         keyRadius: Double,
+        keyRotationDegrees: Double = 0.0,
         hardwarePressureHint: Boolean = false,
     ): TouchForce {
         val safeRadius = keyRadius.coerceAtLeast(1.0)
@@ -82,56 +206,58 @@ class PseudoPressureTracker {
         val previousTime = lastTimeMillis
         val previousPoint = lastPoint
         val elapsedMillis = (uptimeMillis - startedAt).coerceAtLeast(0L)
-        val deltaMillis = previousTime?.let { (uptimeMillis - it).coerceAtLeast(1L) } ?: 0L
+        val deltaMillis = previousTime
+            ?.let { (uptimeMillis - it).coerceIn(0L, MAX_FILTER_DELTA_MILLIS) }
+            ?: 0L
 
-        val centerDistance = hypot(point.x - keyCenter.x, point.y - keyCenter.y)
-        val centerProximity =
-            (1.0 - centerDistance / (safeRadius * CENTER_PROXIMITY_RADIUS_SCALE)).coerceIn(0.0, 1.0)
+        val hexRadius = normalizedHexRadius(
+            point = point,
+            center = keyCenter,
+            radius = safeRadius,
+            rotationDegrees = keyRotationDegrees,
+        )
+        val centerProximity = (1.0 - hexRadius).coerceIn(0.0, 1.0)
+        val placementForce = initialPseudoForce ?: (
+            BASE_FORCE + PLACEMENT_WEIGHT * centerProximity.pow(PLACEMENT_GAMMA)
+            ).coerceIn(0.0, 1.0).also { initialPseudoForce = it }
+        val startedHexRadius = initialHexRadius ?: hexRadius.also { initialHexRadius = it }
+        val inwardTravel = ((startedHexRadius - hexRadius) / INWARD_TRAVEL_SCALE)
+            .coerceIn(-1.0, 1.0)
         val holdProgress = (elapsedMillis.toDouble() / HOLD_RAMP_MILLIS).coerceIn(0.0, 1.0)
         val speedInRadiiPerSecond = if (previousPoint != null && deltaMillis > 0L) {
             hypot(point.x - previousPoint.x, point.y - previousPoint.y) /
                 safeRadius / (deltaMillis / 1_000.0)
         } else {
-            0.0
+            FAST_SLIDE_RADII_PER_SECOND
         }
         val stability = (1.0 - speedInRadiiPerSecond / FAST_SLIDE_RADII_PER_SECOND)
             .coerceIn(0.0, 1.0)
         val pseudoForce = (
-            BASE_FORCE +
-                CENTER_WEIGHT * centerProximity +
-                HOLD_WEIGHT * sqrt(holdProgress) +
-                STABILITY_WEIGHT * stability
+            placementForce +
+                INWARD_TRAVEL_WEIGHT * inwardTravel +
+                HOLD_WEIGHT * sqrt(holdProgress) * stability
             ).coerceIn(0.0, 1.0)
 
-        val pressure = rawPressure.takeIf(Float::isFinite)?.coerceIn(0f, MAX_RAW_PRESSURE) ?: 1f
-        minimumPressure = minOf(minimumPressure, pressure)
-        maximumPressure = maxOf(maximumPressure, pressure)
-        if (
-            hardwarePressureHint ||
-            pressure in MIN_DIRECT_PRESSURE..MAX_DIRECT_PRESSURE ||
-            maximumPressure - minimumPressure >= MIN_PRESSURE_RANGE
-        ) {
-            hardwarePressureObserved = true
-        }
-
-        val hardwareForce = ((pressure - HARDWARE_PRESSURE_FLOOR) / HARDWARE_PRESSURE_SPAN)
-            .coerceIn(0f, 1f)
-            .toDouble()
-            .pow(HARDWARE_PRESSURE_GAMMA)
-        val targetForce = if (hardwarePressureObserved) {
-            HARDWARE_WEIGHT * hardwareForce + (1.0 - HARDWARE_WEIGHT) * pseudoForce
-        } else {
-            pseudoForce
-        }
+        val calibratedPressure = pressureCalibrator.sample(
+            rawPressure = rawPressure,
+            uptimeMillis = uptimeMillis,
+            hardwarePressureHint = hardwarePressureHint,
+        )
+        val targetForce = pseudoForce +
+            (calibratedPressure.normalized - pseudoForce) * calibratedPressure.confidence
+        val initialStrikeForce = strikeForce ?: targetForce.also { strikeForce = it }
         val previousFilteredForce = filteredForce
-        val smoothing = if (previousFilteredForce == null || deltaMillis <= 0L) {
-            1.0
-        } else {
-            (1.0 - exp(-deltaMillis / FORCE_SMOOTHING_MILLIS)).coerceIn(0.12, 0.78)
-        }
         val force = if (previousFilteredForce == null) {
             targetForce
+        } else if (deltaMillis <= 0L) {
+            previousFilteredForce
         } else {
+            val timeConstant = if (targetForce >= previousFilteredForce) {
+                FORCE_ATTACK_MILLIS
+            } else {
+                FORCE_RELEASE_MILLIS
+            }
+            val smoothing = 1.0 - exp(-deltaMillis / timeConstant)
             previousFilteredForce + (targetForce - previousFilteredForce) * smoothing
         }.coerceIn(0.0, 1.0)
 
@@ -141,42 +267,60 @@ class PseudoPressureTracker {
 
         return TouchForce(
             normalized = force.toFloat(),
-            velocity = (MIN_VELOCITY + (MAX_VELOCITY - MIN_VELOCITY) * force.pow(VELOCITY_GAMMA))
+            velocity = (MIN_VELOCITY +
+                (MAX_VELOCITY - MIN_VELOCITY) * initialStrikeForce.pow(VELOCITY_GAMMA))
                 .roundToInt()
                 .coerceIn(MIN_VELOCITY, MAX_VELOCITY),
             expression = (MIN_EXPRESSION +
                 (MAX_EXPRESSION - MIN_EXPRESSION) * force.pow(EXPRESSION_GAMMA))
                 .roundToInt()
                 .coerceIn(MIN_EXPRESSION, MAX_EXPRESSION),
-            usesHardwarePressure = hardwarePressureObserved,
+            usesHardwarePressure = calibratedPressure.confidence >= HARDWARE_CONFIDENCE_THRESHOLD,
         )
     }
 
     private companion object {
-        const val CENTER_PROXIMITY_RADIUS_SCALE = 1.15
-        const val HOLD_RAMP_MILLIS = 320.0
-        const val FAST_SLIDE_RADII_PER_SECOND = 9.0
-        const val BASE_FORCE = 0.34
-        const val CENTER_WEIGHT = 0.30
-        const val HOLD_WEIGHT = 0.20
-        const val STABILITY_WEIGHT = 0.16
+        const val HOLD_RAMP_MILLIS = 420.0
+        const val FAST_SLIDE_RADII_PER_SECOND = 7.0
+        const val BASE_FORCE = 0.24
+        const val PLACEMENT_WEIGHT = 0.52
+        const val PLACEMENT_GAMMA = 0.80
+        const val INWARD_TRAVEL_SCALE = 0.55
+        const val INWARD_TRAVEL_WEIGHT = 0.38
+        const val HOLD_WEIGHT = 0.05
+        const val HARDWARE_CONFIDENCE_THRESHOLD = 0.50
+        const val FORCE_ATTACK_MILLIS = 24.0
+        const val FORCE_RELEASE_MILLIS = 72.0
+        const val MAX_FILTER_DELTA_MILLIS = 100L
 
-        const val MAX_RAW_PRESSURE = 1.5f
-        const val MIN_DIRECT_PRESSURE = 0.02f
-        const val MAX_DIRECT_PRESSURE = 0.98f
-        const val MIN_PRESSURE_RANGE = 0.05f
-        const val HARDWARE_PRESSURE_FLOOR = 0.03f
-        const val HARDWARE_PRESSURE_SPAN = 0.82f
-        const val HARDWARE_PRESSURE_GAMMA = 0.72
-        const val HARDWARE_WEIGHT = 0.82
-        const val FORCE_SMOOTHING_MILLIS = 42.0
-
-        const val MIN_VELOCITY = 44
+        const val MIN_VELOCITY = 36
         const val MAX_VELOCITY = 127
-        const val VELOCITY_GAMMA = 0.72
-        const val MIN_EXPRESSION = 70
+        const val VELOCITY_GAMMA = 0.82
+        const val MIN_EXPRESSION = 52
         const val MAX_EXPRESSION = 127
-        const val EXPRESSION_GAMMA = 0.85
+        const val EXPRESSION_GAMMA = 0.92
     }
 }
 
+private fun normalizedHexRadius(
+    point: HexPoint,
+    center: HexPoint,
+    radius: Double,
+    rotationDegrees: Double,
+): Double {
+    val angle = Math.toRadians(-rotationDegrees)
+    val cosine = cos(angle)
+    val sine = sin(angle)
+    val deltaX = point.x - center.x
+    val deltaY = point.y - center.y
+    val localX = deltaX * cosine - deltaY * sine
+    val localY = deltaX * sine + deltaY * cosine
+    val apothem = radius * SQRT_THREE_OVER_TWO
+    return maxOf(
+        abs(localY),
+        abs(SQRT_THREE_OVER_TWO * localX + 0.5 * localY),
+        abs(-SQRT_THREE_OVER_TWO * localX + 0.5 * localY),
+    ) / apothem
+}
+
+private val SQRT_THREE_OVER_TWO = sqrt(3.0) / 2.0

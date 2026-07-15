@@ -38,7 +38,8 @@ class NativeAudioController(
         channel: Int = 0,
         program: Int = 0,
         bankMsb: Int = 0,
-        bankLsb: Int = 0
+        bankLsb: Int = 0,
+        expression: Int = 127,
     ): Int? {
         return runCatching {
             nativeAudio.noteOn(
@@ -48,7 +49,8 @@ class NativeAudioController(
                 channel = channel,
                 program = program,
                 bankMsb = bankMsb,
-                bankLsb = bankLsb
+                bankLsb = bankLsb,
+                expression = expression.coerceIn(0, 127),
             )
         }.getOrNull()
     }

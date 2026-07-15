@@ -18,7 +18,8 @@ interface NativeAudio {
         program: Int = 0,
         bankMsb: Int = 0,
         bankLsb: Int = 0,
-        delaySeconds: Double = 0.0
+        delaySeconds: Double = 0.0,
+        expression: Int = 127,
     ): Int?
 
     fun noteOff(noteId: Int)

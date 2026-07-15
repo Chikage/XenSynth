@@ -1957,7 +1957,12 @@ class MainActivity : ComponentActivity(), RenderFramePacer.InteractionListener {
         )
     }
 
-    private fun startHexKeyboardNote(pointerId: Long, key: HexKey, velocity: Int) {
+    private fun startHexKeyboardNote(
+        pointerId: Long,
+        key: HexKey,
+        velocity: Int,
+        expression: Int,
+    ) {
         releaseHexKeyboardNote(pointerId)
         val playbackPitch = hexKeyboardPlaybackPitch(
             step = key.step,
@@ -1980,7 +1985,8 @@ class MainActivity : ComponentActivity(), RenderFramePacer.InteractionListener {
             key = playbackKey,
             velocity = velocity.coerceIn(MIDI_VELOCITY_MIN, MIDI_VELOCITY_MAX),
             cents = ((playbackPitch - playbackKey) * 100.0).toFloat(),
-            program = touchKeyboardProgram
+            program = touchKeyboardProgram,
+            expression = expression.coerceIn(0, 127),
         )?.let { noteId ->
             activeHexNotes[pointerId] = noteId
         }

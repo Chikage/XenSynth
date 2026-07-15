@@ -31,7 +31,8 @@ object NativeAudioEngine : NativeAudio {
         program: Int,
         bankMsb: Int,
         bankLsb: Int,
-        delaySeconds: Double
+        delaySeconds: Double,
+        expression: Int,
     ): Int? {
         val noteId = noteOnNative(
             key.coerceIn(0, 127),
@@ -41,7 +42,8 @@ object NativeAudioEngine : NativeAudio {
             program.coerceIn(0, 127),
             bankMsb.coerceIn(0, 127),
             bankLsb.coerceIn(0, 127),
-            delaySeconds.coerceAtLeast(0.0)
+            delaySeconds.coerceAtLeast(0.0),
+            expression.coerceIn(0, 127),
         )
         return noteId.takeIf { it >= 0 }
     }
@@ -87,7 +89,8 @@ object NativeAudioEngine : NativeAudio {
         program: Int,
         bankMsb: Int,
         bankLsb: Int,
-        delaySeconds: Double
+        delaySeconds: Double,
+        expression: Int,
     ): Int
 
     private external fun noteOffNative(noteId: Int, immediate: Boolean)

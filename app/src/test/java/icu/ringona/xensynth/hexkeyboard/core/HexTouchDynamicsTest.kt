@@ -90,6 +90,7 @@ class HexTouchDynamicsTest {
             point = origin.center,
             keyCenter = origin.center,
             keyRadius = layout.configuration.radius.toDouble(),
+            hardwarePressureHint = true,
         )
         val hard = PseudoPressureTracker().sample(
             rawPressure = 0.82f,
@@ -97,6 +98,7 @@ class HexTouchDynamicsTest {
             point = origin.center,
             keyCenter = origin.center,
             keyRadius = layout.configuration.radius.toDouble(),
+            hardwarePressureHint = true,
         )
 
         assertTrue(soft.usesHardwarePressure)
@@ -106,7 +108,41 @@ class HexTouchDynamicsTest {
     }
 
     @Test
-    fun fallbackForceRespondsToPlacementAndHoldTime() {
+    fun constantFingerPressureAndSingleOutlierDoNotMasqueradeAsHardwarePressure() {
+        val calibrator = TouchPressureCalibrator()
+        val pressures = listOf(0.5f, 0.5f, 1.4f, 0.5f, 0.5f, 0.5f)
+
+        val samples = pressures.mapIndexed { index, pressure ->
+            calibrator.sample(
+                rawPressure = pressure,
+                uptimeMillis = 100L + index * 24L,
+                hardwarePressureHint = false,
+            )
+        }
+
+        assertTrue(samples.all { it.confidence == 0.0 })
+    }
+
+    @Test
+    fun varyingFingerPressureBuildsHardwareConfidenceGradually() {
+        val calibrator = TouchPressureCalibrator()
+        val pressures = listOf(0.18f, 0.26f, 0.44f, 0.68f, 0.86f)
+
+        val samples = pressures.mapIndexed { index, pressure ->
+            calibrator.sample(
+                rawPressure = pressure,
+                uptimeMillis = 100L + index * 20L,
+                hardwarePressureHint = false,
+            )
+        }
+
+        assertEquals(0.0, samples.first().confidence, 0.0)
+        assertTrue(samples.last().confidence >= 0.5)
+        assertTrue(samples.last().normalized > samples.first().normalized)
+    }
+
+    @Test
+    fun fallbackForceRespondsToPlacementAndDeliberateInwardMotion() {
         val centerTracker = PseudoPressureTracker()
         val edgeTracker = PseudoPressureTracker()
         val centerAtDown = centerTracker.sample(
@@ -125,7 +161,14 @@ class HexTouchDynamicsTest {
         )
         val centerAfterHold = centerTracker.sample(
             rawPressure = 1f,
-            uptimeMillis = 500L,
+            uptimeMillis = 600L,
+            point = origin.center,
+            keyCenter = origin.center,
+            keyRadius = layout.configuration.radius.toDouble(),
+        )
+        val edgeAfterInwardMotion = edgeTracker.sample(
+            rawPressure = 1f,
+            uptimeMillis = 180L,
             point = origin.center,
             keyCenter = origin.center,
             keyRadius = layout.configuration.radius.toDouble(),
@@ -133,6 +176,81 @@ class HexTouchDynamicsTest {
 
         assertTrue(centerAtDown.velocity > edgeAtDown.velocity)
         assertTrue(centerAfterHold.expression > centerAtDown.expression)
+        assertTrue(centerAfterHold.expression < 120)
+        assertTrue(edgeAfterInwardMotion.expression > edgeAtDown.expression)
+        assertEquals(edgeAtDown.velocity, edgeAfterInwardMotion.velocity)
+    }
+
+    @Test
+    fun newKeyTrackerDoesNotInheritPreviousKeyHoldRamp() {
+        val calibrator = TouchPressureCalibrator()
+        val firstTracker = PseudoPressureTracker(calibrator)
+        val firstDown = firstTracker.sample(
+            rawPressure = 1f,
+            uptimeMillis = 100L,
+            point = origin.center,
+            keyCenter = origin.center,
+            keyRadius = layout.configuration.radius.toDouble(),
+        )
+        val firstHeld = firstTracker.sample(
+            rawPressure = 1f,
+            uptimeMillis = 600L,
+            point = origin.center,
+            keyCenter = origin.center,
+            keyRadius = layout.configuration.radius.toDouble(),
+        )
+
+        val nextKeyDown = PseudoPressureTracker(calibrator).sample(
+            rawPressure = 1f,
+            uptimeMillis = 600L,
+            point = neighbor.center,
+            keyCenter = neighbor.center,
+            keyRadius = layout.configuration.radius.toDouble(),
+        )
+
+        assertEquals(firstDown.velocity, nextKeyDown.velocity)
+        assertEquals(firstDown.expression, nextKeyDown.expression)
+        assertTrue(firstHeld.expression > nextKeyDown.expression)
+    }
+
+    @Test
+    fun rotatedHexVertexAndEdgeHaveEquivalentPlacementForce() {
+        val radius = layout.configuration.radius.toDouble()
+        val rotation = layout.configuration.rotationDegrees.toDouble()
+        val vertex = radialPoint(origin.center, radius, rotation)
+        val edgeMiddle = radialPoint(
+            center = origin.center,
+            radius = radius * kotlin.math.sqrt(3.0) / 2.0,
+            degrees = rotation + 30.0,
+        )
+
+        val vertexForce = PseudoPressureTracker().sample(
+            rawPressure = 1f,
+            uptimeMillis = 100L,
+            point = vertex,
+            keyCenter = origin.center,
+            keyRadius = radius,
+            keyRotationDegrees = rotation,
+        )
+        val edgeForce = PseudoPressureTracker().sample(
+            rawPressure = 1f,
+            uptimeMillis = 100L,
+            point = edgeMiddle,
+            keyCenter = origin.center,
+            keyRadius = radius,
+            keyRotationDegrees = rotation,
+        )
+
+        assertEquals(vertexForce.velocity, edgeForce.velocity)
+        assertEquals(vertexForce.expression, edgeForce.expression)
+    }
+
+    @Test
+    fun pseudoForceFilterIsStableAcrossPointerSampleRates() {
+        val denseExpression = expressionAfterInwardMove(sampleIntervalMillis = 16L)
+        val sparseExpression = expressionAfterInwardMove(sampleIntervalMillis = 48L)
+
+        assertTrue(kotlin.math.abs(denseExpression - sparseExpression) <= 1)
     }
 
     @Test
@@ -264,10 +382,42 @@ class HexTouchDynamicsTest {
         y = first.y + (second.y - first.y) * amount,
     )
 
+    private fun radialPoint(center: HexPoint, radius: Double, degrees: Double): HexPoint {
+        val angle = Math.toRadians(degrees)
+        return HexPoint(
+            x = center.x + kotlin.math.cos(angle) * radius,
+            y = center.y + kotlin.math.sin(angle) * radius,
+        )
+    }
+
+    private fun expressionAfterInwardMove(sampleIntervalMillis: Long): Int {
+        val tracker = PseudoPressureTracker()
+        val radius = layout.configuration.radius.toDouble()
+        tracker.sample(
+            rawPressure = 1f,
+            uptimeMillis = 100L,
+            point = HexPoint(origin.center.x + radius, origin.center.y),
+            keyCenter = origin.center,
+            keyRadius = radius,
+        )
+        var uptimeMillis = 116L
+        var expression = 0
+        while (uptimeMillis <= 212L) {
+            expression = tracker.sample(
+                rawPressure = 1f,
+                uptimeMillis = uptimeMillis,
+                point = origin.center,
+                keyCenter = origin.center,
+                keyRadius = radius,
+            ).expression
+            uptimeMillis += sampleIntervalMillis
+        }
+        return expression
+    }
+
     private fun squaredDistance(first: HexPoint, second: HexPoint): Double {
         val dx = first.x - second.x
         val dy = first.y - second.y
         return dx * dx + dy * dy
     }
 }
-

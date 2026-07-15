@@ -73,7 +73,8 @@ class FakeNativeAudio : NativeAudio {
         program: Int,
         bankMsb: Int,
         bankLsb: Int,
-        delaySeconds: Double
+        delaySeconds: Double,
+        expression: Int,
     ): Int? {
         noteOns += NoteOnCall(
             key = key,
@@ -83,7 +84,8 @@ class FakeNativeAudio : NativeAudio {
             program = program,
             bankMsb = bankMsb,
             bankLsb = bankLsb,
-            delaySeconds = delaySeconds
+            delaySeconds = delaySeconds,
+            expression = expression,
         )
         return nextNoteId
     }
@@ -113,6 +115,7 @@ class FakeNativeAudio : NativeAudio {
         val program: Int,
         val bankMsb: Int,
         val bankLsb: Int,
-        val delaySeconds: Double
+        val delaySeconds: Double,
+        val expression: Int,
     )
 }

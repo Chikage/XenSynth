@@ -39,6 +39,7 @@ import icu.ringona.xensynth.hexkeyboard.core.HexPoint
 import icu.ringona.xensynth.hexkeyboard.core.HexaKeyboardLayout
 import icu.ringona.xensynth.hexkeyboard.core.HexTouchHitTester
 import icu.ringona.xensynth.hexkeyboard.core.PseudoPressureTracker
+import icu.ringona.xensynth.hexkeyboard.core.TouchPressureCalibrator
 import icu.ringona.xensynth.hexkeyboard.core.TouchForce
 import icu.ringona.xensynth.hexkeyboard.playback.KeyboardPlaybackNote
 import icu.ringona.xensynth.hexkeyboard.playback.KeyboardPlaybackTimeline
@@ -92,7 +93,13 @@ fun HexKeyboardCanvas(
     displayMode: KeyboardDisplayMode,
     selectedCoordinates: Set<AxialCoordinate>,
     selectionAnchorCoordinate: AxialCoordinate?,
-    onKeyDown: (pointerId: Long, key: HexKey, velocity: Int, eventTimeMillis: Long) -> Unit,
+    onKeyDown: (
+        pointerId: Long,
+        key: HexKey,
+        velocity: Int,
+        expression: Int,
+        eventTimeMillis: Long,
+    ) -> Unit,
     onKeyPressure: (pointerId: Long, expression: Int) -> Unit,
     onKeyUp: (pointerId: Long, eventTimeMillis: Long, retainForChord: Boolean) -> Unit,
     modifier: Modifier = Modifier,
@@ -118,7 +125,9 @@ fun HexKeyboardCanvas(
     val activeCoordinates = remember(layout) { mutableStateMapOf<Long, AxialCoordinate>() }
     val activeForces = remember(layout) { mutableStateMapOf<Long, Float>() }
     val forceTrackers = remember(layout) { mutableMapOf<Long, PseudoPressureTracker>() }
+    val pressureCalibrators = remember(layout) { mutableMapOf<Long, TouchPressureCalibrator>() }
     val lastExpressions = remember(layout) { mutableMapOf<Long, Int>() }
+    val lastExpressionTimes = remember(layout) { mutableMapOf<Long, Long>() }
     val lastRawPressures = remember(layout) { mutableMapOf<Long, Float>() }
 
     DisposableEffect(layout, touchEpoch) {
@@ -130,7 +139,9 @@ fun HexKeyboardCanvas(
             activeCoordinates.clear()
             activeForces.clear()
             forceTrackers.clear()
+            pressureCalibrators.clear()
             lastExpressions.clear()
+            lastExpressionTimes.clear()
             lastRawPressures.clear()
         }
     }
@@ -237,13 +248,34 @@ fun HexKeyboardCanvas(
                                     null
                                 }
                                 val nextCoordinate = nextKey?.coordinate
+                                val keyChanged = previousCoordinate != nextCoordinate
+                                if (keyChanged) {
+                                    if (nextKey != null && pseudoPressureEnabled) {
+                                        val calibrator = pressureCalibrators.getOrPut(
+                                            pointerId,
+                                            ::TouchPressureCalibrator,
+                                        )
+                                        forceTrackers[pointerId] = PseudoPressureTracker(calibrator)
+                                    } else {
+                                        forceTrackers.remove(pointerId)
+                                    }
+                                }
                                 val force = if (nextKey != null && pseudoPressureEnabled) {
-                                    forceTrackers.getOrPut(pointerId, ::PseudoPressureTracker).sample(
+                                    forceTrackers.getOrPut(pointerId) {
+                                        PseudoPressureTracker(
+                                            pressureCalibrators.getOrPut(
+                                                pointerId,
+                                                ::TouchPressureCalibrator,
+                                            ),
+                                        )
+                                    }.sample(
                                         rawPressure = rawPressure,
                                         uptimeMillis = uptimeMillis,
                                         point = modelPoint,
                                         keyCenter = nextKey.center,
                                         keyRadius = layout.configuration.radius.toDouble(),
+                                        keyRotationDegrees =
+                                            layout.configuration.rotationDegrees.toDouble(),
                                         hardwarePressureHint = hardwarePressureHint,
                                     )
                                 } else if (nextKey != null) {
@@ -252,12 +284,12 @@ fun HexKeyboardCanvas(
                                     null
                                 }
 
-                                val keyChanged = previousCoordinate != nextCoordinate
                                 if (keyChanged) {
                                     if (previousCoordinate != null) {
                                         activeCoordinates.remove(pointerId)
                                         activeForces.remove(pointerId)
                                         lastExpressions.remove(pointerId)
+                                        lastExpressionTimes.remove(pointerId)
                                         latestOnKeyUp.value(pointerId, uptimeMillis, !pressed)
                                     }
                                     if (nextKey != null && force != null) {
@@ -266,6 +298,7 @@ fun HexKeyboardCanvas(
                                             pointerId,
                                             nextKey,
                                             force.velocity,
+                                            force.expression,
                                             uptimeMillis,
                                         )
                                     }
@@ -274,17 +307,27 @@ fun HexKeyboardCanvas(
                                 if (nextKey != null && force != null) {
                                     activeForces[pointerId] = force.normalized
                                     val previousExpression = lastExpressions[pointerId]
+                                    val expressionDifference = previousExpression
+                                        ?.let { kotlin.math.abs(force.expression - it) }
+                                    val previousExpressionTime = lastExpressionTimes[pointerId]
                                     if (
                                         keyChanged ||
                                         previousExpression == null ||
-                                        kotlin.math.abs(force.expression - previousExpression) >= 2
+                                        expressionDifference == null ||
+                                        expressionDifference >= 2 ||
+                                        (expressionDifference > 0 &&
+                                            previousExpressionTime != null &&
+                                            uptimeMillis - previousExpressionTime >=
+                                            EXPRESSION_FLUSH_MILLIS)
                                     ) {
                                         lastExpressions[pointerId] = force.expression
+                                        lastExpressionTimes[pointerId] = uptimeMillis
                                         latestOnKeyPressure.value(pointerId, force.expression)
                                     }
                                 } else {
                                     activeForces.remove(pointerId)
                                     lastExpressions.remove(pointerId)
+                                    lastExpressionTimes.remove(pointerId)
                                 }
                             }
 
@@ -322,6 +365,7 @@ fun HexKeyboardCanvas(
                                     )
                                     if (!change.pressed) {
                                         forceTrackers.remove(pointerId)
+                                        pressureCalibrators.remove(pointerId)
                                         lastRawPressures.remove(pointerId)
                                     }
                                     change.consume()
@@ -336,7 +380,9 @@ fun HexKeyboardCanvas(
                         activeCoordinates.clear()
                         activeForces.clear()
                         forceTrackers.clear()
+                        pressureCalibrators.clear()
                         lastExpressions.clear()
+                        lastExpressionTimes.clear()
                         lastRawPressures.clear()
                     }
                 },
@@ -943,3 +989,4 @@ private const val MAX_PLAYBACK_TRACK_LAYERS = 8
 private const val MAX_ACTIVE_PARTICLE_NOTES = 3
 private const val ACTIVE_PARTICLE_SALT = 0x1A2B3C4D
 private const val COMPLETED_PARTICLE_SALT = 0x4D3C2B1A
+private const val EXPRESSION_FLUSH_MILLIS = 48L

@@ -77,7 +77,12 @@ class NativeAudioControllerTest {
         }
         val controller = NativeAudioController(audio)
 
-        val noteId = controller.noteOn(key = 60, velocity = 96, channel = 2)
+        val noteId = controller.noteOn(
+            key = 60,
+            velocity = 96,
+            channel = 2,
+            expression = 93,
+        )
         val noteOffSuccess = controller.noteOff(42)
         val immediateNoteOffSuccess = controller.noteOffImmediately(43)
 
@@ -88,7 +93,18 @@ class NativeAudioControllerTest {
         assertEquals(60, audio.noteOns.single().key)
         assertEquals(96, audio.noteOns.single().velocity)
         assertEquals(2, audio.noteOns.single().channel)
+        assertEquals(93, audio.noteOns.single().expression)
         assertEquals(listOf(42, 43), audio.noteOffs)
+    }
+
+    @Test
+    fun noteOnExpressionIsClamped() {
+        val audio = FakeNativeAudio()
+        val controller = NativeAudioController(audio)
+
+        controller.noteOn(key = 60, velocity = 96, expression = 999)
+
+        assertEquals(127, audio.noteOns.single().expression)
     }
 
     @Test

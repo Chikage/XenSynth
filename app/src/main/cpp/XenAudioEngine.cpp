@@ -679,7 +679,8 @@ public:
             int program,
             int bankMsb,
             int bankLsb,
-            double delaySeconds) {
+            double delaySeconds,
+            int expression) {
         std::unique_lock<std::mutex> lock(synthMutex);
         if (!isFluidReadyLocked() || key < 0 || key >= kMidiKeyCount || velocity <= 0) {
             return -1;
@@ -720,6 +721,7 @@ public:
         note.playbackChannel = target.channel;
         note.key = key;
         note.velocity = std::min(127, velocity);
+        note.expression = clampInt(expression, 0, 127);
         note.bank = bank;
         note.program = safeProgram;
         note.startFramesRemaining = framesFromSeconds(delaySeconds);
@@ -729,7 +731,7 @@ public:
         if (note.started && !startFluidNoteLocked(note)) {
             return -1;
         }
-        note.pressureMailboxIndex = claimPressureMailboxLocked(noteId);
+        note.pressureMailboxIndex = claimPressureMailboxLocked(noteId, note.expression);
         activeFluidNotes.push_back(note);
         return noteId;
     }
@@ -1338,7 +1340,7 @@ private:
                 (value >> kPressureNoteIdShift) & kPressureNoteIdMask);
     }
 
-    int32_t claimPressureMailboxLocked(int32_t noteId) {
+    int32_t claimPressureMailboxLocked(int32_t noteId, int32_t expression) {
         const size_t start = static_cast<uint32_t>(noteId) % kPressureMailboxCount;
         for (size_t offset = 0; offset < kPressureMailboxCount; offset++) {
             const size_t index = (start + offset) % kPressureMailboxCount;
@@ -1352,7 +1354,7 @@ private:
                     kPressureGenerationMask;
             const PressureMailboxWord initial = packPressureMailboxValue(
                     noteId,
-                    127,
+                    clampInt(expression, 0, 127),
                     false,
                     generation);
             if (pressureMailboxes[index].value.compare_exchange_strong(
@@ -1910,8 +1912,18 @@ Java_icu_ringona_xensynth_audio_NativeAudioEngine_noteOnNative(
         jint program,
         jint bankMsb,
         jint bankLsb,
-        jdouble delaySeconds) {
-    return engine.noteOn(key, velocity, cents, channel, program, bankMsb, bankLsb, delaySeconds);
+        jdouble delaySeconds,
+        jint expression) {
+    return engine.noteOn(
+            key,
+            velocity,
+            cents,
+            channel,
+            program,
+            bankMsb,
+            bankLsb,
+            delaySeconds,
+            expression);
 }
 
 JNIEXPORT void JNICALL
