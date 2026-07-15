@@ -42,6 +42,7 @@ import icu.ringona.xensynth.hexkeyboard.core.PseudoPressureTracker
 import icu.ringona.xensynth.hexkeyboard.core.TouchForce
 import icu.ringona.xensynth.hexkeyboard.playback.KeyboardPlaybackNote
 import icu.ringona.xensynth.hexkeyboard.playback.KeyboardPlaybackTimeline
+import icu.ringona.xensynth.hexkeyboard.playback.PLAYBACK_PREVIEW_SECONDS
 import icu.ringona.xensynth.hexkeyboard.playback.PlaybackKeyVisual
 import icu.ringona.xensynth.hexkeyboard.playback.PlaybackVisualFrame
 import icu.ringona.xensynth.hexkeyboard.playback.visualFrameAt
@@ -102,6 +103,7 @@ fun HexKeyboardCanvas(
     pseudoPressureEnabled: Boolean = true,
     playbackTimeline: KeyboardPlaybackTimeline? = null,
     playbackPositionSeconds: Double = 0.0,
+    playbackPreviewSeconds: Double = PLAYBACK_PREVIEW_SECONDS,
     activePlaybackNoteIndices: Set<Int> = emptySet(),
     touchEpoch: Long = 0L,
 ) {
@@ -170,6 +172,7 @@ fun HexKeyboardCanvas(
         val playbackFrame = playbackTimeline?.visualFrameAt(
             positionSeconds = playbackPositionSeconds,
             activeScoreIndices = activePlaybackNoteIndices,
+            previewSeconds = playbackPreviewSeconds,
         ) ?: PlaybackVisualFrame.Empty
         val renderedSelection = if (playbackMode) {
             forceByCoordinate.keys.toSet()

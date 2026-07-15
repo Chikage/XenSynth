@@ -1,12 +1,9 @@
 package icu.ringona.xensynth
 
-import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.calculatePan
 import androidx.compose.foundation.gestures.calculateZoom
 import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material3.Surface
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.Stable
@@ -23,15 +20,16 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.PointerInputScope
-import androidx.compose.ui.unit.dp
 import icu.ringona.xensynth.hexkeyboard.core.HexKey
 import icu.ringona.xensynth.hexkeyboard.core.HexaKeyboardConfiguration
 import icu.ringona.xensynth.hexkeyboard.core.HexaKeyboardLayoutEngine
 import icu.ringona.xensynth.hexkeyboard.core.TouchSelectionState
 import icu.ringona.xensynth.hexkeyboard.playback.activeScoreIndicesAt
 import icu.ringona.xensynth.hexkeyboard.playback.PLAYBACK_COMPLETION_BURST_SECONDS
+import icu.ringona.xensynth.hexkeyboard.playback.PLAYBACK_PREVIEW_SECONDS
+import icu.ringona.xensynth.hexkeyboard.playback.PLAYBACK_PREVIEW_SECONDS_MAX
+import icu.ringona.xensynth.hexkeyboard.playback.PLAYBACK_PREVIEW_SECONDS_MIN
 import icu.ringona.xensynth.hexkeyboard.playback.snapToKeyboard
-import icu.ringona.xensynth.hexkeyboard.ui.HexaPalette
 import icu.ringona.xensynth.hexkeyboard.ui.HexKeyboardCanvas
 import icu.ringona.xensynth.hexkeyboard.ui.KeyboardDisplayMode
 import icu.ringona.xensynth.hexkeyboard.ui.MIN_KEYBOARD_SCALE
@@ -48,8 +46,14 @@ internal fun hexKeyboardRawPitch(step: Int, edo: Int): Double {
     return HEX_KEYBOARD_REFERENCE_MIDI_PITCH + step * 12.0 / period
 }
 
-internal fun hexKeyboardPlaybackPitch(step: Int, edo: Int, scaleGuide: ScaleGuide): Double? {
+internal fun hexKeyboardPlaybackPitch(
+    step: Int,
+    edo: Int,
+    scaleGuide: ScaleGuide,
+    offsetCents: Double = 0.0
+): Double? {
     return scaleGuide.touchPitchForRaw(edo, hexKeyboardRawPitch(step, edo))
+        ?.minus(offsetCents / 100.0)
 }
 
 @Stable
@@ -62,7 +66,11 @@ internal class HexKeyboardHostState {
         private set
     var pseudoPressureEnabled by mutableStateOf(true)
         private set
+    var previewSeconds by mutableDoubleStateOf(PLAYBACK_PREVIEW_SECONDS)
+        private set
     var edo by mutableIntStateOf(MainActivity.EDO_DEFAULT)
+        private set
+    var pitchOffsetCents by mutableDoubleStateOf(0.0)
         private set
     var scaleGuide by mutableStateOf<ScaleGuide?>(null)
         private set
@@ -87,8 +95,10 @@ internal class HexKeyboardHostState {
         edo: Int,
         stepQ: Int,
         stepR: Int,
+        groupByOctave: Boolean,
         touchSensitivityPercent: Int,
         pseudoPressureEnabled: Boolean,
+        previewSeconds: Double,
         displayModeValue: String,
         scaleGuide: ScaleGuide
     ) {
@@ -98,6 +108,7 @@ internal class HexKeyboardHostState {
             period = edo.takeIf { it > 0 } ?: HEX_KEYBOARD_FREE_TUNING_PERIOD,
             stepQ = stepQ,
             stepR = stepR,
+            groupByOctave = groupByOctave,
             rotationDegrees = FIXED_ROTATION_DEGREES
         ).normalized()
         if (configuration != nextConfiguration) {
@@ -106,6 +117,10 @@ internal class HexKeyboardHostState {
         }
         touchSensitivity = (touchSensitivityPercent / 100f).coerceIn(1f, 1.5f)
         this.pseudoPressureEnabled = pseudoPressureEnabled
+        this.previewSeconds = previewSeconds
+            .takeIf { it.isFinite() }
+            ?.coerceIn(PLAYBACK_PREVIEW_SECONDS_MIN, PLAYBACK_PREVIEW_SECONDS_MAX)
+            ?: PLAYBACK_PREVIEW_SECONDS
         displayMode = displayModeValue.toKeyboardDisplayMode()
         this.edo = edo
         this.scaleGuide = scaleGuide
@@ -122,6 +137,10 @@ internal class HexKeyboardHostState {
     fun updatePlaybackState(playing: Boolean, finished: Boolean) {
         this.playing = playing
         this.finished = finished
+    }
+
+    fun updatePitchOffset(cents: Double) {
+        pitchOffsetCents = cents.takeIf { it.isFinite() } ?: 0.0
     }
 
     fun panBy(delta: Offset) {
@@ -168,13 +187,26 @@ internal fun HexKeyboardHost(
     var touchSelection by remember(layout) {
         mutableStateOf(TouchSelectionState(anchorCoordinate = layout.defaultSelection?.coordinate))
     }
-    val playbackTimeline = remember(state.score, layout, state.edo, state.scaleGuide) {
+    val playbackTimeline = remember(
+        state.score,
+        layout,
+        state.edo,
+        state.scaleGuide,
+        state.pitchOffsetCents
+    ) {
         val guide = state.scaleGuide
         if (guide == null) {
-            state.score?.snapToKeyboard(layout)
+            state.score?.snapToKeyboard(layout) { key ->
+                hexKeyboardRawPitch(key.step, state.edo) - state.pitchOffsetCents / 100.0
+            }
         } else {
             state.score?.snapToKeyboard(layout) { key ->
-                hexKeyboardPlaybackPitch(key.step, state.edo, guide)
+                hexKeyboardPlaybackPitch(
+                    step = key.step,
+                    edo = state.edo,
+                    scaleGuide = guide,
+                    offsetCents = state.pitchOffsetCents
+                )
             }
         }
     }
@@ -207,52 +239,46 @@ internal fun HexKeyboardHost(
         )
     }
 
-    Surface(
+    HexKeyboardCanvas(
+        touchEpoch = state.touchEpoch,
+        layout = layout,
+        keyboardScale = state.keyboardScale,
+        keyboardPan = state.keyboardPan,
+        onKeyboardPanChange = state::updateConstrainedPan,
+        touchSensitivity = state.touchSensitivity,
+        pseudoPressureEnabled = state.pseudoPressureEnabled,
+        displayMode = state.displayMode,
+        selectedCoordinates = if (state.score != null) {
+            emptySet()
+        } else {
+            touchSelection.selectedCoordinates
+        },
+        selectionAnchorCoordinate = touchSelection.anchorCoordinate.takeUnless {
+            state.score != null
+        },
+        playbackTimeline = playbackTimeline,
+        playbackPositionSeconds = visualPlayheadSeconds,
+        playbackPreviewSeconds = state.previewSeconds,
+        activePlaybackNoteIndices = activeScoreIndices,
         modifier = Modifier.fillMaxSize(),
-        color = HexaPalette.BackgroundDark,
-        shape = RoundedCornerShape(8.dp),
-        border = BorderStroke(1.dp, HexaPalette.LineDark)
-    ) {
-        HexKeyboardCanvas(
-            touchEpoch = state.touchEpoch,
-            layout = layout,
-            keyboardScale = state.keyboardScale,
-            keyboardPan = state.keyboardPan,
-            onKeyboardPanChange = state::updateConstrainedPan,
-            touchSensitivity = state.touchSensitivity,
-            pseudoPressureEnabled = state.pseudoPressureEnabled,
-            displayMode = state.displayMode,
-            selectedCoordinates = if (state.score != null) {
-                emptySet()
-            } else {
-                touchSelection.selectedCoordinates
-            },
-            selectionAnchorCoordinate = touchSelection.anchorCoordinate.takeUnless {
-                state.score != null
-            },
-            playbackTimeline = playbackTimeline,
-            playbackPositionSeconds = visualPlayheadSeconds,
-            activePlaybackNoteIndices = activeScoreIndices,
-            modifier = Modifier.fillMaxSize(),
-            onKeyDown = { pointerId, key, velocity, eventTimeMillis ->
-                touchSelection = touchSelection.press(
-                    pointerId = pointerId,
-                    coordinate = key.coordinate,
-                    eventTimeMillis = eventTimeMillis
-                )
-                onKeyDown(pointerId, key, velocity)
-            },
-            onKeyPressure = onKeyPressure,
-            onKeyUp = { pointerId, eventTimeMillis, retainForChord ->
-                touchSelection = touchSelection.release(
-                    pointerId = pointerId,
-                    eventTimeMillis = eventTimeMillis,
-                    retainForChord = retainForChord
-                )
-                onKeyUp(pointerId)
-            }
-        )
-    }
+        onKeyDown = { pointerId, key, velocity, eventTimeMillis ->
+            touchSelection = touchSelection.press(
+                pointerId = pointerId,
+                coordinate = key.coordinate,
+                eventTimeMillis = eventTimeMillis
+            )
+            onKeyDown(pointerId, key, velocity)
+        },
+        onKeyPressure = onKeyPressure,
+        onKeyUp = { pointerId, eventTimeMillis, retainForChord ->
+            touchSelection = touchSelection.release(
+                pointerId = pointerId,
+                eventTimeMillis = eventTimeMillis,
+                retainForChord = retainForChord
+            )
+            onKeyUp(pointerId)
+        }
+    )
 }
 
 internal suspend fun PointerInputScope.detectHexKeyboardViewportGestures(

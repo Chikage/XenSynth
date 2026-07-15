@@ -148,6 +148,28 @@ class KeyboardPlaybackTimelineTest {
         assertEquals(notesInWindow.indices.toList(), previewIndices)
     }
 
+    @Test
+    fun `preview duration is configurable and zero disables upcoming notes`() {
+        val timeline = scoreOf(
+            note(audioPitch = 60.0, start = 0.4, end = 1.0),
+            note(audioPitch = 62.0, start = 0.8, end = 1.2),
+        ).snapToKeyboard(HexaKeyboardLayoutEngine.build())
+
+        val shortPreview = timeline.visualFrameAt(
+            positionSeconds = 0.0,
+            activeScoreIndices = emptySet(),
+            previewSeconds = 0.5,
+        )
+        val disabledPreview = timeline.visualFrameAt(
+            positionSeconds = 0.0,
+            activeScoreIndices = emptySet(),
+            previewSeconds = 0.0,
+        )
+
+        assertEquals(1, shortPreview.keys.values.count { it.upcoming != null })
+        assertTrue(disabledPreview.keys.isEmpty())
+    }
+
     private fun scoreOf(vararg notes: WaterfallNote): ParsedScore = ParsedScore(
         title = "test",
         format = "test",

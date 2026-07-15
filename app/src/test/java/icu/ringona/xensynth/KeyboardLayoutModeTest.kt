@@ -35,4 +35,22 @@ class KeyboardLayoutModeTest {
             0.000_001
         )
     }
+
+    @Test
+    fun increasingOffsetLowersHexKeyboardPlaybackPitch() {
+        val guide = ScaleGuide(markRatios = emptyMap(), scaleMarks = emptyMap())
+
+        assertEquals(
+            59.75,
+            requireNotNull(
+                hexKeyboardPlaybackPitch(
+                    step = 0,
+                    edo = 53,
+                    scaleGuide = guide,
+                    offsetCents = 25.0
+                )
+            ),
+            0.000_001
+        )
+    }
 }

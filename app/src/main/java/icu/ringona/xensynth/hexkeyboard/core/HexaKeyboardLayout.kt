@@ -14,6 +14,7 @@ data class HexaKeyboardConfiguration(
     val period: Int = 53,
     val stepQ: Int = 9,
     val stepR: Int = 4,
+    val groupByOctave: Boolean = false,
     val radius: Int = 24,
     val rotationDegrees: Int = 12,
     val frameAcuteAngleDegrees: Double = 72.0,
@@ -104,19 +105,30 @@ object HexaKeyboardLayoutEngine {
         configuration: HexaKeyboardConfiguration = HexaKeyboardConfiguration.Default,
     ): HexaKeyboardLayout {
         val normalized = configuration.normalized()
-        val slots = buildWindowSlots(normalized)
-        val slotCenterBounds = HexBounds.from(slots.map { it.center })
+        val baseSlots = buildWindowSlots(normalized)
+        val selectionBounds = HexBounds.from(baseSlots.map { it.center })
         val selection = selectCells(
-            slots = slots,
-            centerBounds = slotCenterBounds,
+            slots = baseSlots,
+            centerBounds = selectionBounds,
             configuration = normalized,
         )
+        val slots = applyOctaveGroupingToSlots(
+            slots = baseSlots,
+            configuration = normalized,
+            rotationDegrees = 0,
+        )
+        val cells = applyOctaveGroupingToKeys(
+            keys = selection.cells,
+            configuration = normalized,
+            rotationDegrees = normalized.rotationDegrees,
+        )
+        val slotCenterBounds = HexBounds.from(slots.map { it.center })
         val radius = normalized.radius.toDouble()
         val windowBounds = HexBounds.from(slots.map { it.center }, radius)
 
         return HexaKeyboardLayout(
             configuration = normalized,
-            cells = selection.cells,
+            cells = cells,
             slots = slots,
             stats = selection.stats,
             periodVectors = periodVectors(normalized),
@@ -126,7 +138,7 @@ object HexaKeyboardLayoutEngine {
                 bounds = windowBounds,
                 acuteAngleDegrees = normalized.frameAcuteAngleDegrees,
             ),
-            keyBounds = HexBounds.from(selection.cells.map { it.center }, radius),
+            keyBounds = HexBounds.from(cells.map { it.center }, radius),
         )
     }
 
@@ -302,6 +314,63 @@ object HexaKeyboardLayoutEngine {
         )
     }
 
+    private fun applyOctaveGroupingToSlots(
+        slots: List<HexWindowSlot>,
+        configuration: HexaKeyboardConfiguration,
+        rotationDegrees: Int,
+    ): List<HexWindowSlot> {
+        if (!configuration.groupByOctave) return slots
+        val offset = octaveGroupOffset(configuration, rotationDegrees)
+        if (offset == HexPoint(0.0, 0.0)) return slots
+        return slots.map { slot ->
+            slot.copy(key = slot.key.withOctaveGroupOffset(configuration.period, offset))
+        }
+    }
+
+    private fun applyOctaveGroupingToKeys(
+        keys: List<HexKey>,
+        configuration: HexaKeyboardConfiguration,
+        rotationDegrees: Int,
+    ): List<HexKey> {
+        if (!configuration.groupByOctave) return keys
+        val offset = octaveGroupOffset(configuration, rotationDegrees)
+        if (offset == HexPoint(0.0, 0.0)) return keys
+        return keys
+            .map { it.withOctaveGroupOffset(configuration.period, offset) }
+            .sortedWith(visualCellComparator)
+    }
+
+    private fun octaveGroupOffset(
+        configuration: HexaKeyboardConfiguration,
+        rotationDegrees: Int,
+    ): HexPoint {
+        val direction = HexPoint(
+            x = (configuration.stepQ * 2 - configuration.stepR).toDouble(),
+            y = sqrt(3.0) * configuration.stepR.toDouble(),
+        )
+        val magnitude = hypot(direction.x, direction.y)
+        if (magnitude == 0.0) return HexPoint(0.0, 0.0)
+        val gap = configuration.radius * OCTAVE_GROUP_GAP_RADIUS_RATIO
+        return HexGeometry.rotate(
+            point = HexPoint(
+                x = direction.x / magnitude * gap,
+                y = direction.y / magnitude * gap,
+            ),
+            degrees = rotationDegrees.toDouble(),
+        )
+    }
+
+    private fun HexKey.withOctaveGroupOffset(period: Int, offset: HexPoint): HexKey {
+        val octave = Math.floorDiv(step, period)
+        if (octave == 0) return this
+        return copy(
+            center = HexPoint(
+                x = center.x + offset.x * octave,
+                y = center.y + offset.y * octave,
+            ),
+        )
+    }
+
     private val candidateComparator = Comparator<Candidate> { first, second ->
         when {
             first.score != second.score -> first.score.compareTo(second.score)
@@ -329,6 +398,8 @@ object HexaKeyboardLayoutEngine {
             else -> first.dr.compareTo(second.dr)
         }
     }
+
+    private const val OCTAVE_GROUP_GAP_RADIUS_RATIO = 0.5
 }
 
 private fun positiveModulo(value: Int, modulus: Int): Int {

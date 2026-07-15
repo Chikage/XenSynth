@@ -10,6 +10,8 @@ import kotlin.math.abs
 import kotlin.math.exp
 import kotlin.math.sin
 
+internal const val PLAYBACK_PREVIEW_SECONDS_MIN = 0.0
+internal const val PLAYBACK_PREVIEW_SECONDS_MAX = 3.0
 internal const val PLAYBACK_PREVIEW_SECONDS = 1.8
 internal const val PLAYBACK_COMPLETION_BURST_SECONDS = 0.34
 internal const val PLAYBACK_REPEAT_WINDOW_SECONDS = 0.42
@@ -130,22 +132,29 @@ fun ParsedScore.snapToKeyboard(
 fun KeyboardPlaybackTimeline.visualFrameAt(
     positionSeconds: Double,
     activeScoreIndices: Set<Int>,
+    previewSeconds: Double = PLAYBACK_PREVIEW_SECONDS,
 ): PlaybackVisualFrame {
     if (notes.isEmpty()) return PlaybackVisualFrame.Empty
     if (!positionSeconds.isFinite()) return PlaybackVisualFrame.Empty
     val position = positionSeconds
+    val previewWindowSeconds = previewSeconds
+        .takeIf { it.isFinite() }
+        ?.coerceIn(PLAYBACK_PREVIEW_SECONDS_MIN, PLAYBACK_PREVIEW_SECONDS_MAX)
+        ?: PLAYBACK_PREVIEW_SECONDS
     val builders = mutableMapOf<AxialCoordinate, PlaybackKeyVisualBuilder>()
 
-    val upcomingStart = notes.upperBoundByStart(position)
-    val upcomingEnd = notes.upperBoundByStart(position + PLAYBACK_PREVIEW_SECONDS)
-    for (index in upcomingStart until upcomingEnd) {
-        val note = notes[index]
-        val delta = (note.start - position).coerceAtLeast(0.0)
-        val progress = (1.0 - delta / PLAYBACK_PREVIEW_SECONDS).toFloat().coerceIn(0f, 1f)
-        val builder = builders.getOrPut(note.coordinate, ::PlaybackKeyVisualBuilder)
-        val current = builder.upcoming
-        if (current == null || note.start < current.note.start) {
-            builder.upcoming = UpcomingPlaybackNote(note, progress)
+    if (previewWindowSeconds > 0.0) {
+        val upcomingStart = notes.upperBoundByStart(position)
+        val upcomingEnd = notes.upperBoundByStart(position + previewWindowSeconds)
+        for (index in upcomingStart until upcomingEnd) {
+            val note = notes[index]
+            val delta = (note.start - position).coerceAtLeast(0.0)
+            val progress = (1.0 - delta / previewWindowSeconds).toFloat().coerceIn(0f, 1f)
+            val builder = builders.getOrPut(note.coordinate, ::PlaybackKeyVisualBuilder)
+            val current = builder.upcoming
+            if (current == null || note.start < current.note.start) {
+                builder.upcoming = UpcomingPlaybackNote(note, progress)
+            }
         }
     }
 

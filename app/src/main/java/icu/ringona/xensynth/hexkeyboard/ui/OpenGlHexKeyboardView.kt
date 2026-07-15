@@ -67,9 +67,10 @@ internal class OpenGlHexKeyboardView @JvmOverloads constructor(
     }
 
     init {
-        holder.setFormat(PixelFormat.OPAQUE)
+        setZOrderOnTop(true)
+        holder.setFormat(PixelFormat.TRANSLUCENT)
         setEGLContextClientVersion(OPEN_GL_ES_MAJOR_VERSION)
-        setEGLConfigChooser(8, 8, 8, 0, 0, 0)
+        setEGLConfigChooser(8, 8, 8, 8, 0, 0)
         preserveEGLContextOnPause = true
         setRenderer(keyboardRenderer)
         renderMode = RENDERMODE_WHEN_DIRTY
@@ -165,7 +166,7 @@ private class OpenGlHexKeyboardRenderer(
         glThread = Thread.currentThread()
         glReady = false
         clearCpuGeometry()
-        GLES30.glClearColor(BACKGROUND.red, BACKGROUND.green, BACKGROUND.blue, 1f)
+        GLES30.glClearColor(0f, 0f, 0f, 0f)
         if (released.get()) {
             GLES30.glClear(GLES30.GL_COLOR_BUFFER_BIT)
             return
@@ -193,7 +194,7 @@ private class OpenGlHexKeyboardRenderer(
 
     override fun onDrawFrame(gl: GL10?) {
         glThread = Thread.currentThread()
-        GLES30.glClearColor(BACKGROUND.red, BACKGROUND.green, BACKGROUND.blue, 1f)
+        GLES30.glClearColor(0f, 0f, 0f, 0f)
         GLES30.glClear(GLES30.GL_COLOR_BUFFER_BIT)
         if (released.get()) {
             if (glReady) releaseGlResources()
@@ -1270,7 +1271,6 @@ private class OpenGlHexKeyboardRenderer(
         private val OPEN_GL_ES_VERSION = Regex("OpenGL ES\\s+(\\d+)(?:\\.(\\d+))?")
         private val PLAYBACK_TRACK_HUES =
             floatArrayOf(190f, 28f, 132f, 48f, 264f, 158f, 330f, 88f)
-        private val BACKGROUND = HexaPalette.BackgroundDark.toColor4()
         private val LINE_DARK = HexaPalette.LineDark.toColor4()
         private val PRIMARY_DARK = HexaPalette.PrimaryDark.toColor4()
         private val ACCENT = HexaPalette.Accent.toColor4()

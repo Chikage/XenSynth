@@ -4,6 +4,7 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertSame
+import org.junit.Assert.assertTrue
 import org.junit.Test
 import kotlin.math.abs
 import kotlin.math.atan2
@@ -21,6 +22,7 @@ class HexaKeyboardLayoutTest {
         assertEquals(53, configuration.period)
         assertEquals(9, configuration.stepQ)
         assertEquals(4, configuration.stepR)
+        assertEquals(false, configuration.groupByOctave)
         assertEquals(24, configuration.radius)
         assertEquals(12, configuration.rotationDegrees)
         assertEquals(72.0, configuration.frameAcuteAngleDegrees, 0.0)
@@ -137,6 +139,45 @@ class HexaKeyboardLayoutTest {
     }
 
     @Test
+    fun octaveGroupingPreservesIntraOctaveDistancesAndAddsInterOctaveGap() {
+        val configuration = HexaKeyboardConfiguration(
+            columns = 35,
+            rows = 32,
+            period = 12,
+            stepQ = 1,
+            stepR = 0,
+            rotationDegrees = 0,
+        )
+        val ungrouped = HexaKeyboardLayoutEngine.build(configuration)
+        val grouped = HexaKeyboardLayoutEngine.build(configuration.copy(groupByOctave = true))
+
+        assertEquals(
+            ungrouped.cells.map(HexKey::coordinate).toSet(),
+            grouped.cells.map(HexKey::coordinate).toSet(),
+        )
+
+        val ungroupedWithinOctave = centerDistance(
+            requireNotNull(ungrouped.cellAt(AxialCoordinate(q = 12, r = 0))),
+            requireNotNull(ungrouped.cellAt(AxialCoordinate(q = 13, r = 0))),
+        )
+        val groupedWithinOctave = centerDistance(
+            requireNotNull(grouped.cellAt(AxialCoordinate(q = 12, r = 0))),
+            requireNotNull(grouped.cellAt(AxialCoordinate(q = 13, r = 0))),
+        )
+        assertEquals(ungroupedWithinOctave, groupedWithinOctave, 1e-9)
+
+        val ungroupedAcrossOctaves = centerDistance(
+            requireNotNull(ungrouped.cellAt(AxialCoordinate(q = 11, r = 0))),
+            requireNotNull(ungrouped.cellAt(AxialCoordinate(q = 12, r = 0))),
+        )
+        val groupedAcrossOctaves = centerDistance(
+            requireNotNull(grouped.cellAt(AxialCoordinate(q = 11, r = 0))),
+            requireNotNull(grouped.cellAt(AxialCoordinate(q = 12, r = 0))),
+        )
+        assertTrue(groupedAcrossOctaves > ungroupedAcrossOctaves)
+    }
+
+    @Test
     fun maximumBoundedSelectionMatchesFormerFullSortReference() {
         val configuration = HexaKeyboardConfiguration(
             columns = 64,
@@ -204,6 +245,11 @@ class HexaKeyboardLayoutTest {
         assertEquals(x, point.x, 1e-9)
         assertEquals(y, point.y, 1e-9)
     }
+
+    private fun centerDistance(first: HexKey, second: HexKey): Double = hypot(
+        first.center.x - second.center.x,
+        first.center.y - second.center.y,
+    )
 
     private fun interiorAngle(
         vertex: HexPoint,
