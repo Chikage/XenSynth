@@ -272,7 +272,6 @@ class MainActivity : ComponentActivity(), RenderFramePacer.InteractionListener {
     private var hexTouchSensitivityPercent = HEX_TOUCH_SENSITIVITY_DEFAULT
     private var hexPreviewSeconds = HEX_PREVIEW_SECONDS_DEFAULT
     private var hexPseudoPressureEnabled = HEX_PSEUDO_PRESSURE_DEFAULT
-    private var hexDisplayMode = HEX_DISPLAY_MODE_DEFAULT
     private val nativePlaying: Boolean
         get() = nativePlayback.playing
     private var nativeLoading: Boolean
@@ -927,7 +926,6 @@ class MainActivity : ComponentActivity(), RenderFramePacer.InteractionListener {
                         onHexTouchSensitivityChanged = ::onHexTouchSensitivityChanged,
                         onHexPreviewSecondsChanged = ::onHexPreviewSecondsChanged,
                         onHexPseudoPressureChanged = ::onHexPseudoPressureChanged,
-                        onHexDisplayModeChanged = ::onHexDisplayModeChanged,
                         onHexKeyboardPan = hexKeyboardState::panBy,
                         onHexKeyboardZoom = hexKeyboardState::zoomBy,
                         onAudioLatencyChanged = ::onAudioLatencyChanged,
@@ -1417,15 +1415,6 @@ class MainActivity : ComponentActivity(), RenderFramePacer.InteractionListener {
         persistKeyboardSettings()
     }
 
-    private fun onHexDisplayModeChanged(mode: String) {
-        val next = mode.takeIf { it in HEX_DISPLAY_MODES } ?: return
-        if (hexDisplayMode == next) return
-        hexDisplayMode = next
-        syncKeyboardSettingsUiState()
-        syncHexKeyboardRuntimeSettings()
-        persistKeyboardSettings()
-    }
-
     private fun onAudioLatencyChanged(value: Float) {
         val next = roundedAudioLatencyMs(value)
         if (audioLatencyMs == next) {
@@ -1487,7 +1476,6 @@ class MainActivity : ComponentActivity(), RenderFramePacer.InteractionListener {
         hexTouchSensitivityPercent = HEX_TOUCH_SENSITIVITY_DEFAULT
         hexPreviewSeconds = HEX_PREVIEW_SECONDS_DEFAULT
         hexPseudoPressureEnabled = HEX_PSEUDO_PRESSURE_DEFAULT
-        hexDisplayMode = HEX_DISPLAY_MODE_DEFAULT
         syncKeyboardSettingsUiState()
         releaseHexKeyboardNotes(immediate = true)
         hexKeyboardState.resetViewport()
@@ -1897,9 +1885,11 @@ class MainActivity : ComponentActivity(), RenderFramePacer.InteractionListener {
             PREF_HEX_PSEUDO_PRESSURE,
             HEX_PSEUDO_PRESSURE_DEFAULT
         )
-        hexDisplayMode = prefs.getString(PREF_HEX_DISPLAY_MODE, HEX_DISPLAY_MODE_DEFAULT)
-            ?.takeIf { it in HEX_DISPLAY_MODES }
-            ?: HEX_DISPLAY_MODE_DEFAULT
+        if (prefs.getString(PREF_HEX_DISPLAY_MODE, null) != HEX_DISPLAY_MODE_DEFAULT) {
+            prefs.edit()
+                .putString(PREF_HEX_DISPLAY_MODE, HEX_DISPLAY_MODE_DEFAULT)
+                .apply()
+        }
         reverbValue = prefs.getInt(PREF_REVERB, REVERB_DEFAULT)
             .coerceIn(REVERB_MIN, REVERB_MAX)
         audioLatencyMs = roundedAudioLatencyMs(
@@ -1935,7 +1925,6 @@ class MainActivity : ComponentActivity(), RenderFramePacer.InteractionListener {
         shellUiState.hexTouchSensitivityPercent = hexTouchSensitivityPercent
         shellUiState.hexPreviewSeconds = hexPreviewSeconds
         shellUiState.hexPseudoPressureEnabled = hexPseudoPressureEnabled
-        shellUiState.hexDisplayMode = hexDisplayMode
     }
 
     private fun persistKeyboardSettings() {
@@ -1949,7 +1938,7 @@ class MainActivity : ComponentActivity(), RenderFramePacer.InteractionListener {
             .putInt(PREF_HEX_TOUCH_SENSITIVITY, hexTouchSensitivityPercent)
             .putFloat(PREF_HEX_PREVIEW_SECONDS, hexPreviewSeconds.toFloat())
             .putBoolean(PREF_HEX_PSEUDO_PRESSURE, hexPseudoPressureEnabled)
-            .putString(PREF_HEX_DISPLAY_MODE, hexDisplayMode)
+            .putString(PREF_HEX_DISPLAY_MODE, HEX_DISPLAY_MODE_DEFAULT)
             .apply()
     }
 
@@ -1964,7 +1953,6 @@ class MainActivity : ComponentActivity(), RenderFramePacer.InteractionListener {
             touchSensitivityPercent = hexTouchSensitivityPercent,
             pseudoPressureEnabled = hexPseudoPressureEnabled,
             previewSeconds = hexPreviewSeconds,
-            displayModeValue = hexDisplayMode,
             scaleGuide = currentScaleGuide
         )
     }
@@ -2518,7 +2506,6 @@ class MainActivity : ComponentActivity(), RenderFramePacer.InteractionListener {
         const val HEX_PREVIEW_SECONDS_STEPS = 29
         const val HEX_PSEUDO_PRESSURE_DEFAULT = true
         const val HEX_DISPLAY_MODE_DEFAULT = "pitch"
-        val HEX_DISPLAY_MODES = setOf("coordinates", "pitch", "period")
         const val MIDI_PREVIEW_POINTER_BASE = 20_000
         const val MIDI_PREVIEW_POINTER_MAX = 120_000
         const val TAG = "XenSynth"
@@ -2635,7 +2622,6 @@ private fun XenToolbar(
     onHexTouchSensitivityChanged: (Float) -> Unit,
     onHexPreviewSecondsChanged: (Float) -> Unit,
     onHexPseudoPressureChanged: (Boolean) -> Unit,
-    onHexDisplayModeChanged: (String) -> Unit,
     onHexKeyboardPan: (Offset) -> Unit,
     onHexKeyboardZoom: (Float) -> Unit,
     onAudioLatencyChanged: (Float) -> Unit,
@@ -2807,7 +2793,6 @@ private fun XenToolbar(
                 onHexTouchSensitivityChanged = onHexTouchSensitivityChanged,
                 onHexPreviewSecondsChanged = onHexPreviewSecondsChanged,
                 onHexPseudoPressureChanged = onHexPseudoPressureChanged,
-                onHexDisplayModeChanged = onHexDisplayModeChanged,
                 onAudioLatencyChanged = onAudioLatencyChanged,
                 onReverbChanged = onReverbChanged,
                 onResetSettingsToDefaults = onResetSettingsToDefaults,
@@ -3391,7 +3376,6 @@ private fun ToolbarSettingsMenu(
     onHexTouchSensitivityChanged: (Float) -> Unit,
     onHexPreviewSecondsChanged: (Float) -> Unit,
     onHexPseudoPressureChanged: (Boolean) -> Unit,
-    onHexDisplayModeChanged: (String) -> Unit,
     onAudioLatencyChanged: (Float) -> Unit,
     onReverbChanged: (Float) -> Unit,
     onResetSettingsToDefaults: () -> Unit,
@@ -3684,16 +3668,6 @@ private fun ToolbarSettingsMenu(
                         programSettings()
                     }
                     Column(modifier = Modifier.weight(1f)) {
-                        SettingsChoiceRow(
-                            label = "VIEW",
-                            selectedValue = state.hexDisplayMode,
-                            choices = listOf(
-                                "coordinates" to "GRID",
-                                "pitch" to "PITCH",
-                                "period" to "PERIOD"
-                            ),
-                            onSelected = onHexDisplayModeChanged
-                        )
                         CompactHexSliderSetting(
                             label = "ROWS",
                             value = hexRowsSliderValue.roundToInt().toString(),

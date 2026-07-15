@@ -60,8 +60,6 @@ internal fun hexKeyboardPlaybackPitch(
 internal class HexKeyboardHostState {
     var configuration by mutableStateOf(HexaKeyboardConfiguration.Default)
         private set
-    var displayMode by mutableStateOf(KeyboardDisplayMode.Pitch)
-        private set
     var touchSensitivity by mutableFloatStateOf(1.2f)
         private set
     var pseudoPressureEnabled by mutableStateOf(true)
@@ -99,7 +97,6 @@ internal class HexKeyboardHostState {
         touchSensitivityPercent: Int,
         pseudoPressureEnabled: Boolean,
         previewSeconds: Double,
-        displayModeValue: String,
         scaleGuide: ScaleGuide
     ) {
         val nextConfiguration = HexaKeyboardConfiguration(
@@ -121,7 +118,6 @@ internal class HexKeyboardHostState {
             .takeIf { it.isFinite() }
             ?.coerceIn(PLAYBACK_PREVIEW_SECONDS_MIN, PLAYBACK_PREVIEW_SECONDS_MAX)
             ?: PLAYBACK_PREVIEW_SECONDS
-        displayMode = displayModeValue.toKeyboardDisplayMode()
         this.edo = edo
         this.scaleGuide = scaleGuide
     }
@@ -247,7 +243,7 @@ internal fun HexKeyboardHost(
         onKeyboardPanChange = state::updateConstrainedPan,
         touchSensitivity = state.touchSensitivity,
         pseudoPressureEnabled = state.pseudoPressureEnabled,
-        displayMode = state.displayMode,
+        displayMode = KeyboardDisplayMode.Pitch,
         selectedCoordinates = if (state.score != null) {
             emptySet()
         } else {
@@ -312,10 +308,4 @@ internal suspend fun PointerInputScope.detectHexKeyboardViewportGestures(
             if (event.changes.none { it.pressed }) break
         }
     }
-}
-
-private fun String.toKeyboardDisplayMode(): KeyboardDisplayMode = when (this) {
-    "coordinates" -> KeyboardDisplayMode.Coordinates
-    "period" -> KeyboardDisplayMode.Period
-    else -> KeyboardDisplayMode.Pitch
 }

@@ -192,7 +192,6 @@ internal class ShellUiState {
     var hexTouchSensitivityPercent by mutableStateOf(MainActivity.HEX_TOUCH_SENSITIVITY_DEFAULT)
     var hexPreviewSeconds by mutableStateOf(MainActivity.HEX_PREVIEW_SECONDS_DEFAULT)
     var hexPseudoPressureEnabled by mutableStateOf(MainActivity.HEX_PSEUDO_PRESSURE_DEFAULT)
-    var hexDisplayMode by mutableStateOf(MainActivity.HEX_DISPLAY_MODE_DEFAULT)
     var volumeGain by mutableStateOf(MainActivity.VOLUME_GAIN_DEFAULT)
     var volume by mutableStateOf(MainActivity.VOLUME_GAIN_DEFAULT.formatVolumePercent())
     var reverb by mutableStateOf(MainActivity.REVERB_DEFAULT)
