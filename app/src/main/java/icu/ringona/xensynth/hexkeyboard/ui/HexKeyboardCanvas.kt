@@ -28,6 +28,8 @@ import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.PointerType
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
@@ -66,7 +68,7 @@ private data class ModelBounds(
     val height: Double get() = maxY - minY
 }
 
-private data class CanvasTransform(
+internal data class KeyboardViewportTransform(
     val scale: Float,
     val offsetX: Float,
     val offsetY: Float,
@@ -103,6 +105,10 @@ fun HexKeyboardCanvas(
     activePlaybackNoteIndices: Set<Int> = emptySet(),
     touchEpoch: Long = 0L,
 ) {
+    val context = LocalContext.current
+    val openGlEnabled = remember(context) {
+        androidx.compose.runtime.mutableStateOf(OpenGlHexKeyboardView.isSupported(context))
+    }
     val latestOnKeyDown = rememberUpdatedState(onKeyDown)
     val latestOnKeyPressure = rememberUpdatedState(onKeyPressure)
     val latestOnKeyUp = rememberUpdatedState(onKeyUp)
@@ -153,6 +159,49 @@ fun HexKeyboardCanvas(
             if (keyboardPan != transform.viewportPan) {
                 latestOnKeyboardPanChange.value(transform.viewportPan)
             }
+        }
+
+        val forceByCoordinate = mutableMapOf<AxialCoordinate, Float>()
+        activeCoordinates.forEach { (pointerId, coordinate) ->
+            val force = activeForces[pointerId] ?: TouchForce.Fixed.normalized
+            forceByCoordinate[coordinate] = max(forceByCoordinate[coordinate] ?: 0f, force)
+        }
+        val playbackMode = playbackTimeline != null
+        val playbackFrame = playbackTimeline?.visualFrameAt(
+            positionSeconds = playbackPositionSeconds,
+            activeScoreIndices = activePlaybackNoteIndices,
+        ) ?: PlaybackVisualFrame.Empty
+        val renderedSelection = if (playbackMode) {
+            forceByCoordinate.keys.toSet()
+        } else {
+            selectedCoordinates + forceByCoordinate.keys
+        }
+        val renderedAnchor = selectionAnchorCoordinate.takeUnless { playbackMode }
+
+        if (openGlEnabled.value) {
+            AndroidView(
+                factory = { viewContext ->
+                    OpenGlHexKeyboardView(viewContext).apply {
+                        onRendererFailure = { openGlEnabled.value = false }
+                    }
+                },
+                modifier = Modifier.fillMaxSize(),
+                update = { view ->
+                    view.setScene(
+                        OpenGlHexKeyboardScene(
+                            layout = layout,
+                            transform = transform,
+                            displayMode = displayMode,
+                            selectedCoordinates = renderedSelection,
+                            selectionAnchorCoordinate = renderedAnchor,
+                            activeForces = forceByCoordinate,
+                            playbackMode = playbackMode,
+                            playbackFrame = playbackFrame,
+                            playbackPositionSeconds = playbackPositionSeconds,
+                        ),
+                    )
+                },
+            )
         }
 
         Canvas(
@@ -289,31 +338,19 @@ fun HexKeyboardCanvas(
                     }
                 },
         ) {
-            val forceByCoordinate = mutableMapOf<AxialCoordinate, Float>()
-            activeCoordinates.forEach { (pointerId, coordinate) ->
-                val force = activeForces[pointerId] ?: TouchForce.Fixed.normalized
-                forceByCoordinate[coordinate] = max(forceByCoordinate[coordinate] ?: 0f, force)
+            if (!openGlEnabled.value) {
+                drawKeyboard(
+                    layout = layout,
+                    transform = transform,
+                    displayMode = displayMode,
+                    selectedCoordinates = renderedSelection,
+                    selectionAnchorCoordinate = renderedAnchor,
+                    activeForces = forceByCoordinate,
+                    playbackMode = playbackMode,
+                    playbackFrame = playbackFrame,
+                    playbackPositionSeconds = playbackPositionSeconds,
+                )
             }
-            val playbackMode = playbackTimeline != null
-            val playbackFrame = playbackTimeline?.visualFrameAt(
-                positionSeconds = playbackPositionSeconds,
-                activeScoreIndices = activePlaybackNoteIndices,
-            ) ?: PlaybackVisualFrame.Empty
-            drawKeyboard(
-                layout = layout,
-                transform = transform,
-                displayMode = displayMode,
-                selectedCoordinates = if (playbackMode) {
-                    forceByCoordinate.keys
-                } else {
-                    selectedCoordinates + forceByCoordinate.keys
-                },
-                selectionAnchorCoordinate = selectionAnchorCoordinate.takeUnless { playbackMode },
-                activeForces = forceByCoordinate,
-                playbackMode = playbackMode,
-                playbackFrame = playbackFrame,
-                playbackPositionSeconds = playbackPositionSeconds,
-            )
         }
     }
 }
@@ -334,7 +371,7 @@ private fun canvasTransform(
     scaleMultiplier: Float,
     requestedPan: Offset,
     edgeMargin: Float,
-): CanvasTransform {
+): KeyboardViewportTransform {
     val fittedScale = min(
         max(1f, size.width) / max(1.0, bounds.width).toFloat(),
         max(1f, size.height) / max(1.0, bounds.height).toFloat(),
@@ -348,7 +385,7 @@ private fun canvasTransform(
         viewportSize = size,
         edgeMargin = edgeMargin,
     )
-    return CanvasTransform(
+    return KeyboardViewportTransform(
         scale = scale,
         offsetX = (size.width - contentWidth) / 2f - bounds.minX.toFloat() * scale + viewportPan.x,
         offsetY = (size.height - contentHeight) / 2f - bounds.minY.toFloat() * scale + viewportPan.y,
@@ -358,7 +395,7 @@ private fun canvasTransform(
 
 private fun DrawScope.drawKeyboard(
     layout: HexaKeyboardLayout,
-    transform: CanvasTransform,
+    transform: KeyboardViewportTransform,
     displayMode: KeyboardDisplayMode,
     selectedCoordinates: Set<AxialCoordinate>,
     selectionAnchorCoordinate: AxialCoordinate?,
@@ -546,7 +583,7 @@ private fun DrawScope.drawPlaybackFill(
 
 private fun DrawScope.drawPlaybackEffects(
     layout: HexaKeyboardLayout,
-    transform: CanvasTransform,
+    transform: KeyboardViewportTransform,
     frame: PlaybackVisualFrame,
     positionSeconds: Double,
     radius: Float,
@@ -735,7 +772,7 @@ private fun deterministicUnit(seed: Int): Float {
 
 private fun DrawScope.drawSelectionOutlines(
     layout: HexaKeyboardLayout,
-    transform: CanvasTransform,
+    transform: KeyboardViewportTransform,
     selectedCoordinates: Set<AxialCoordinate>,
     activeForces: Map<AxialCoordinate, Float>,
     radius: Float,
@@ -765,7 +802,7 @@ private fun DrawScope.drawSelectionOutlines(
     }
 }
 
-private fun DrawScope.drawOrigin(transform: CanvasTransform) {
+private fun DrawScope.drawOrigin(transform: KeyboardViewportTransform) {
     val origin = transform.point(HexPoint(0.0, 0.0))
     val arm = 8f
     drawLine(HexaPalette.Accent.copy(alpha = 0.72f), origin - Offset(arm, 0f), origin + Offset(arm, 0f), 1.4f)
@@ -776,7 +813,7 @@ private fun DrawScope.drawOrigin(transform: CanvasTransform) {
 private fun DrawScope.drawPeriodVectors(
     layout: HexaKeyboardLayout,
     selectedCoordinate: AxialCoordinate?,
-    transform: CanvasTransform,
+    transform: KeyboardViewportTransform,
 ) {
     val selected = selectedCoordinate?.let(layout::cellAt) ?: return
     val start = transform.point(selected.center)
@@ -903,4 +940,3 @@ private const val MAX_PLAYBACK_TRACK_LAYERS = 8
 private const val MAX_ACTIVE_PARTICLE_NOTES = 3
 private const val ACTIVE_PARTICLE_SALT = 0x1A2B3C4D
 private const val COMPLETED_PARTICLE_SALT = 0x4D3C2B1A
-

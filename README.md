@@ -11,7 +11,7 @@ MIDX / MIDI 2.0 waterfall files.
 - Orientation: sensor landscape
 - File access: Android Storage Access Framework, plus `ACTION_VIEW` handling for MIDI-like files
 - MIDI-related manifest capability: optional `android.software.midi` and USB host feature declarations
-- Waterfall engine: OpenGL ES 3.0 renderer with an automatic Canvas fallback
+- Waterfall and hex-keyboard engines: OpenGL ES 3.0 renderers with automatic Canvas fallbacks
 - Supported score inputs: `.mid`, `.midi`, `.midx`, `.midix`, `.midi2`, `.mscz`, `.mscx`
 - MuseScore conversion helper: `MsczToMidx` can emit `.midx` with microtonal offsets or plain `.mid/.midi`
 - Sound mode: native Oboe / FluidSynth playback with the bundled SoundFont
@@ -36,6 +36,14 @@ batched GLES backend. The existing Android overlay continues to draw the glass
 ruler, labels, impacts, and particles. Devices without ES 3.0 keep using the
 previous hardware-accelerated Canvas renderer; GLES support is declared as an
 optional manifest feature, so it does not filter those devices at install time.
+
+## Hex Keyboard Rendering
+
+The hexagonal keyboard uses a dirty-rendered GLES 3.0 surface for key fills,
+outlines, labels, period vectors, touch feedback, and score playback effects.
+Compose continues to own multi-touch input and publishes immutable visual
+snapshots to the GL render thread. Devices without ES 3.0, or devices whose GL
+renderer fails at runtime, automatically retain the Canvas backend.
 
 ## Build
 
