@@ -174,6 +174,7 @@ class MainActivity : ComponentActivity(), RenderFramePacer.InteractionListener {
     private var lastHighRefreshUiStatsNanos = 0L
     private var lastHighRefreshUiPulseFrameNanos = 0L
     private var highRefreshUiStatsFrameCount = 0
+    private var startupUnthrottledUntilNanos = 0L
     private val highRefreshRateHandler = Handler(Looper.getMainLooper())
     private var displayDiagnosticsRegistered = false
     private var lastDisplayModeDiagnosticKey: String? = null
@@ -366,6 +367,9 @@ class MainActivity : ComponentActivity(), RenderFramePacer.InteractionListener {
 
     override fun onResume() {
         super.onResume()
+        if (startupUnthrottledUntilNanos == 0L) {
+            startupUnthrottledUntilNanos = System.nanoTime() + STARTUP_UNTHROTTLED_NANOS
+        }
         registerDisplayModeDiagnostics()
         logDisplayModeDiagnostic("onResume", force = true)
         setKeepScreenAwake(true)
@@ -548,9 +552,14 @@ class MainActivity : ComponentActivity(), RenderFramePacer.InteractionListener {
 
     private fun highRefreshDemandActive(): Boolean {
         return FORCE_WINDOW_REFRESH_ACTIVE ||
+            startupUnthrottledActive() ||
             nativePlaying ||
             waterfallGestureActive ||
             (::waterfallView.isInitialized && waterfallView.hasHighRefreshDemand())
+    }
+
+    private fun startupUnthrottledActive(nowNanos: Long = System.nanoTime()): Boolean {
+        return startupUnthrottledUntilNanos > 0L && nowNanos < startupUnthrottledUntilNanos
     }
 
     private fun highRefreshDemandSummary(): String {
@@ -560,6 +569,7 @@ class MainActivity : ComponentActivity(), RenderFramePacer.InteractionListener {
             false
         }
         return "forced=$FORCE_WINDOW_REFRESH_ACTIVE " +
+            "startup=${startupUnthrottledActive()} " +
             "playing=$nativePlaying " +
             "gesture=$waterfallGestureActive " +
             "waterfall=$waterfallDemand"
@@ -679,6 +689,9 @@ class MainActivity : ComponentActivity(), RenderFramePacer.InteractionListener {
 
     private fun pulseHighRefreshUiFrame(frameTimeNanos: Long) {
         logHighRefreshUiPulseStats(frameTimeNanos)
+        if (startupUnthrottledActive(frameTimeNanos)) {
+            window.decorView.postInvalidateOnAnimation()
+        }
         if (frameTimeNanos - lastHighRefreshUiRequestNanos >= HIGH_REFRESH_UI_REQUEST_NANOS) {
             lastHighRefreshUiRequestNanos = frameTimeNanos
             refreshHighRefreshRateRequest(force = true)
@@ -2408,6 +2421,7 @@ class MainActivity : ComponentActivity(), RenderFramePacer.InteractionListener {
         const val SETTINGS_RESET_SPIN_DEGREES = 1080f
         const val HIGH_REFRESH_KEEPALIVE_MS = 1_000L
         const val FORCE_WINDOW_REFRESH_ACTIVE = false
+        const val STARTUP_UNTHROTTLED_NANOS = 3_000_000_000L
         const val HIGH_REFRESH_UI_REQUEST_NANOS = 250_000_000L
         const val UI_PULSE_LOG_FRAME_INTERVAL = 120
         const val EDO_STATUS_PROTECTION_MS = 700L

@@ -101,7 +101,6 @@ internal class LegacyFrostedGlassBlur(
         magnification: Float
     ): Boolean {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S ||
-            Build.VERSION.SDK_INT < Build.VERSION_CODES.O ||
             area.width() <= 1f ||
             area.height() <= 1f
         ) {
@@ -157,8 +156,7 @@ internal class LegacyFrostedGlassBlur(
         radius: Float
     ): Boolean {
         val source = sourceBitmap ?: return false
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O ||
-            Build.VERSION.SDK_INT >= Build.VERSION_CODES.S ||
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S ||
             source.isRecycled ||
             area.width() <= 1f ||
             area.height() <= 1f
@@ -198,8 +196,7 @@ internal class LegacyFrostedGlassBlur(
         refreshContent: Boolean
     ): Boolean {
         val source = sourceBitmap ?: return false
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O ||
-            Build.VERSION.SDK_INT >= Build.VERSION_CODES.S ||
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S ||
             source.isRecycled ||
             area.width() <= 1f ||
             area.height() <= 1f
@@ -993,7 +990,7 @@ internal class FrostedRulerOverlayView @JvmOverloads constructor(
     }
 
     private fun requestSurfaceSnapshot(source: SurfaceView, area: RectF) {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O || captureInFlight) {
+        if (captureInFlight) {
             return
         }
         if (source.width <= 0 || source.height <= 0) {

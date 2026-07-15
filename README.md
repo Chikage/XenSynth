@@ -67,6 +67,8 @@ audio milestone:
 - `SoundEngine.cpp` native Oboe / FluidSynth rendering
 - SF2 loading via `loadSf2(path)`
 - pitch calibration / tuning behavior through FluidSynth key tuning
+- on-demand FluidSynth pooling with up to eight instances, providing roughly
+  1,920 isolated per-note tuning channels before best-effort channel sharing
 
 The MIDX/MIDI2 parser, renderer, transport, and low-latency audio backend are
 now integrated as the primary runtime.

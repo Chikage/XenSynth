@@ -109,23 +109,34 @@ class KeyboardPlaybackTimelineTest {
     }
 
     @Test
-    fun `preview keeps only the nearest sixteen note markers`() {
-        val notes = List(MAX_PLAYBACK_PREVIEW_NOTES + 8) { index ->
+    fun `preview includes every key in the time window`() {
+        val notesInWindow = List(24) { index ->
             KeyboardPlaybackNote(
                 scoreIndex = index,
                 coordinate = AxialCoordinate(q = index, r = 0),
-                start = 0.1 + index * 0.01,
-                end = 1.0,
+                start = 0.1 + index * 0.05,
+                end = 2.0,
                 audioPitch = 60.0 + index,
                 velocity = 100,
                 track = 0,
                 repeatedHit = false,
             )
         }
+        val outsideWindow = KeyboardPlaybackNote(
+            scoreIndex = notesInWindow.size,
+            coordinate = AxialCoordinate(q = notesInWindow.size, r = 0),
+            start = PLAYBACK_PREVIEW_SECONDS + 0.01,
+            end = 2.0,
+            audioPitch = 60.0 + notesInWindow.size,
+            velocity = 100,
+            track = 0,
+            repeatedHit = false,
+        )
+        val notes = notesInWindow + outsideWindow
         val timeline = KeyboardPlaybackTimeline(
             notes = notes,
             notesByEnd = notes.sortedBy { it.end },
-            duration = 1.0,
+            duration = 2.0,
         )
 
         val previewIndices = timeline.visualFrameAt(0.0, emptySet())
@@ -134,8 +145,7 @@ class KeyboardPlaybackTimelineTest {
             .mapNotNull { it.upcoming?.note?.scoreIndex }
             .sorted()
 
-        assertEquals(MAX_PLAYBACK_PREVIEW_NOTES, previewIndices.size)
-        assertEquals((0 until MAX_PLAYBACK_PREVIEW_NOTES).toList(), previewIndices)
+        assertEquals(notesInWindow.indices.toList(), previewIndices)
     }
 
     private fun scoreOf(vararg notes: WaterfallNote): ParsedScore = ParsedScore(

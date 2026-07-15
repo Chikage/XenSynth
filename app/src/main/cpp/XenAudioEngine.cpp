@@ -11,6 +11,7 @@
 #include <limits>
 #include <memory>
 #include <mutex>
+#include <string>
 #include <vector>
 
 #include <android/log.h>
@@ -29,6 +30,8 @@ constexpr const char *kBuiltinSoundFontUri = "memory://xensynth/builtin.sf2";
 constexpr int32_t kChannelCount = 2;
 constexpr int32_t kSourceMidiChannelCount = 16;
 constexpr int32_t kFluidMidiChannelCount = 256;
+constexpr int32_t kMaxFluidSynthInstanceCount = 8;
+constexpr int32_t kMixScratchFrameCount = 1024;
 constexpr int32_t kSampleRate = 44100;
 constexpr int32_t kBufferSizeInBursts = 3;
 constexpr int32_t kPitchClassCount = 12;
@@ -98,13 +101,6 @@ enum class Sf2ReleaseProfile : int32_t {
     Percussive = 4
 };
 
-struct FluidHandle {
-    fluid_settings_t *settings = nullptr;
-    fluid_synth_t *synth = nullptr;
-    int soundfontId = 0;
-    std::atomic<bool> loading{false};
-};
-
 struct FluidProgramState {
     int32_t bank = -1;
     int32_t program = -1;
@@ -116,8 +112,21 @@ struct FluidTuningState {
     bool active = false;
 };
 
+struct FluidHandle {
+    fluid_settings_t *settings = nullptr;
+    fluid_synth_t *synth = nullptr;
+    int soundfontId = 0;
+    std::atomic<bool> loading{false};
+    std::array<FluidProgramState, kFluidMidiChannelCount> programs{};
+    std::array<FluidTuningState, kFluidMidiChannelCount> tunings{};
+    int32_t midiChannelCount = kSourceMidiChannelCount;
+    int32_t playbackChannelCursor = 0;
+    bool channelIsolationAvailable = false;
+};
+
 struct FluidNote {
     int32_t id = 0;
+    int32_t synthIndex = 0;
     int32_t playbackChannel = 0;
     int32_t key = 0;
     int32_t velocity = 0;
@@ -131,6 +140,26 @@ struct FluidNote {
     Sf2ReleaseProfile profile = Sf2ReleaseProfile::Default;
     bool started = false;
     bool releasing = false;
+};
+
+struct PlaybackTarget {
+    int32_t synthIndex = -1;
+    int32_t channel = -1;
+
+    PlaybackTarget() = default;
+
+    PlaybackTarget(int32_t synthIndex, int32_t channel)
+            : synthIndex(synthIndex), channel(channel) {}
+
+    bool isValid() const {
+        return synthIndex >= 0 && channel >= 0;
+    }
+};
+
+enum class SoundFontSource : int32_t {
+    None = 0,
+    External = 1,
+    Builtin = 2
 };
 
 struct PressureMailbox {
@@ -585,8 +614,11 @@ public:
             return false;
         }
         fluid.soundfontId = soundfontId;
-        selectDefaultProgramsLocked();
-        applyPitchCalibrationLocked();
+        soundFontSource = SoundFontSource::External;
+        soundFontPath = path;
+        selectDefaultProgramsLocked(fluid);
+        applyPitchCalibrationLocked(fluid);
+        applyReverbLocked(fluid);
         fluid.loading.store(false, std::memory_order_release);
         __android_log_print(ANDROID_LOG_INFO, TAG, "sf2 loaded: %s", path);
         return true;
@@ -616,8 +648,11 @@ public:
             return false;
         }
         fluid.soundfontId = soundfontId;
-        selectDefaultProgramsLocked();
-        applyPitchCalibrationLocked();
+        soundFontSource = SoundFontSource::Builtin;
+        soundFontPath.clear();
+        selectDefaultProgramsLocked(fluid);
+        applyPitchCalibrationLocked(fluid);
+        applyReverbLocked(fluid);
         fluid.loading.store(false, std::memory_order_release);
         __android_log_print(
                 ANDROID_LOG_INFO,
@@ -645,7 +680,7 @@ public:
             int bankMsb,
             int bankLsb,
             double delaySeconds) {
-        std::lock_guard<std::mutex> lock(synthMutex);
+        std::unique_lock<std::mutex> lock(synthMutex);
         if (!isFluidReadyLocked() || key < 0 || key >= kMidiKeyCount || velocity <= 0) {
             return -1;
         }
@@ -657,15 +692,32 @@ public:
         const int32_t requestedBank = safeSourceChannel == kDrumChannel && midiBank == 0
                                       ? kDrumBank
                                       : midiBank;
-        const int32_t bank = resolvePresetBankLocked(requestedBank, safeProgram);
+        const int32_t bank = resolvePresetBankLocked(fluid, requestedBank, safeProgram);
         if (bank < 0) {
             return -1;
         }
         const Sf2ReleaseProfile profile = classifyReleaseProfile(safeSourceChannel, bank, safeProgram);
+        PlaybackTarget target = allocatePlaybackChannelLocked(safeSourceChannel, key);
+        if (!target.isValid()) {
+            lock.unlock();
+            addFluidInstanceOnDemand(safeSourceChannel);
+            lock.lock();
+            if (!isFluidReadyLocked()) {
+                return -1;
+            }
+            target = allocatePlaybackChannelLocked(safeSourceChannel, key);
+            if (!target.isValid()) {
+                target = allocateBestEffortPlaybackChannelLocked(safeSourceChannel, key);
+            }
+        }
+        if (!target.isValid()) {
+            return -1;
+        }
         const int32_t noteId = nextFluidNoteId();
         FluidNote note{};
         note.id = noteId;
-        note.playbackChannel = allocatePlaybackChannelLocked(safeSourceChannel, key);
+        note.synthIndex = target.synthIndex;
+        note.playbackChannel = target.channel;
         note.key = key;
         note.velocity = std::min(127, velocity);
         note.bank = bank;
@@ -748,25 +800,34 @@ public:
 
     void allSoundOff() {
         std::lock_guard<std::mutex> lock(synthMutex);
-        if (fluid.synth != nullptr) {
-            fluid_synth_all_sounds_off(fluid.synth, -1);
-        }
+        forEachFluidInstanceLocked([](FluidHandle &instance, int32_t) {
+            if (instance.synth != nullptr) {
+                fluid_synth_all_sounds_off(instance.synth, -1);
+            }
+            instance.playbackChannelCursor = 0;
+        });
         activeFluidNotes.clear();
         clearPressureMailboxesLocked();
-        playbackChannelCursor = 0;
+        fallbackSynthCursor = 0;
     }
 
     void setGain(float gain) {
+        const float safeGain = std::max(0.0f, std::min(kFluidMaxGain, gain));
+        fluidGain.store(safeGain, std::memory_order_release);
         std::lock_guard<std::mutex> lock(synthMutex);
-        if (fluid.synth != nullptr) {
-            fluid_synth_set_gain(fluid.synth, std::max(0.0f, std::min(kFluidMaxGain, gain)));
-        }
+        forEachFluidInstanceLocked([safeGain](FluidHandle &instance, int32_t) {
+            if (instance.synth != nullptr) {
+                fluid_synth_set_gain(instance.synth, safeGain);
+            }
+        });
     }
 
     void setReverb(int value) {
         std::lock_guard<std::mutex> lock(synthMutex);
         reverbValue.store(std::max(0, std::min(100, value)), std::memory_order_release);
-        applyReverbLocked();
+        forEachFluidInstanceLocked([this](FluidHandle &instance, int32_t) {
+            applyReverbLocked(instance);
+        });
     }
 
     void setPitchCalibration(JNIEnv *env, jfloatArray centsArray) {
@@ -781,7 +842,9 @@ public:
             pitchCalibrationCents[i].store(cents[i], std::memory_order_release);
         }
         std::lock_guard<std::mutex> lock(synthMutex);
-        applyPitchCalibrationLocked();
+        forEachFluidInstanceLocked([this](FluidHandle &instance, int32_t) {
+            applyPitchCalibrationLocked(instance);
+        });
     }
 
 private:
@@ -831,7 +894,7 @@ private:
             std::lock_guard<std::mutex> lock(synthMutex);
             if (isFluidReadyLocked()) {
                 drainNotePressureLocked();
-                fluid_synth_write_float(fluid.synth, numFrames, out, 0, kChannelCount, out, 1, kChannelCount);
+                renderFluidInstancesLocked(out, numFrames);
                 handleScheduledFluidNotesLocked(numFrames);
                 hasAudio = true;
             }
@@ -894,29 +957,37 @@ private:
         if (fluid.synth != nullptr) {
             return true;
         }
-        fluid.settings = new_fluid_settings();
-        if (fluid.settings == nullptr) {
+        return initializeFluidInstanceLocked(fluid, true);
+    }
+
+    bool initializeFluidInstanceLocked(FluidHandle &instance, bool primary) {
+        instance.loading.store(true, std::memory_order_release);
+        instance.settings = new_fluid_settings();
+        if (instance.settings == nullptr) {
+            instance.loading.store(false, std::memory_order_release);
             return false;
         }
-        fluid_settings_setint(fluid.settings, "synth.threadsafe-api", 1);
-        fluid_settings_setint(fluid.settings, "synth.cpu-cores", 4);
-        fluid_settings_setint(fluid.settings, "audio.realtime-prio", 99);
-        fluid_settings_setint(fluid.settings, "synth.midi-channels", kFluidMidiChannelCount);
-        fluid_settings_setint(fluid.settings, "synth.polyphony", 1024);
-        fluid_settings_setnum(fluid.settings, "synth.sample-rate", kSampleRate);
-        fluid_settings_setnum(fluid.settings, "synth.gain", kFluidDefaultGain);
-        fluid_settings_setint(fluid.settings, "synth.reverb.active", 1);
-        fluid_settings_setint(fluid.settings, "synth.chorus.active", 1);
-        fluid.synth = new_fluid_synth(fluid.settings);
-        fluid.soundfontId = 0;
-        fluid.loading.store(false, std::memory_order_release);
-        fluidPrograms.fill(FluidProgramState{});
-        fluidTunings.fill(FluidTuningState{});
-        if (fluid.synth == nullptr) {
-            closeFluidSynthLocked();
+        fluid_settings_setint(instance.settings, "synth.threadsafe-api", 1);
+        fluid_settings_setint(instance.settings, "synth.cpu-cores", primary ? 4 : 1);
+        fluid_settings_setint(instance.settings, "audio.realtime-prio", 99);
+        fluid_settings_setint(instance.settings, "synth.midi-channels", kFluidMidiChannelCount);
+        fluid_settings_setint(instance.settings, "synth.polyphony", 1024);
+        fluid_settings_setnum(instance.settings, "synth.sample-rate", kSampleRate);
+        fluid_settings_setnum(
+                instance.settings,
+                "synth.gain",
+                fluidGain.load(std::memory_order_acquire));
+        fluid_settings_setint(instance.settings, "synth.reverb.active", 1);
+        fluid_settings_setint(instance.settings, "synth.chorus.active", 1);
+        instance.synth = new_fluid_synth(instance.settings);
+        instance.soundfontId = 0;
+        instance.programs.fill(FluidProgramState{});
+        instance.tunings.fill(FluidTuningState{});
+        if (instance.synth == nullptr) {
+            closeFluidInstanceLocked(instance);
             return false;
         }
-        fluid_sfloader_t *embeddedLoader = new_fluid_defsfloader(fluid.settings);
+        fluid_sfloader_t *embeddedLoader = new_fluid_defsfloader(instance.settings);
         if (embeddedLoader == nullptr ||
             fluid_sfloader_set_callbacks(
                     embeddedLoader,
@@ -929,72 +1000,168 @@ private:
                 delete_fluid_sfloader(embeddedLoader);
             }
             __android_log_print(ANDROID_LOG_ERROR, TAG, "Could not register embedded sf2 loader");
-            closeFluidSynthLocked();
+            closeFluidInstanceLocked(instance);
             return false;
         }
-        fluid_synth_add_sfloader(fluid.synth, embeddedLoader);
-        fluidMidiChannelCount = clampInt(
-                fluid_synth_count_midi_channels(fluid.synth),
+        fluid_synth_add_sfloader(instance.synth, embeddedLoader);
+        instance.midiChannelCount = clampInt(
+                fluid_synth_count_midi_channels(instance.synth),
                 kSourceMidiChannelCount,
                 kFluidMidiChannelCount);
-        channelIsolationAvailable = fluidMidiChannelCount > kSourceMidiChannelCount;
-        if (!channelIsolationAvailable && !loggedChannelIsolationUnavailable) {
+        instance.channelIsolationAvailable =
+                instance.midiChannelCount > kSourceMidiChannelCount;
+        instance.playbackChannelCursor = 0;
+        if (!instance.channelIsolationAvailable && !loggedChannelIsolationUnavailable) {
             __android_log_print(ANDROID_LOG_WARN, TAG,
                                 "FluidSynth exposed only %d MIDI channels; dense microtonal slides use best-effort playback",
-                                fluidMidiChannelCount);
+                                instance.midiChannelCount);
             loggedChannelIsolationUnavailable = true;
         }
-        fluid_synth_set_interp_method(fluid.synth, -1, FLUID_INTERP_HIGHEST);
-        fluid_synth_set_reverb_group_roomsize(fluid.synth, -1, kFluidReverbRoomSize);
-        fluid_synth_set_reverb_group_damp(fluid.synth, -1, kFluidReverbDamp);
-        fluid_synth_set_reverb_group_width(fluid.synth, -1, kFluidReverbWidth);
-        fluid_synth_chorus_on(fluid.synth, -1, 1);
-        fluid_synth_set_chorus_group_nr(fluid.synth, -1, kFluidChorusVoiceCount);
-        fluid_synth_set_chorus_group_level(fluid.synth, -1, kFluidChorusLevel);
-        fluid_synth_set_chorus_group_speed(fluid.synth, -1, kFluidChorusSpeed);
-        fluid_synth_set_chorus_group_depth(fluid.synth, -1, kFluidChorusDepthMs);
-        fluid_synth_set_chorus_group_type(fluid.synth, -1, FLUID_CHORUS_MOD_SINE);
-        applyPitchCalibrationLocked();
-        applyReverbLocked();
+        fluid_synth_set_interp_method(instance.synth, -1, FLUID_INTERP_HIGHEST);
+        fluid_synth_set_reverb_group_roomsize(instance.synth, -1, kFluidReverbRoomSize);
+        fluid_synth_set_reverb_group_damp(instance.synth, -1, kFluidReverbDamp);
+        fluid_synth_set_reverb_group_width(instance.synth, -1, kFluidReverbWidth);
+        fluid_synth_chorus_on(instance.synth, -1, 1);
+        fluid_synth_set_chorus_group_nr(instance.synth, -1, kFluidChorusVoiceCount);
+        fluid_synth_set_chorus_group_level(instance.synth, -1, kFluidChorusLevel);
+        fluid_synth_set_chorus_group_speed(instance.synth, -1, kFluidChorusSpeed);
+        fluid_synth_set_chorus_group_depth(instance.synth, -1, kFluidChorusDepthMs);
+        fluid_synth_set_chorus_group_type(instance.synth, -1, FLUID_CHORUS_MOD_SINE);
+        instance.loading.store(false, std::memory_order_release);
+        return true;
+    }
+
+    bool addFluidInstanceOnDemand(int32_t sourceChannel) {
+        std::lock_guard<std::mutex> controlLock(controlMutex);
+        {
+            std::lock_guard<std::mutex> synthLock(synthMutex);
+            if (!isFluidReadyLocked()) {
+                return false;
+            }
+            if (hasUnusedPlaybackChannelLocked(sourceChannel)) {
+                return true;
+            }
+            if (fluidExpansionFailed ||
+                fluidInstanceCountLocked() >= kMaxFluidSynthInstanceCount) {
+                if (!loggedFluidExpansionLimit) {
+                    __android_log_print(
+                            ANDROID_LOG_WARN,
+                            TAG,
+                            "Microtonal synth pool reached its %d-instance limit; using best-effort channel sharing",
+                            kMaxFluidSynthInstanceCount);
+                    loggedFluidExpansionLimit = true;
+                }
+                return false;
+            }
+        }
+
+        auto instance = std::unique_ptr<FluidHandle>(new FluidHandle());
+        if (!initializeFluidInstanceLocked(*instance, false)) {
+            fluidExpansionFailed = true;
+            return false;
+        }
+        const char *source = soundFontSource == SoundFontSource::Builtin
+                             ? kBuiltinSoundFontUri
+                             : soundFontPath.c_str();
+        if (soundFontSource == SoundFontSource::None || source[0] == '\0') {
+            closeFluidInstanceLocked(*instance);
+            return false;
+        }
+        instance->loading.store(true, std::memory_order_release);
+        const int soundfontId = fluid_synth_sfload(instance->synth, source, 1);
+        if (soundfontId == FLUID_FAILED) {
+            __android_log_print(ANDROID_LOG_ERROR, TAG, "Could not expand FluidSynth instance pool");
+            closeFluidInstanceLocked(*instance);
+            fluidExpansionFailed = true;
+            return false;
+        }
+        instance->soundfontId = soundfontId;
+        selectDefaultProgramsLocked(*instance);
+        applyPitchCalibrationLocked(*instance);
+        applyReverbLocked(*instance);
+        instance->loading.store(false, std::memory_order_release);
+
+        int32_t instanceCount = 0;
+        {
+            std::lock_guard<std::mutex> synthLock(synthMutex);
+            if (!isFluidReadyLocked()) {
+                closeFluidInstanceLocked(*instance);
+                return false;
+            }
+            extraFluidInstances.push_back(std::move(instance));
+            instanceCount = fluidInstanceCountLocked();
+        }
+        __android_log_print(
+                ANDROID_LOG_INFO,
+                TAG,
+                "Expanded microtonal synth pool to %d instances",
+                instanceCount);
         return true;
     }
 
     void closeFluidSynthLocked() {
+        fluid.loading.store(true, std::memory_order_release);
         std::lock_guard<std::mutex> lock(synthMutex);
-        if (fluid.synth != nullptr) {
-            delete_fluid_synth(fluid.synth);
-            fluid.synth = nullptr;
+        for (auto &instance : extraFluidInstances) {
+            closeFluidInstanceLocked(*instance);
         }
-        if (fluid.settings != nullptr) {
-            delete_fluid_settings(fluid.settings);
-            fluid.settings = nullptr;
-        }
-        fluid.soundfontId = 0;
+        extraFluidInstances.clear();
+        closeFluidInstanceLocked(fluid);
         fluid.loading.store(false, std::memory_order_release);
         activeFluidNotes.clear();
         clearPressureMailboxesLocked();
-        fluidPrograms.fill(FluidProgramState{});
-        fluidTunings.fill(FluidTuningState{});
-        fluidMidiChannelCount = kSourceMidiChannelCount;
-        playbackChannelCursor = 0;
-        channelIsolationAvailable = false;
+        soundFontSource = SoundFontSource::None;
+        soundFontPath.clear();
+        fluidExpansionFailed = false;
+        loggedFluidExpansionLimit = false;
+        fallbackSynthCursor = 0;
         clearBuiltinSoundFontLocked();
     }
 
+    static void closeFluidInstanceLocked(FluidHandle &instance) {
+        if (instance.synth != nullptr) {
+            delete_fluid_synth(instance.synth);
+            instance.synth = nullptr;
+        }
+        if (instance.settings != nullptr) {
+            delete_fluid_settings(instance.settings);
+            instance.settings = nullptr;
+        }
+        instance.soundfontId = 0;
+        instance.programs.fill(FluidProgramState{});
+        instance.tunings.fill(FluidTuningState{});
+        instance.midiChannelCount = kSourceMidiChannelCount;
+        instance.playbackChannelCursor = 0;
+        instance.channelIsolationAvailable = false;
+        instance.loading.store(false, std::memory_order_release);
+    }
+
     void unloadSf2Locked() {
-        if (fluid.synth != nullptr && fluid.soundfontId > 0) {
-            std::lock_guard<std::mutex> lock(synthMutex);
+        if (fluid.synth != nullptr) {
             fluid.loading.store(true, std::memory_order_release);
-            fluid_synth_all_sounds_off(fluid.synth, -1);
-            fluid_synth_sfunload(fluid.synth, fluid.soundfontId, 1);
+            std::lock_guard<std::mutex> lock(synthMutex);
+            for (auto &instance : extraFluidInstances) {
+                fluid_synth_all_sounds_off(instance->synth, -1);
+                closeFluidInstanceLocked(*instance);
+            }
+            extraFluidInstances.clear();
+            if (fluid.soundfontId > 0) {
+                fluid_synth_all_sounds_off(fluid.synth, -1);
+                fluid_synth_sfunload(fluid.synth, fluid.soundfontId, 1);
+            }
             fluid.soundfontId = 0;
             activeFluidNotes.clear();
             clearPressureMailboxesLocked();
-            fluidPrograms.fill(FluidProgramState{});
-            fluidTunings.fill(FluidTuningState{});
-            playbackChannelCursor = 0;
+            fluid.programs.fill(FluidProgramState{});
+            fluid.tunings.fill(FluidTuningState{});
+            fluid.playbackChannelCursor = 0;
             fluid.loading.store(false, std::memory_order_release);
         }
+        soundFontSource = SoundFontSource::None;
+        soundFontPath.clear();
+        fluidExpansionFailed = false;
+        loggedFluidExpansionLimit = false;
+        fallbackSynthCursor = 0;
         clearBuiltinSoundFontLocked();
     }
 
@@ -1004,36 +1171,51 @@ private:
         secureClearAndRelease(builtinSoundFont);
     }
 
-    void selectDefaultProgramsLocked() {
-        for (int32_t channel = 0; channel < fluidMidiChannelCount; channel++) {
+    void selectDefaultProgramsLocked(FluidHandle &instance) {
+        for (int32_t channel = 0; channel < instance.midiChannelCount; channel++) {
             const int32_t bank = channel == kDrumChannel ? kDrumBank : 0;
-            selectProgramLocked(channel, bank, 0);
+            selectProgramLocked(instance, channel, bank, 0);
         }
     }
 
-    bool selectProgramLocked(int32_t channel, int32_t requestedBank, int32_t requestedProgram) {
-        if (fluid.synth == nullptr || fluid.soundfontId <= 0 ||
-            channel < 0 || channel >= fluidMidiChannelCount) {
+    bool selectProgramLocked(
+            FluidHandle &instance,
+            int32_t channel,
+            int32_t requestedBank,
+            int32_t requestedProgram) {
+        if (instance.synth == nullptr || instance.soundfontId <= 0 ||
+            channel < 0 || channel >= instance.midiChannelCount) {
             return false;
         }
         const int32_t program = clampInt(requestedProgram, 0, 127);
-        const int32_t bank = resolvePresetBankLocked(requestedBank, program);
+        const int32_t bank = resolvePresetBankLocked(instance, requestedBank, program);
         if (bank < 0) {
             return false;
         }
         const FluidProgramState next{bank, program};
-        if (fluidPrograms[channel].bank == next.bank && fluidPrograms[channel].program == next.program) {
+        if (instance.programs[channel].bank == next.bank &&
+            instance.programs[channel].program == next.program) {
             return true;
         }
-        if (fluid_synth_program_select(fluid.synth, channel, fluid.soundfontId, bank, program) == FLUID_FAILED) {
+        if (fluid_synth_program_select(
+                instance.synth,
+                channel,
+                instance.soundfontId,
+                bank,
+                program) == FLUID_FAILED) {
             return false;
         }
-        fluidPrograms[channel] = next;
+        instance.programs[channel] = next;
         return true;
     }
 
-    int32_t resolvePresetBankLocked(int32_t requestedBank, int32_t program) {
-        fluid_sfont_t *soundFont = fluid_synth_get_sfont_by_id(fluid.synth, fluid.soundfontId);
+    int32_t resolvePresetBankLocked(
+            FluidHandle &instance,
+            int32_t requestedBank,
+            int32_t program) {
+        fluid_sfont_t *soundFont = fluid_synth_get_sfont_by_id(
+                instance.synth,
+                instance.soundfontId);
         if (soundFont == nullptr) {
             return -1;
         }
@@ -1050,8 +1232,8 @@ private:
         return -1;
     }
 
-    void applyPitchCalibrationLocked() {
-        if (fluid.synth == nullptr) {
+    void applyPitchCalibrationLocked(FluidHandle &instance) {
+        if (instance.synth == nullptr) {
             return;
         }
         double pitch[kMidiKeyCount];
@@ -1061,37 +1243,47 @@ private:
                                pitchCalibrationCents[i % kPitchClassCount].load(
                                        std::memory_order_acquire));
         }
-        for (int32_t channel = 0; channel < fluidMidiChannelCount; channel++) {
+        for (int32_t channel = 0; channel < instance.midiChannelCount; channel++) {
             const int32_t tuningBank = tuningBankForChannel(channel);
             const int32_t tuningProgram = tuningProgramForChannel(channel);
-            fluid_synth_activate_key_tuning(fluid.synth, tuningBank, tuningProgram,
+            fluid_synth_activate_key_tuning(instance.synth, tuningBank, tuningProgram,
                                             "XenSynth tuning", pitch, 1);
-            fluid_synth_activate_tuning(fluid.synth, channel, tuningBank, tuningProgram, 1);
+            fluid_synth_activate_tuning(
+                    instance.synth,
+                    channel,
+                    tuningBank,
+                    tuningProgram,
+                    1);
         }
-        fluidTunings.fill(FluidTuningState{});
+        instance.tunings.fill(FluidTuningState{});
     }
 
-    void applyReverbLocked() {
-        if (fluid.synth == nullptr) {
+    void applyReverbLocked(FluidHandle &instance) {
+        if (instance.synth == nullptr) {
             return;
         }
         const int value = reverbValue.load(std::memory_order_acquire);
         if (value <= 0) {
-            fluid_synth_reverb_on(fluid.synth, -1, 0);
+            fluid_synth_reverb_on(instance.synth, -1, 0);
         } else {
-            fluid_synth_reverb_on(fluid.synth, -1, 1);
-            fluid_synth_set_reverb_group_roomsize(fluid.synth, -1, kFluidReverbRoomSize);
-            fluid_synth_set_reverb_group_damp(fluid.synth, -1, kFluidReverbDamp);
-            fluid_synth_set_reverb_group_width(fluid.synth, -1, kFluidReverbWidth);
+            fluid_synth_reverb_on(instance.synth, -1, 1);
+            fluid_synth_set_reverb_group_roomsize(
+                    instance.synth,
+                    -1,
+                    kFluidReverbRoomSize);
+            fluid_synth_set_reverb_group_damp(instance.synth, -1, kFluidReverbDamp);
+            fluid_synth_set_reverb_group_width(instance.synth, -1, kFluidReverbWidth);
             fluid_synth_set_reverb_group_level(
-                    fluid.synth,
+                    instance.synth,
                     -1,
                     std::min(1.0, static_cast<double>(value) / 100.0 * kFluidReverbMaxLevel));
         }
     }
 
     bool startFluidNoteLocked(const FluidNote &note) {
-        if (!selectProgramLocked(note.playbackChannel, note.bank, note.program)) {
+        FluidHandle *instance = fluidInstanceAtLocked(note.synthIndex);
+        if (instance == nullptr ||
+            !selectProgramLocked(*instance, note.playbackChannel, note.bank, note.program)) {
             return false;
         }
         const double calibrationCents = static_cast<double>(
@@ -1099,18 +1291,30 @@ private:
         const double pitch = static_cast<double>(note.key) * 100.0 +
                              static_cast<double>(note.cents) +
                              calibrationCents;
-        if (!ensureTuningForNoteLocked(note.playbackChannel, note.key, pitch)) {
+        if (!ensureTuningForNoteLocked(
+                *instance,
+                note.playbackChannel,
+                note.key,
+                pitch)) {
             return false;
         }
-        applyNotePressureLocked(note);
-        return fluid_synth_noteon(fluid.synth, note.playbackChannel, note.key, note.velocity) != FLUID_FAILED;
+        applyNotePressureLocked(*instance, note);
+        return fluid_synth_noteon(
+                instance->synth,
+                note.playbackChannel,
+                note.key,
+                note.velocity) != FLUID_FAILED;
     }
 
-    void applyNotePressureLocked(const FluidNote &note) {
-        fluid_synth_key_pressure(fluid.synth, note.playbackChannel, note.key, note.expression);
-        if (channelIsolationAvailable) {
+    static void applyNotePressureLocked(FluidHandle &instance, const FluidNote &note) {
+        fluid_synth_key_pressure(
+                instance.synth,
+                note.playbackChannel,
+                note.key,
+                note.expression);
+        if (instance.channelIsolationAvailable) {
             fluid_synth_cc(
-                    fluid.synth,
+                    instance.synth,
                     note.playbackChannel,
                     kMidiExpressionController,
                     note.expression);
@@ -1204,7 +1408,10 @@ private:
             }
             note.expression = static_cast<int32_t>(consumed & kPressureExpressionMask);
             if (note.started && !note.releasing) {
-                applyNotePressureLocked(note);
+                FluidHandle *instance = fluidInstanceAtLocked(note.synthIndex);
+                if (instance != nullptr) {
+                    applyNotePressureLocked(*instance, note);
+                }
             }
         }
     }
@@ -1213,14 +1420,21 @@ private:
         if (hasOtherSustainedFluidNoteLocked(note)) {
             return;
         }
-        fluid_synth_noteoff(fluid.synth, note.playbackChannel, note.key);
+        FluidHandle *instance = fluidInstanceAtLocked(note.synthIndex);
+        if (instance != nullptr) {
+            fluid_synth_noteoff(instance->synth, note.playbackChannel, note.key);
+        }
     }
 
-    bool ensureTuningForNoteLocked(int32_t playbackChannel, int32_t key, double pitch) {
-        if (playbackChannel < 0 || playbackChannel >= fluidMidiChannelCount) {
+    static bool ensureTuningForNoteLocked(
+            FluidHandle &instance,
+            int32_t playbackChannel,
+            int32_t key,
+            double pitch) {
+        if (playbackChannel < 0 || playbackChannel >= instance.midiChannelCount) {
             return false;
         }
-        FluidTuningState &state = fluidTunings[playbackChannel];
+        FluidTuningState &state = instance.tunings[playbackChannel];
         if (state.active &&
             state.key == key &&
             std::abs(state.pitch - pitch) <= kFluidTuningPitchEpsilon) {
@@ -1229,11 +1443,23 @@ private:
         const int32_t tuningBank = tuningBankForChannel(playbackChannel);
         const int32_t tuningProgram = tuningProgramForChannel(playbackChannel);
         const int32_t tunedKey = key;
-        if (fluid_synth_tune_notes(fluid.synth, tuningBank, tuningProgram, 1, &tunedKey, &pitch, 1) ==
+        if (fluid_synth_tune_notes(
+                instance.synth,
+                tuningBank,
+                tuningProgram,
+                1,
+                &tunedKey,
+                &pitch,
+                1) ==
             FLUID_FAILED) {
             return false;
         }
-        if (fluid_synth_activate_tuning(fluid.synth, playbackChannel, tuningBank, tuningProgram, 1) ==
+        if (fluid_synth_activate_tuning(
+                instance.synth,
+                playbackChannel,
+                tuningBank,
+                tuningProgram,
+                1) ==
             FLUID_FAILED) {
             return false;
         }
@@ -1244,6 +1470,7 @@ private:
     }
 
     void finishPendingFluidNoteOffsLocked(
+            int32_t synthIndex,
             int32_t playbackChannel,
             int32_t key,
             Sf2ReleaseProfile profile,
@@ -1252,6 +1479,7 @@ private:
             if (note->id != excludedNoteId &&
                 note->started &&
                 note->releasing &&
+                note->synthIndex == synthIndex &&
                 note->playbackChannel == playbackChannel &&
                 note->key == key &&
                 note->profile == profile) {
@@ -1273,6 +1501,7 @@ private:
                     continue;
                 }
                 finishPendingFluidNoteOffsLocked(
+                        note->synthIndex,
                         note->playbackChannel,
                         note->key,
                         note->profile,
@@ -1299,52 +1528,138 @@ private:
         }
     }
 
-    int32_t allocatePlaybackChannelLocked(int32_t sourceChannel, int32_t key) {
-        if (fluidMidiChannelCount <= kSourceMidiChannelCount) {
-            return sourceChannel;
-        }
-        const int32_t overflowCount = fluidMidiChannelCount - kSourceMidiChannelCount;
-        for (int32_t i = 0; i < overflowCount; i++) {
-            const int32_t channel = kSourceMidiChannelCount +
-                                    (playbackChannelCursor + i) % overflowCount;
-            if (!hasActiveFluidNoteOnChannelLocked(channel)) {
-                playbackChannelCursor = (channel - kSourceMidiChannelCount + 1) % overflowCount;
-                return channel;
-            }
-        }
-        for (int32_t i = 0; i < overflowCount; i++) {
-            const int32_t channel = kSourceMidiChannelCount +
-                                    (playbackChannelCursor + i) % overflowCount;
-            if (!hasActiveFluidNoteForKeyLocked(channel, key)) {
-                playbackChannelCursor = (channel - kSourceMidiChannelCount + 1) % overflowCount;
-                return channel;
-            }
-        }
-        const int32_t channel = kSourceMidiChannelCount + playbackChannelCursor;
-        playbackChannelCursor = (playbackChannelCursor + 1) % overflowCount;
-        return channel;
+    PlaybackTarget allocatePlaybackChannelLocked(int32_t sourceChannel, int32_t) {
+        PlaybackTarget target{};
+        forEachFluidInstanceLocked(
+                [this, sourceChannel, &target](FluidHandle &instance, int32_t synthIndex) {
+                    if (target.isValid()) {
+                        return;
+                    }
+                    if (instance.midiChannelCount <= kSourceMidiChannelCount) {
+                        if (!hasActiveFluidNoteOnChannelLocked(synthIndex, sourceChannel)) {
+                            target = PlaybackTarget{synthIndex, sourceChannel};
+                        }
+                        return;
+                    }
+                    const int32_t overflowCount =
+                            instance.midiChannelCount - kSourceMidiChannelCount;
+                    for (int32_t i = 0; i < overflowCount; i++) {
+                        const int32_t channel = kSourceMidiChannelCount +
+                                                (instance.playbackChannelCursor + i) %
+                                                overflowCount;
+                        if (!hasActiveFluidNoteOnChannelLocked(synthIndex, channel)) {
+                            instance.playbackChannelCursor =
+                                    (channel - kSourceMidiChannelCount + 1) % overflowCount;
+                            target = PlaybackTarget{synthIndex, channel};
+                            return;
+                        }
+                    }
+                });
+        return target;
     }
 
-    bool hasActiveFluidNoteOnChannelLocked(int32_t playbackChannel) const {
+    PlaybackTarget allocateBestEffortPlaybackChannelLocked(
+            int32_t sourceChannel,
+            int32_t key) {
+        PlaybackTarget target{};
+        forEachFluidInstanceLocked(
+                [this, sourceChannel, key, &target](
+                        FluidHandle &instance,
+                        int32_t synthIndex) {
+                    if (target.isValid()) {
+                        return;
+                    }
+                    if (instance.midiChannelCount <= kSourceMidiChannelCount) {
+                        target = PlaybackTarget{synthIndex, sourceChannel};
+                        return;
+                    }
+                    const int32_t overflowCount =
+                            instance.midiChannelCount - kSourceMidiChannelCount;
+                    for (int32_t i = 0; i < overflowCount; i++) {
+                        const int32_t channel = kSourceMidiChannelCount +
+                                                (instance.playbackChannelCursor + i) %
+                                                overflowCount;
+                        if (!hasActiveFluidNoteForKeyLocked(synthIndex, channel, key)) {
+                            instance.playbackChannelCursor =
+                                    (channel - kSourceMidiChannelCount + 1) % overflowCount;
+                            target = PlaybackTarget{synthIndex, channel};
+                            return;
+                        }
+                    }
+                });
+        if (target.isValid()) {
+            return target;
+        }
+        const int32_t instanceCount = fluidInstanceCountLocked();
+        if (instanceCount <= 0) {
+            return target;
+        }
+        const int32_t synthIndex = fallbackSynthCursor % instanceCount;
+        fallbackSynthCursor = (fallbackSynthCursor + 1) % instanceCount;
+        FluidHandle *instance = fluidInstanceAtLocked(synthIndex);
+        if (instance == nullptr || instance->midiChannelCount <= kSourceMidiChannelCount) {
+            return PlaybackTarget{synthIndex, sourceChannel};
+        }
+        const int32_t overflowCount = instance->midiChannelCount - kSourceMidiChannelCount;
+        const int32_t channel = kSourceMidiChannelCount + instance->playbackChannelCursor;
+        instance->playbackChannelCursor =
+                (instance->playbackChannelCursor + 1) % overflowCount;
+        return PlaybackTarget{synthIndex, channel};
+    }
+
+    bool hasUnusedPlaybackChannelLocked(int32_t sourceChannel) const {
+        const int32_t instanceCount = fluidInstanceCountLocked();
+        for (int32_t synthIndex = 0; synthIndex < instanceCount; synthIndex++) {
+            const FluidHandle *instance = fluidInstanceAtLocked(synthIndex);
+            if (instance == nullptr) {
+                continue;
+            }
+            const int32_t firstChannel = instance->midiChannelCount > kSourceMidiChannelCount
+                                         ? kSourceMidiChannelCount
+                                         : sourceChannel;
+            const int32_t channelLimit = instance->midiChannelCount > kSourceMidiChannelCount
+                                         ? instance->midiChannelCount
+                                         : sourceChannel + 1;
+            for (int32_t channel = firstChannel;
+                 channel < channelLimit;
+                 channel++) {
+                if (!hasActiveFluidNoteOnChannelLocked(synthIndex, channel)) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    bool hasActiveFluidNoteOnChannelLocked(
+            int32_t synthIndex,
+            int32_t playbackChannel) const {
         return std::any_of(
                 activeFluidNotes.begin(),
                 activeFluidNotes.end(),
-                [playbackChannel](const FluidNote &note) {
-                    return note.playbackChannel == playbackChannel;
+                [synthIndex, playbackChannel](const FluidNote &note) {
+                    return note.synthIndex == synthIndex &&
+                           note.playbackChannel == playbackChannel;
                 });
     }
 
-    bool hasActiveFluidNoteForKeyLocked(int32_t playbackChannel, int32_t key) const {
+    bool hasActiveFluidNoteForKeyLocked(
+            int32_t synthIndex,
+            int32_t playbackChannel,
+            int32_t key) const {
         return std::any_of(
                 activeFluidNotes.begin(),
                 activeFluidNotes.end(),
-                [playbackChannel, key](const FluidNote &note) {
-                    return note.playbackChannel == playbackChannel && note.key == key;
+                [synthIndex, playbackChannel, key](const FluidNote &note) {
+                    return note.synthIndex == synthIndex &&
+                           note.playbackChannel == playbackChannel &&
+                           note.key == key;
                 });
     }
 
     bool hasOtherSustainedFluidNoteLocked(const FluidNote &stoppingNote) const {
-        if (channelIsolationAvailable) {
+        const FluidHandle *instance = fluidInstanceAtLocked(stoppingNote.synthIndex);
+        if (instance == nullptr || instance->channelIsolationAvailable) {
             return false;
         }
         return std::any_of(
@@ -1354,8 +1669,99 @@ private:
                     return note.id != stoppingNote.id &&
                            note.started &&
                            !note.releasing &&
+                           note.synthIndex == stoppingNote.synthIndex &&
                            note.playbackChannel == stoppingNote.playbackChannel &&
                            note.key == stoppingNote.key;
+                });
+    }
+
+    FluidHandle *fluidInstanceAtLocked(int32_t synthIndex) {
+        if (synthIndex == 0) {
+            return &fluid;
+        }
+        const size_t extraIndex = static_cast<size_t>(synthIndex - 1);
+        if (synthIndex < 0 || extraIndex >= extraFluidInstances.size()) {
+            return nullptr;
+        }
+        return extraFluidInstances[extraIndex].get();
+    }
+
+    const FluidHandle *fluidInstanceAtLocked(int32_t synthIndex) const {
+        if (synthIndex == 0) {
+            return &fluid;
+        }
+        const size_t extraIndex = static_cast<size_t>(synthIndex - 1);
+        if (synthIndex < 0 || extraIndex >= extraFluidInstances.size()) {
+            return nullptr;
+        }
+        return extraFluidInstances[extraIndex].get();
+    }
+
+    int32_t fluidInstanceCountLocked() const {
+        return fluid.synth == nullptr
+               ? 0
+               : static_cast<int32_t>(extraFluidInstances.size()) + 1;
+    }
+
+    template<typename Callback>
+    void forEachFluidInstanceLocked(Callback callback) {
+        if (fluid.synth == nullptr) {
+            return;
+        }
+        callback(fluid, 0);
+        for (size_t i = 0; i < extraFluidInstances.size(); i++) {
+            callback(*extraFluidInstances[i], static_cast<int32_t>(i + 1));
+        }
+    }
+
+    void renderFluidInstancesLocked(float *out, int32_t numFrames) {
+        bool renderedFirstInstance = false;
+        forEachFluidInstanceLocked(
+                [this, out, numFrames, &renderedFirstInstance](
+                        FluidHandle &instance,
+                        int32_t) {
+                    if (instance.soundfontId <= 0 ||
+                        instance.loading.load(std::memory_order_acquire)) {
+                        return;
+                    }
+                    if (!renderedFirstInstance) {
+                        fluid_synth_write_float(
+                                instance.synth,
+                                numFrames,
+                                out,
+                                0,
+                                kChannelCount,
+                                out,
+                                1,
+                                kChannelCount);
+                        renderedFirstInstance = true;
+                        return;
+                    }
+                    int32_t frameOffset = 0;
+                    while (frameOffset < numFrames) {
+                        const int32_t frames = std::min(
+                                kMixScratchFrameCount,
+                                numFrames - frameOffset);
+                        const int32_t sampleCount = frames * kChannelCount;
+                        std::fill(
+                                mixScratch.begin(),
+                                mixScratch.begin() + sampleCount,
+                                0.0f);
+                        fluid_synth_write_float(
+                                instance.synth,
+                                frames,
+                                mixScratch.data(),
+                                0,
+                                kChannelCount,
+                                mixScratch.data(),
+                                1,
+                                kChannelCount);
+                        float *destination = out + frameOffset * kChannelCount;
+                        for (int32_t i = 0; i < sampleCount; i++) {
+                            destination[i] += mixScratch[i];
+                        }
+                        frameOffset += frames;
+                    }
                 });
     }
 
@@ -1417,17 +1823,20 @@ private:
     std::unique_ptr<oboe::LatencyTuner> latencyTuner;
     mutable std::mutex controlMutex;
     mutable std::mutex synthMutex;
-    std::array<FluidProgramState, kFluidMidiChannelCount> fluidPrograms{};
-    std::array<FluidTuningState, kFluidMidiChannelCount> fluidTunings{};
+    std::vector<std::unique_ptr<FluidHandle>> extraFluidInstances;
     std::list<FluidNote> activeFluidNotes;
     std::array<PressureMailbox, kPressureMailboxCount> pressureMailboxes{};
+    std::array<float, kMixScratchFrameCount * kChannelCount> mixScratch{};
     std::vector<uint8_t> builtinSoundFont;
+    std::string soundFontPath;
+    SoundFontSource soundFontSource = SoundFontSource::None;
     int32_t fluidNoteId = 0;
-    int32_t fluidMidiChannelCount = kSourceMidiChannelCount;
-    int32_t playbackChannelCursor = 0;
-    bool channelIsolationAvailable = false;
+    int32_t fallbackSynthCursor = 0;
     bool loggedChannelIsolationUnavailable = false;
+    bool fluidExpansionFailed = false;
+    bool loggedFluidExpansionLimit = false;
     std::array<std::atomic<float>, kPitchClassCount> pitchCalibrationCents{};
+    std::atomic<float> fluidGain{kFluidDefaultGain};
     std::atomic<int> reverbValue{kFluidDefaultReverbValue};
 };
 

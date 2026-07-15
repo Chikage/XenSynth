@@ -11,7 +11,6 @@ import kotlin.math.exp
 import kotlin.math.sin
 
 internal const val PLAYBACK_PREVIEW_SECONDS = 1.8
-internal const val MAX_PLAYBACK_PREVIEW_NOTES = 16
 internal const val PLAYBACK_COMPLETION_BURST_SECONDS = 0.34
 internal const val PLAYBACK_REPEAT_WINDOW_SECONDS = 0.42
 private const val PLAYBACK_REPEAT_GAP_SECONDS = 0.18
@@ -139,19 +138,14 @@ fun KeyboardPlaybackTimeline.visualFrameAt(
 
     val upcomingStart = notes.upperBoundByStart(position)
     val upcomingEnd = notes.upperBoundByStart(position + PLAYBACK_PREVIEW_SECONDS)
-    var previewNoteCount = 0
     for (index in upcomingStart until upcomingEnd) {
         val note = notes[index]
         val delta = (note.start - position).coerceAtLeast(0.0)
         val progress = (1.0 - delta / PLAYBACK_PREVIEW_SECONDS).toFloat().coerceIn(0f, 1f)
-        val existingBuilder = builders[note.coordinate]
-        if (existingBuilder == null && previewNoteCount >= MAX_PLAYBACK_PREVIEW_NOTES) break
-        val builder = existingBuilder
-            ?: PlaybackKeyVisualBuilder().also { builders[note.coordinate] = it }
+        val builder = builders.getOrPut(note.coordinate, ::PlaybackKeyVisualBuilder)
         val current = builder.upcoming
         if (current == null || note.start < current.note.start) {
             builder.upcoming = UpcomingPlaybackNote(note, progress)
-            if (current == null) previewNoteCount++
         }
     }
 

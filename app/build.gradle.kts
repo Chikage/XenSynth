@@ -10,7 +10,7 @@ android {
 
     defaultConfig {
         applicationId = "icu.ringona.xensynth"
-        minSdk = 24
+        minSdk = 28
         targetSdk = 37
         versionCode = 1
         versionName = "0.4.0"
@@ -22,7 +22,7 @@ android {
         externalNativeBuild {
             cmake {
                 cppFlags("-std=c++14")
-                arguments("-DANDROID_PLATFORM=android-24", "-DANDROID_STL=c++_shared")
+                arguments("-DANDROID_PLATFORM=android-28", "-DANDROID_STL=c++_shared")
             }
         }
     }
