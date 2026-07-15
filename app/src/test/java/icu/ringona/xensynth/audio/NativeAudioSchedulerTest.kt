@@ -105,7 +105,7 @@ class NativeAudioSchedulerTest {
     }
 
     @Test
-    fun stopSilencesNativeAudioEvenAfterSchedulingFailure() {
+    fun stopDoesNotSilenceVoicesOwnedByOtherInputsAfterSchedulingFailure() {
         val callbacks = FakeCallbacks(canUseNativeAudio = true)
         val audio = FakeNativeAudio().apply {
             started = true
@@ -121,7 +121,44 @@ class NativeAudioSchedulerTest {
         )
         scheduler.stop()
 
-        assertEquals(1, audio.allSoundOffCalls)
+        assertEquals(0, audio.allSoundOffCalls)
+        assertEquals(emptyList<Int>(), audio.noteOffs)
+    }
+
+    @Test
+    fun stopImmediatelyReleasesOnlyScheduledVoices() {
+        val callbacks = FakeCallbacks(canUseNativeAudio = true)
+        val audio = FakeNativeAudio().apply {
+            started = true
+            nextNoteId = 31
+        }
+        val scheduler = NativeAudioScheduler(callbacks, audio)
+        val score = scoreOf(note(start = 0.0, end = 1.0, startTick = 0, endTick = 100))
+
+        scheduler.reset(score, playheadSeconds = 0.0)
+        scheduler.schedule(score, playheadSeconds = 0.0, speed = 1.0, playing = true)
+        scheduler.stop()
+
+        assertEquals(listOf(31), audio.noteOffs)
+        assertEquals(0, audio.allSoundOffCalls)
+    }
+
+    @Test
+    fun resetReleasesPreviouslyScheduledVoicesBeforeMovingCursor() {
+        val callbacks = FakeCallbacks(canUseNativeAudio = true)
+        val audio = FakeNativeAudio().apply {
+            started = true
+            nextNoteId = 41
+        }
+        val scheduler = NativeAudioScheduler(callbacks, audio)
+        val score = scoreOf(note(start = 0.0, end = 1.0, startTick = 0, endTick = 100))
+
+        scheduler.reset(score, playheadSeconds = 0.0)
+        scheduler.schedule(score, playheadSeconds = 0.0, speed = 1.0, playing = true)
+        scheduler.reset(score, playheadSeconds = 0.5)
+
+        assertEquals(listOf(41), audio.noteOffs)
+        assertEquals(0, audio.allSoundOffCalls)
     }
 
     private class FakeCallbacks : NativeAudioScheduler.Callbacks {

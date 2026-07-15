@@ -59,6 +59,18 @@ class NativeAudioController(
         }.isSuccess
     }
 
+    fun noteOffImmediately(noteId: Int): Boolean {
+        return runCatching {
+            nativeAudio.noteOffImmediately(noteId)
+        }.isSuccess
+    }
+
+    fun setNotePressure(noteId: Int, expression: Int): Boolean {
+        return runCatching {
+            nativeAudio.setNotePressure(noteId, expression)
+        }.isSuccess
+    }
+
     fun allSoundOff() {
         runCatching { nativeAudio.allSoundOff() }
     }

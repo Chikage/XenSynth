@@ -79,13 +79,38 @@ class NativeAudioControllerTest {
 
         val noteId = controller.noteOn(key = 60, velocity = 96, channel = 2)
         val noteOffSuccess = controller.noteOff(42)
+        val immediateNoteOffSuccess = controller.noteOffImmediately(43)
 
         assertEquals(42, noteId)
         assertTrue(noteOffSuccess)
+        assertTrue(immediateNoteOffSuccess)
         assertEquals(1, audio.noteOns.size)
         assertEquals(60, audio.noteOns.single().key)
         assertEquals(96, audio.noteOns.single().velocity)
         assertEquals(2, audio.noteOns.single().channel)
-        assertEquals(listOf(42), audio.noteOffs)
+        assertEquals(listOf(42, 43), audio.noteOffs)
+    }
+
+    @Test
+    fun notePressureIsForwardedAndContained() {
+        val audio = PressureNativeAudio()
+        val controller = NativeAudioController(audio)
+
+        assertTrue(controller.setNotePressure(noteId = 42, expression = 93))
+
+        assertEquals(listOf(42 to 93), audio.pressures)
+
+        audio.throwOnPressure = true
+        assertFalse(controller.setNotePressure(noteId = 42, expression = 64))
+    }
+
+    private class PressureNativeAudio : NativeAudio by FakeNativeAudio() {
+        val pressures = mutableListOf<Pair<Int, Int>>()
+        var throwOnPressure = false
+
+        override fun setNotePressure(noteId: Int, expression: Int) {
+            if (throwOnPressure) error("pressure failed")
+            pressures += noteId to expression
+        }
     }
 }

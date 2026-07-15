@@ -17,17 +17,24 @@ class NativeAudioScheduler(
     private val activeNativeNotes = linkedMapOf<NoteKey, ScheduledNote>()
 
     override fun reset(score: ParsedScore?, playheadSeconds: Double) {
+        releaseScheduledNotes()
         audioCursor = score
             ?.notes
             ?.indexOfFirst { it.end > playheadSeconds + AUDIO_EPSILON_SECONDS }
             ?.takeIf { it >= 0 }
             ?: 0
-        activeNativeNotes.clear()
     }
 
     override fun stop() {
+        releaseScheduledNotes()
+    }
+
+    private fun releaseScheduledNotes() {
+        val scheduledNoteIds = activeNativeNotes.values.map { it.noteId }
         activeNativeNotes.clear()
-        runCatching { nativeAudio.allSoundOff() }
+        scheduledNoteIds.forEach { noteId ->
+            runCatching { nativeAudio.noteOffImmediately(noteId) }
+        }
     }
 
     override fun ensureStarted(): Boolean {

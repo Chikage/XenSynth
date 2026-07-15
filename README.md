@@ -15,6 +15,14 @@ MIDX / MIDI 2.0 waterfall files.
 - Supported score inputs: `.mid`, `.midi`, `.midx`, `.midix`, `.midi2`, `.mscz`, `.mscx`
 - MuseScore conversion helper: `MsczToMidx` can emit `.midx` with microtonal offsets or plain `.mid/.midi`
 - Sound mode: native Oboe / FluidSynth playback with the bundled SoundFont
+- Touch layouts: the original linear waterfall ruler or a HexaKeyboard-style
+  isomorphic surface, selected and persisted from Settings
+
+The hexagonal surface reuses XenSynth's parsed `ParsedScore`, tuning guide,
+transport, program selection, and native audio engine. It does not embed a
+second MIDI/MSCZ parser, playback scheduler, synthesizer, or SoundFont. Hex
+touches are converted to XenSynth floating-point pitches before they enter the
+same per-note tuning and FluidSynth/Oboe path as the linear ruler.
 
 The app no longer embeds a WebView waterfall runtime; score parsing,
 visualization, gestures, transport, and audio scheduling all run in the native
@@ -62,3 +70,10 @@ audio milestone:
 
 The MIDX/MIDI2 parser, renderer, transport, and low-latency audio backend are
 now integrated as the primary runtime.
+
+## HexaKeyboard Source
+
+The hexagonal geometry, canvas styling, multi-touch hysteresis, pseudo-pressure,
+chord selection, and playback effects were adapted from HexaKeyboard-Android.
+See `HEX_KEYBOARD_NOTICE.md` for the exact source revision and integration
+boundary.

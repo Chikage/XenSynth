@@ -46,7 +46,12 @@ object NativeAudioEngine : NativeAudio {
         return noteId.takeIf { it >= 0 }
     }
 
-    override fun noteOff(noteId: Int) = noteOffNative(noteId)
+    override fun noteOff(noteId: Int) = noteOffNative(noteId, immediate = false)
+
+    override fun noteOffImmediately(noteId: Int) = noteOffNative(noteId, immediate = true)
+
+    override fun setNotePressure(noteId: Int, expression: Int) =
+        setNotePressureNative(noteId, expression.coerceIn(0, 127))
 
     override fun allSoundOff() = allSoundOffNative()
 
@@ -85,7 +90,9 @@ object NativeAudioEngine : NativeAudio {
         delaySeconds: Double
     ): Int
 
-    private external fun noteOffNative(noteId: Int)
+    private external fun noteOffNative(noteId: Int, immediate: Boolean)
+
+    private external fun setNotePressureNative(noteId: Int, expression: Int)
 
     private external fun allSoundOffNative()
 

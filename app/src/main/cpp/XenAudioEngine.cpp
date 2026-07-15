@@ -33,6 +33,8 @@ constexpr int32_t kSampleRate = 44100;
 constexpr int32_t kBufferSizeInBursts = 3;
 constexpr int32_t kPitchClassCount = 12;
 constexpr int32_t kMidiKeyCount = 128;
+constexpr int32_t kMidiExpressionController = 11;
+constexpr size_t kPressureMailboxCount = 2048;
 constexpr int32_t kDrumChannel = 9;
 constexpr int32_t kDrumBank = 128;
 constexpr int32_t kFluidTuningProgramsPerBank = 128;
@@ -73,6 +75,21 @@ constexpr std::array<uint8_t, 32> kMaskedSoundFontKey = {
         0x82, 0x8c, 0x6b, 0x51, 0x12, 0x82, 0x11, 0x70
 };
 
+using PressureMailboxWord = unsigned long long;
+static_assert(sizeof(PressureMailboxWord) == sizeof(uint64_t),
+              "Pressure mailbox requires a 64-bit word");
+static_assert(ATOMIC_LLONG_LOCK_FREE == 2,
+              "Pressure mailbox requires lock-free 64-bit atomics");
+constexpr PressureMailboxWord kPressureExpressionMask = 0x7fULL;
+constexpr PressureMailboxWord kPressureDirtyBit = 0x80ULL;
+constexpr PressureMailboxWord kPressurePayloadMask = 0xffULL;
+constexpr uint32_t kPressureNoteIdShift = 8;
+constexpr PressureMailboxWord kPressureNoteIdMask = 0x7fffffffULL;
+constexpr uint32_t kPressureGenerationShift = 39;
+constexpr PressureMailboxWord kPressureGenerationMask = 0x1ffffffULL;
+constexpr PressureMailboxWord kPressureGenerationBitsMask =
+        kPressureGenerationMask << kPressureGenerationShift;
+
 enum class Sf2ReleaseProfile : int32_t {
     Piano = 0,
     Default = 1,
@@ -104,6 +121,8 @@ struct FluidNote {
     int32_t playbackChannel = 0;
     int32_t key = 0;
     int32_t velocity = 0;
+    int32_t expression = 127;
+    int32_t pressureMailboxIndex = -1;
     int32_t bank = 0;
     int32_t program = 0;
     int32_t startFramesRemaining = 0;
@@ -112,6 +131,10 @@ struct FluidNote {
     Sf2ReleaseProfile profile = Sf2ReleaseProfile::Default;
     bool started = false;
     bool releasing = false;
+};
+
+struct PressureMailbox {
+    std::atomic<PressureMailboxWord> value{0};
 };
 
 struct EmbeddedSoundFontCursor {
@@ -654,11 +677,12 @@ public:
         if (note.started && !startFluidNoteLocked(note)) {
             return -1;
         }
+        note.pressureMailboxIndex = claimPressureMailboxLocked(noteId);
         activeFluidNotes.push_back(note);
         return noteId;
     }
 
-    void noteOff(int noteId) {
+    void noteOff(int noteId, bool immediate) {
         std::lock_guard<std::mutex> lock(synthMutex);
         if (!isFluidReadyLocked()) {
             return;
@@ -671,6 +695,13 @@ public:
             return;
         }
         if (!found->started) {
+            releasePressureMailboxLocked(*found);
+            activeFluidNotes.erase(found);
+            return;
+        }
+        if (immediate) {
+            stopFluidNoteLocked(*found);
+            releasePressureMailboxLocked(*found);
             activeFluidNotes.erase(found);
             return;
         }
@@ -679,7 +710,38 @@ public:
             found->releaseFramesRemaining = releaseFramesForProfile(found->profile);
             if (found->releaseFramesRemaining <= 0) {
                 stopFluidNoteLocked(*found);
+                releasePressureMailboxLocked(*found);
                 activeFluidNotes.erase(found);
+            }
+        }
+    }
+
+    void setNotePressure(int noteId, int expression) {
+        if (noteId <= 0) {
+            return;
+        }
+        // A producer only replaces this note's tagged payload; it never touches synth state.
+        const PressureMailboxWord safeExpression = static_cast<PressureMailboxWord>(
+                clampInt(expression, 0, 127));
+        const size_t start = static_cast<uint32_t>(noteId) % kPressureMailboxCount;
+        for (size_t offset = 0; offset < kPressureMailboxCount; offset++) {
+            PressureMailbox &mailbox = pressureMailboxes[
+                    (start + offset) % kPressureMailboxCount];
+            PressureMailboxWord current = mailbox.value.load(std::memory_order_acquire);
+            const PressureMailboxWord generation = current & kPressureGenerationBitsMask;
+            while (pressureMailboxNoteId(current) == noteId &&
+                   (current & kPressureGenerationBitsMask) == generation) {
+                const PressureMailboxWord next =
+                        (current & ~kPressurePayloadMask) |
+                        safeExpression |
+                        kPressureDirtyBit;
+                if (mailbox.value.compare_exchange_weak(
+                        current,
+                        next,
+                        std::memory_order_release,
+                        std::memory_order_relaxed)) {
+                    return;
+                }
             }
         }
     }
@@ -690,6 +752,7 @@ public:
             fluid_synth_all_sounds_off(fluid.synth, -1);
         }
         activeFluidNotes.clear();
+        clearPressureMailboxesLocked();
         playbackChannelCursor = 0;
     }
 
@@ -767,6 +830,7 @@ private:
         if (isFluidReadyForCallback()) {
             std::lock_guard<std::mutex> lock(synthMutex);
             if (isFluidReadyLocked()) {
+                drainNotePressureLocked();
                 fluid_synth_write_float(fluid.synth, numFrames, out, 0, kChannelCount, out, 1, kChannelCount);
                 handleScheduledFluidNotesLocked(numFrames);
                 hasAudio = true;
@@ -908,6 +972,7 @@ private:
         fluid.soundfontId = 0;
         fluid.loading.store(false, std::memory_order_release);
         activeFluidNotes.clear();
+        clearPressureMailboxesLocked();
         fluidPrograms.fill(FluidProgramState{});
         fluidTunings.fill(FluidTuningState{});
         fluidMidiChannelCount = kSourceMidiChannelCount;
@@ -924,6 +989,7 @@ private:
             fluid_synth_sfunload(fluid.synth, fluid.soundfontId, 1);
             fluid.soundfontId = 0;
             activeFluidNotes.clear();
+            clearPressureMailboxesLocked();
             fluidPrograms.fill(FluidProgramState{});
             fluidTunings.fill(FluidTuningState{});
             playbackChannelCursor = 0;
@@ -1036,7 +1102,111 @@ private:
         if (!ensureTuningForNoteLocked(note.playbackChannel, note.key, pitch)) {
             return false;
         }
+        applyNotePressureLocked(note);
         return fluid_synth_noteon(fluid.synth, note.playbackChannel, note.key, note.velocity) != FLUID_FAILED;
+    }
+
+    void applyNotePressureLocked(const FluidNote &note) {
+        fluid_synth_key_pressure(fluid.synth, note.playbackChannel, note.key, note.expression);
+        if (channelIsolationAvailable) {
+            fluid_synth_cc(
+                    fluid.synth,
+                    note.playbackChannel,
+                    kMidiExpressionController,
+                    note.expression);
+        }
+    }
+
+    static PressureMailboxWord packPressureMailboxValue(
+            int32_t noteId,
+            int32_t expression,
+            bool dirty,
+            PressureMailboxWord generation) {
+        return ((generation & kPressureGenerationMask) << kPressureGenerationShift) |
+               (static_cast<PressureMailboxWord>(static_cast<uint32_t>(noteId))
+                << kPressureNoteIdShift) |
+               static_cast<PressureMailboxWord>(expression) |
+               (dirty ? kPressureDirtyBit : 0ULL);
+    }
+
+    static int32_t pressureMailboxNoteId(PressureMailboxWord value) {
+        return static_cast<int32_t>(
+                (value >> kPressureNoteIdShift) & kPressureNoteIdMask);
+    }
+
+    int32_t claimPressureMailboxLocked(int32_t noteId) {
+        const size_t start = static_cast<uint32_t>(noteId) % kPressureMailboxCount;
+        for (size_t offset = 0; offset < kPressureMailboxCount; offset++) {
+            const size_t index = (start + offset) % kPressureMailboxCount;
+            PressureMailboxWord expected = pressureMailboxes[index].value.load(
+                    std::memory_order_acquire);
+            if (pressureMailboxNoteId(expected) != 0) {
+                continue;
+            }
+            const PressureMailboxWord generation =
+                    ((expected >> kPressureGenerationShift) + 1ULL) &
+                    kPressureGenerationMask;
+            const PressureMailboxWord initial = packPressureMailboxValue(
+                    noteId,
+                    127,
+                    false,
+                    generation);
+            if (pressureMailboxes[index].value.compare_exchange_strong(
+                    expected,
+                    initial,
+                    std::memory_order_release,
+                    std::memory_order_relaxed)) {
+                return static_cast<int32_t>(index);
+            }
+        }
+        return -1;
+    }
+
+    void releasePressureMailboxLocked(const FluidNote &note) {
+        if (note.pressureMailboxIndex < 0 ||
+            note.pressureMailboxIndex >= static_cast<int32_t>(kPressureMailboxCount)) {
+            return;
+        }
+        // Preserve the generation so an in-flight producer cannot hit a reused slot.
+        pressureMailboxes[note.pressureMailboxIndex].value.fetch_and(
+                kPressureGenerationBitsMask,
+                std::memory_order_acq_rel);
+    }
+
+    void clearPressureMailboxesLocked() {
+        for (PressureMailbox &mailbox : pressureMailboxes) {
+            mailbox.value.fetch_and(
+                    kPressureGenerationBitsMask,
+                    std::memory_order_acq_rel);
+        }
+    }
+
+    void drainNotePressureLocked() {
+        for (FluidNote &note : activeFluidNotes) {
+            if (note.pressureMailboxIndex < 0 ||
+                note.pressureMailboxIndex >= static_cast<int32_t>(kPressureMailboxCount)) {
+                continue;
+            }
+            PressureMailbox &mailbox = pressureMailboxes[note.pressureMailboxIndex];
+            PressureMailboxWord current = mailbox.value.load(std::memory_order_acquire);
+            if (pressureMailboxNoteId(current) != note.id ||
+                (current & kPressureDirtyBit) == 0) {
+                continue;
+            }
+            const PressureMailboxWord consumed = current & ~kPressureDirtyBit;
+            if (!mailbox.value.compare_exchange_strong(
+                    current,
+                    consumed,
+                    std::memory_order_acq_rel,
+                    std::memory_order_acquire)) {
+                // A racing producer leaves the mailbox dirty for the next callback.
+                continue;
+            }
+            note.expression = static_cast<int32_t>(consumed & kPressureExpressionMask);
+            if (note.started && !note.releasing) {
+                applyNotePressureLocked(note);
+            }
+        }
     }
 
     void stopFluidNoteLocked(const FluidNote &note) {
@@ -1086,6 +1256,7 @@ private:
                 note->key == key &&
                 note->profile == profile) {
                 stopFluidNoteLocked(*note);
+                releasePressureMailboxLocked(*note);
                 note = activeFluidNotes.erase(note);
             } else {
                 ++note;
@@ -1108,6 +1279,7 @@ private:
                         note->id);
                 note->started = true;
                 if (!startFluidNoteLocked(*note)) {
+                    releasePressureMailboxLocked(*note);
                     note = activeFluidNotes.erase(note);
                     continue;
                 }
@@ -1122,6 +1294,7 @@ private:
                 continue;
             }
             stopFluidNoteLocked(*note);
+            releasePressureMailboxLocked(*note);
             note = activeFluidNotes.erase(note);
         }
     }
@@ -1247,6 +1420,7 @@ private:
     std::array<FluidProgramState, kFluidMidiChannelCount> fluidPrograms{};
     std::array<FluidTuningState, kFluidMidiChannelCount> fluidTunings{};
     std::list<FluidNote> activeFluidNotes;
+    std::array<PressureMailbox, kPressureMailboxCount> pressureMailboxes{};
     std::vector<uint8_t> builtinSoundFont;
     int32_t fluidNoteId = 0;
     int32_t fluidMidiChannelCount = kSourceMidiChannelCount;
@@ -1332,8 +1506,21 @@ Java_icu_ringona_xensynth_audio_NativeAudioEngine_noteOnNative(
 }
 
 JNIEXPORT void JNICALL
-Java_icu_ringona_xensynth_audio_NativeAudioEngine_noteOffNative(JNIEnv *, jclass, jint noteId) {
-    engine.noteOff(noteId);
+Java_icu_ringona_xensynth_audio_NativeAudioEngine_noteOffNative(
+        JNIEnv *,
+        jclass,
+        jint noteId,
+        jboolean immediate) {
+    engine.noteOff(noteId, immediate == JNI_TRUE);
+}
+
+JNIEXPORT void JNICALL
+Java_icu_ringona_xensynth_audio_NativeAudioEngine_setNotePressureNative(
+        JNIEnv *,
+        jclass,
+        jint noteId,
+        jint expression) {
+    engine.setNotePressure(noteId, expression);
 }
 
 JNIEXPORT void JNICALL

@@ -70,6 +70,7 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
@@ -114,6 +115,8 @@ import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import icu.ringona.xensynth.audio.NativeAudioController
+import icu.ringona.xensynth.hexkeyboard.core.HexKey
+import icu.ringona.xensynth.hexkeyboard.ui.HexaKeyTheme
 import icu.ringona.xensynth.midi.MidiDeviceInputManager
 import icu.ringona.xensynth.midi.MidiInputDevice
 import icu.ringona.xensynth.midi.MidiInputEvent
@@ -153,6 +156,7 @@ class MainActivity : ComponentActivity(), RenderFramePacer.InteractionListener {
     private lateinit var stageRoot: LinearLayout
     private lateinit var shellRootFrame: FrameLayout
     private lateinit var waterfallHost: FrameLayout
+    private var hexKeyboardView: View? = null
     private var appBackgroundView: View? = null
     private var waterfallBackdropView: View? = null
     private var toolbarView: View? = null
@@ -176,6 +180,8 @@ class MainActivity : ComponentActivity(), RenderFramePacer.InteractionListener {
     private lateinit var scoreLoader: ScoreLoader
     private val scoreContentParser = ScoreContentParser()
     private val nativeAudioController = NativeAudioController()
+    private val hexKeyboardState = HexKeyboardHostState()
+    private val activeHexNotes = linkedMapOf<Long, Int>()
     private var sourceParsedScore: ParsedScore? = null
     private var midiInputManager: MidiDeviceInputManager? = null
     private val activeMidiNotes = linkedMapOf<MidiNoteKey, MutableList<MidiTrackedNote>>()
@@ -203,11 +209,14 @@ class MainActivity : ComponentActivity(), RenderFramePacer.InteractionListener {
             }
 
             override fun onStateChanged() {
+                hexKeyboardState.updatePlaybackState(nativePlaying, nativeFinished)
                 if (nativePlaying) {
                     RenderFramePacer.notifyContentActive()
                 }
                 if (::waterfallView.isInitialized) {
-                    waterfallView.setPlaybackActive(nativePlaying)
+                    waterfallView.setPlaybackActive(
+                        nativePlaying && keyboardLayoutMode == KeyboardLayoutMode.Linear
+                    )
                 }
                 refreshHighRefreshRateRequest(force = true)
                 updatePlayButtonIcon()
@@ -216,6 +225,7 @@ class MainActivity : ComponentActivity(), RenderFramePacer.InteractionListener {
             }
 
             override fun onPlaybackFinished() {
+                hexKeyboardState.updatePlaybackState(nativePlaying, nativeFinished)
                 refreshHighRefreshRateRequest(force = true)
                 updateStageControls()
                 updateToolbarPlayheadIfNeeded(force = true)
@@ -230,11 +240,13 @@ class MainActivity : ComponentActivity(), RenderFramePacer.InteractionListener {
         get() = nativePlayback.score
         set(value) {
             nativePlayback.score = value
+            hexKeyboardState.updateScore(value)
         }
     private var nativePlayheadSeconds: Double
         get() = nativePlayback.playheadSeconds
         set(value) {
             nativePlayback.playheadSeconds = value
+            hexKeyboardState.updatePlayhead(value)
         }
     private var nativeSpeed: Double
         get() = nativePlayback.speed
@@ -244,6 +256,14 @@ class MainActivity : ComponentActivity(), RenderFramePacer.InteractionListener {
     private var nativeEdo = EDO_DEFAULT
     private var touchKeyboardProgram = GM_PROGRAM_DEFAULT
     private var touchKeyboardProgramControlsMidi = GM_PROGRAM_CONTROLS_MIDI_DEFAULT
+    private var keyboardLayoutMode = KeyboardLayoutMode.Linear
+    private var hexKeyboardColumns = HEX_COLUMNS_DEFAULT
+    private var hexKeyboardRows = HEX_ROWS_DEFAULT
+    private var hexKeyboardStepQ = HEX_STEP_Q_DEFAULT
+    private var hexKeyboardStepR = HEX_STEP_R_DEFAULT
+    private var hexTouchSensitivityPercent = HEX_TOUCH_SENSITIVITY_DEFAULT
+    private var hexPseudoPressureEnabled = HEX_PSEUDO_PRESSURE_DEFAULT
+    private var hexDisplayMode = HEX_DISPLAY_MODE_DEFAULT
     private val nativePlaying: Boolean
         get() = nativePlayback.playing
     private var nativeLoading: Boolean
@@ -255,6 +275,7 @@ class MainActivity : ComponentActivity(), RenderFramePacer.InteractionListener {
         get() = nativePlayback.finished
         set(value) {
             nativePlayback.finished = value
+            hexKeyboardState.updatePlaybackState(nativePlaying, value)
         }
     private var nativeSf2Loading = false
     private var playbackStartSuppressedUntil = 0L
@@ -319,6 +340,8 @@ class MainActivity : ComponentActivity(), RenderFramePacer.InteractionListener {
         playbackUi.updateEdo(nativeEdo, updateProgress = true)
         playbackUi.updateTouchKeyboardProgram(touchKeyboardProgram)
         playbackUi.updateTouchKeyboardProgramMidiOverride(touchKeyboardProgramControlsMidi)
+        syncKeyboardSettingsUiState()
+        syncHexKeyboardRuntimeSettings()
         applyAudioLatency(audioLatencyMs, resetScheduler = false)
         configureFullscreen()
         RenderFramePacer.addInteractionListener(this)
@@ -351,7 +374,10 @@ class MainActivity : ComponentActivity(), RenderFramePacer.InteractionListener {
         startHighRefreshUiPulse()
         nativePlayback.setAudioReady(nativeAudioController.recoverStartedStream())
         midiInputManager?.start()
-        if (::waterfallView.isInitialized) {
+        if (
+            ::waterfallView.isInitialized &&
+            keyboardLayoutMode == KeyboardLayoutMode.Linear
+        ) {
             waterfallView.onHostResume()
         }
     }
@@ -367,6 +393,7 @@ class MainActivity : ComponentActivity(), RenderFramePacer.InteractionListener {
         midiInputManager?.stop()
         connectedMidiDevices.clear()
         stopTrackedMidiNotes()
+        releaseHexKeyboardNotes(immediate = true)
         updateMidiInputStatus(detail = null)
         stopHighRefreshRateKeepAlive()
         stopHighRefreshUiPulse()
@@ -396,6 +423,7 @@ class MainActivity : ComponentActivity(), RenderFramePacer.InteractionListener {
         midiInputManager = null
         connectedMidiDevices.clear()
         stopTrackedMidiNotes()
+        releaseHexKeyboardNotes(immediate = true)
         updateMidiInputStatus(detail = null)
         stopHighRefreshRateKeepAlive()
         stopHighRefreshUiPulse()
@@ -563,6 +591,9 @@ class MainActivity : ComponentActivity(), RenderFramePacer.InteractionListener {
         if (::waterfallView.isInitialized) {
             RenderFramePacer.applyRequestedFrameRate(waterfallView.view, viewFrameRate, force = viewForce)
         }
+        hexKeyboardView?.let { view ->
+            RenderFramePacer.applyRequestedFrameRate(view, viewFrameRate, force = viewForce)
+        }
     }
 
     private fun clearPreferredDisplayMode() {
@@ -652,7 +683,10 @@ class MainActivity : ComponentActivity(), RenderFramePacer.InteractionListener {
             lastHighRefreshUiRequestNanos = frameTimeNanos
             refreshHighRefreshRateRequest(force = true)
         }
-        if (::waterfallView.isInitialized) {
+        if (
+            ::waterfallView.isInitialized &&
+            keyboardLayoutMode == KeyboardLayoutMode.Linear
+        ) {
             waterfallView.requestHighRefreshFrame(frameTimeNanos)
         }
     }
@@ -863,6 +897,16 @@ class MainActivity : ComponentActivity(), RenderFramePacer.InteractionListener {
                         onTouchKeyboardProgramChanged = ::onTouchKeyboardProgramProgressChanged,
                         onTouchKeyboardProgramTextChanged = ::onTouchKeyboardProgramTextChanged,
                         onTouchKeyboardProgramMidiOverrideChanged = ::onTouchKeyboardProgramMidiOverrideChanged,
+                        onKeyboardLayoutChanged = ::onKeyboardLayoutChanged,
+                        onHexColumnsChanged = ::onHexColumnsChanged,
+                        onHexRowsChanged = ::onHexRowsChanged,
+                        onHexStepQChanged = ::onHexStepQChanged,
+                        onHexStepRChanged = ::onHexStepRChanged,
+                        onHexTouchSensitivityChanged = ::onHexTouchSensitivityChanged,
+                        onHexPseudoPressureChanged = ::onHexPseudoPressureChanged,
+                        onHexDisplayModeChanged = ::onHexDisplayModeChanged,
+                        onHexKeyboardPan = hexKeyboardState::panBy,
+                        onHexKeyboardZoom = hexKeyboardState::zoomBy,
                         onAudioLatencyChanged = ::onAudioLatencyChanged,
                         onReverbChanged = ::onReverbChanged,
                         onResetSettingsToDefaults = ::restoreDefaultSettings,
@@ -934,6 +978,32 @@ class MainActivity : ComponentActivity(), RenderFramePacer.InteractionListener {
             )
         }
         waterfallHost = waterfallContainer
+        val hexKeyboardContent = ComposeView(this).apply {
+            setViewCompositionStrategy(ViewCompositionStrategy.DisposeOnViewTreeLifecycleDestroyed)
+            setContent {
+                if (shellUiState.keyboardLayoutMode == KeyboardLayoutMode.Hexagonal) {
+                    HexaKeyTheme {
+                        HexKeyboardHost(
+                            state = hexKeyboardState,
+                            onKeyDown = ::startHexKeyboardNote,
+                            onKeyPressure = ::updateHexKeyboardPressure,
+                            onKeyUp = ::releaseHexKeyboardNote
+                        )
+                    }
+                }
+            }
+        }
+        hexKeyboardView = hexKeyboardContent
+        waterfallContainer.addView(
+            hexKeyboardContent,
+            FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.MATCH_PARENT
+            ).apply {
+                val margin = dp(8)
+                setMargins(margin, margin, margin, margin)
+            }
+        )
         root.addView(waterfallContainer)
 
         bindWaterfallTouchListener(waterfallView)
@@ -944,6 +1014,7 @@ class MainActivity : ComponentActivity(), RenderFramePacer.InteractionListener {
         volumeGestureOverlayView = volumeOverlay
         rootFrame.addView(volumeOverlay)
 
+        applyKeyboardLayoutVisibility()
         updateReadyState()
         return rootFrame
     }
@@ -1023,13 +1094,35 @@ class MainActivity : ComponentActivity(), RenderFramePacer.InteractionListener {
     private fun updateRulerGlassOverlay(surface: WaterfallSurface = waterfallView) {
         rulerGlassOverlayView?.apply {
             appBackgroundView?.let(::setBackdropSource)
-            visibility = if (surface.rendersRulerInternally) {
+            visibility = if (
+                keyboardLayoutMode == KeyboardLayoutMode.Hexagonal ||
+                surface.rendersRulerInternally
+            ) {
                 View.GONE
             } else {
                 View.VISIBLE
             }
             invalidate()
         }
+    }
+
+    private fun applyKeyboardLayoutVisibility() {
+        if (!::waterfallView.isInitialized) return
+        val showHexKeyboard = keyboardLayoutMode == KeyboardLayoutMode.Hexagonal
+        hexKeyboardView?.visibility = if (showHexKeyboard) View.VISIBLE else View.GONE
+        waterfallView.view.visibility = if (showHexKeyboard) View.GONE else View.VISIBLE
+        waterfallBackdropView?.visibility = if (showHexKeyboard) View.GONE else View.VISIBLE
+        waterfallView.setPlaybackActive(nativePlaying && !showHexKeyboard)
+        if (showHexKeyboard) {
+            waterfallView.onHostPause()
+        } else {
+            waterfallView.syncPlayhead(nativePlayheadSeconds)
+            if (lifecycle.currentState.isAtLeast(androidx.lifecycle.Lifecycle.State.RESUMED)) {
+                waterfallView.onHostResume()
+            }
+        }
+        updateRulerGlassOverlay()
+        refreshHighRefreshRateRequest(force = true)
     }
 
     private fun openScorePicker() {
@@ -1191,6 +1284,7 @@ class MainActivity : ComponentActivity(), RenderFramePacer.InteractionListener {
             playbackUi.updateTouchKeyboardProgram(next)
             return
         }
+        releaseHexKeyboardNotes(immediate = true)
         touchKeyboardProgram = next
         playbackUi.updateTouchKeyboardProgram(next)
         persistTouchKeyboardProgram(next)
@@ -1204,6 +1298,90 @@ class MainActivity : ComponentActivity(), RenderFramePacer.InteractionListener {
         touchKeyboardProgramControlsMidi = enabled
         playbackUi.updateTouchKeyboardProgramMidiOverride(enabled)
         persistTouchKeyboardProgramMidiOverride(enabled)
+    }
+
+    private fun onKeyboardLayoutChanged(mode: KeyboardLayoutMode) {
+        if (keyboardLayoutMode == mode) {
+            shellUiState.keyboardLayoutMode = mode
+            return
+        }
+        releaseHexKeyboardNotes(immediate = true)
+        if (::waterfallGestureController.isInitialized) {
+            waterfallGestureController.cancelTouchState()
+        }
+        keyboardLayoutMode = mode
+        syncKeyboardSettingsUiState()
+        persistKeyboardSettings()
+        applyKeyboardLayoutVisibility()
+    }
+
+    private fun onHexColumnsChanged(value: Float) {
+        val next = value.roundToInt().coerceIn(HEX_COLUMNS_MIN, HEX_COLUMNS_MAX)
+        if (hexKeyboardColumns == next) return
+        releaseHexKeyboardNotes(immediate = true)
+        hexKeyboardColumns = next
+        syncKeyboardSettingsUiState()
+        syncHexKeyboardRuntimeSettings()
+        persistKeyboardSettings()
+    }
+
+    private fun onHexRowsChanged(value: Float) {
+        val next = value.roundToInt().coerceIn(HEX_ROWS_MIN, HEX_ROWS_MAX)
+        if (hexKeyboardRows == next) return
+        releaseHexKeyboardNotes(immediate = true)
+        hexKeyboardRows = next
+        syncKeyboardSettingsUiState()
+        syncHexKeyboardRuntimeSettings()
+        persistKeyboardSettings()
+    }
+
+    private fun onHexStepQChanged(value: Float) {
+        val next = value.roundToInt().coerceIn(HEX_STEP_MIN, HEX_STEP_MAX)
+        if (hexKeyboardStepQ == next) return
+        releaseHexKeyboardNotes(immediate = true)
+        hexKeyboardStepQ = next
+        syncKeyboardSettingsUiState()
+        syncHexKeyboardRuntimeSettings()
+        persistKeyboardSettings()
+    }
+
+    private fun onHexStepRChanged(value: Float) {
+        val next = value.roundToInt().coerceIn(HEX_STEP_MIN, HEX_STEP_MAX)
+        if (hexKeyboardStepR == next) return
+        releaseHexKeyboardNotes(immediate = true)
+        hexKeyboardStepR = next
+        syncKeyboardSettingsUiState()
+        syncHexKeyboardRuntimeSettings()
+        persistKeyboardSettings()
+    }
+
+    private fun onHexTouchSensitivityChanged(value: Float) {
+        val next = value.roundToInt().coerceIn(
+            HEX_TOUCH_SENSITIVITY_MIN,
+            HEX_TOUCH_SENSITIVITY_MAX
+        )
+        if (hexTouchSensitivityPercent == next) return
+        hexTouchSensitivityPercent = next
+        syncKeyboardSettingsUiState()
+        syncHexKeyboardRuntimeSettings()
+        persistKeyboardSettings()
+    }
+
+    private fun onHexPseudoPressureChanged(enabled: Boolean) {
+        if (hexPseudoPressureEnabled == enabled) return
+        hexPseudoPressureEnabled = enabled
+        syncKeyboardSettingsUiState()
+        syncHexKeyboardRuntimeSettings()
+        persistKeyboardSettings()
+    }
+
+    private fun onHexDisplayModeChanged(mode: String) {
+        val next = mode.takeIf { it in HEX_DISPLAY_MODES } ?: return
+        if (hexDisplayMode == next) return
+        hexDisplayMode = next
+        syncKeyboardSettingsUiState()
+        syncHexKeyboardRuntimeSettings()
+        persistKeyboardSettings()
     }
 
     private fun onAudioLatencyChanged(value: Float) {
@@ -1258,12 +1436,33 @@ class MainActivity : ComponentActivity(), RenderFramePacer.InteractionListener {
         applyVolumeGain(VOLUME_GAIN_DEFAULT)
         updateTouchKeyboardProgram(GM_PROGRAM_DEFAULT)
         onTouchKeyboardProgramMidiOverrideChanged(GM_PROGRAM_CONTROLS_MIDI_DEFAULT)
+        keyboardLayoutMode = KeyboardLayoutMode.Linear
+        hexKeyboardColumns = HEX_COLUMNS_DEFAULT
+        hexKeyboardRows = HEX_ROWS_DEFAULT
+        hexKeyboardStepQ = HEX_STEP_Q_DEFAULT
+        hexKeyboardStepR = HEX_STEP_R_DEFAULT
+        hexTouchSensitivityPercent = HEX_TOUCH_SENSITIVITY_DEFAULT
+        hexPseudoPressureEnabled = HEX_PSEUDO_PRESSURE_DEFAULT
+        hexDisplayMode = HEX_DISPLAY_MODE_DEFAULT
+        syncKeyboardSettingsUiState()
+        releaseHexKeyboardNotes(immediate = true)
+        hexKeyboardState.resetViewport()
+        syncHexKeyboardRuntimeSettings()
+        applyKeyboardLayoutVisibility()
         applyReverbMix(REVERB_DEFAULT)
         applyAudioLatency(AUDIO_LATENCY_DEFAULT_MS, resetScheduler = true)
         settingsPreferences().edit()
             .putInt(PREF_EDO, EDO_DEFAULT)
             .putInt(PREF_TOUCH_KEYBOARD_PROGRAM, GM_PROGRAM_DEFAULT)
             .putBoolean(PREF_TOUCH_KEYBOARD_PROGRAM_CONTROLS_MIDI, GM_PROGRAM_CONTROLS_MIDI_DEFAULT)
+            .putString(PREF_KEYBOARD_LAYOUT, KeyboardLayoutMode.Linear.preferenceValue)
+            .putInt(PREF_HEX_COLUMNS, HEX_COLUMNS_DEFAULT)
+            .putInt(PREF_HEX_ROWS, HEX_ROWS_DEFAULT)
+            .putInt(PREF_HEX_STEP_Q, HEX_STEP_Q_DEFAULT)
+            .putInt(PREF_HEX_STEP_R, HEX_STEP_R_DEFAULT)
+            .putInt(PREF_HEX_TOUCH_SENSITIVITY, HEX_TOUCH_SENSITIVITY_DEFAULT)
+            .putBoolean(PREF_HEX_PSEUDO_PRESSURE, HEX_PSEUDO_PRESSURE_DEFAULT)
+            .putString(PREF_HEX_DISPLAY_MODE, HEX_DISPLAY_MODE_DEFAULT)
             .putInt(PREF_REVERB, REVERB_DEFAULT)
             .putInt(PREF_AUDIO_LATENCY_MS, AUDIO_LATENCY_DEFAULT_MS)
             .apply()
@@ -1389,7 +1588,6 @@ class MainActivity : ComponentActivity(), RenderFramePacer.InteractionListener {
             offsetCents = displayState.waterfallOffsetCents
         )
         fallback.syncPlayhead(nativePlayheadSeconds)
-        fallback.setPlaybackActive(nativePlaying)
         fallback.setRefreshRateHints(
             surfaceFrameRateEnabled = refreshRateExperimentMode.surfaceFrameRateEnabled,
             viewFrameRateEnabled = refreshRateExperimentMode.viewRequestedFrameRateEnabled
@@ -1399,10 +1597,7 @@ class MainActivity : ComponentActivity(), RenderFramePacer.InteractionListener {
         waterfallGestureController = createWaterfallGestureController(fallback)
         waterfallHost.addView(fallback.view, failedIndex, failedLayoutParams)
         bindWaterfallTouchListener(fallback)
-        updateRulerGlassOverlay(fallback)
-        if (lifecycle.currentState.isAtLeast(androidx.lifecycle.Lifecycle.State.RESUMED)) {
-            fallback.onHostResume()
-        }
+        applyKeyboardLayoutVisibility()
         setStatusText("OpenGL renderer unavailable; using Canvas")
         refreshHighRefreshRateRequest(force = true)
     }
@@ -1495,6 +1690,7 @@ class MainActivity : ComponentActivity(), RenderFramePacer.InteractionListener {
         }.onSuccess { tuning ->
             val guide = tuning.scaleGuide
             currentScaleGuide = guide
+            syncHexKeyboardRuntimeSettings()
             waterfallView.setScaleGuide(guide)
             onOffsetCentsChanged(tuning.offsetCents.toFloat())
             rulerGlassOverlayView?.invalidate()
@@ -1515,6 +1711,7 @@ class MainActivity : ComponentActivity(), RenderFramePacer.InteractionListener {
             return
         }
         currentScaleGuide = defaultScaleGuide
+        syncHexKeyboardRuntimeSettings()
         if (::waterfallView.isInitialized) {
             waterfallView.setScaleGuide(defaultScaleGuide)
             rulerGlassOverlayView?.invalidate()
@@ -1586,7 +1783,11 @@ class MainActivity : ComponentActivity(), RenderFramePacer.InteractionListener {
         protectFromStatus: Boolean = false
     ) {
         val next = value.coerceIn(0, EDO_MAX)
+        if (nativeEdo != next) {
+            releaseHexKeyboardNotes(immediate = true)
+        }
         nativeEdo = next
+        syncHexKeyboardRuntimeSettings()
         persistEdo(next)
         waterfallView.setOctaveDivisions(next)
         rulerGlassOverlayView?.invalidate()
@@ -1609,6 +1810,28 @@ class MainActivity : ComponentActivity(), RenderFramePacer.InteractionListener {
             PREF_TOUCH_KEYBOARD_PROGRAM_CONTROLS_MIDI,
             GM_PROGRAM_CONTROLS_MIDI_DEFAULT
         )
+        keyboardLayoutMode = KeyboardLayoutMode.fromPreference(
+            prefs.getString(PREF_KEYBOARD_LAYOUT, KeyboardLayoutMode.Linear.preferenceValue)
+        )
+        hexKeyboardColumns = prefs.getInt(PREF_HEX_COLUMNS, HEX_COLUMNS_DEFAULT)
+            .coerceIn(HEX_COLUMNS_MIN, HEX_COLUMNS_MAX)
+        hexKeyboardRows = prefs.getInt(PREF_HEX_ROWS, HEX_ROWS_DEFAULT)
+            .coerceIn(HEX_ROWS_MIN, HEX_ROWS_MAX)
+        hexKeyboardStepQ = prefs.getInt(PREF_HEX_STEP_Q, HEX_STEP_Q_DEFAULT)
+            .coerceIn(HEX_STEP_MIN, HEX_STEP_MAX)
+        hexKeyboardStepR = prefs.getInt(PREF_HEX_STEP_R, HEX_STEP_R_DEFAULT)
+            .coerceIn(HEX_STEP_MIN, HEX_STEP_MAX)
+        hexTouchSensitivityPercent = prefs.getInt(
+            PREF_HEX_TOUCH_SENSITIVITY,
+            HEX_TOUCH_SENSITIVITY_DEFAULT
+        ).coerceIn(HEX_TOUCH_SENSITIVITY_MIN, HEX_TOUCH_SENSITIVITY_MAX)
+        hexPseudoPressureEnabled = prefs.getBoolean(
+            PREF_HEX_PSEUDO_PRESSURE,
+            HEX_PSEUDO_PRESSURE_DEFAULT
+        )
+        hexDisplayMode = prefs.getString(PREF_HEX_DISPLAY_MODE, HEX_DISPLAY_MODE_DEFAULT)
+            ?.takeIf { it in HEX_DISPLAY_MODES }
+            ?: HEX_DISPLAY_MODE_DEFAULT
         reverbValue = prefs.getInt(PREF_REVERB, REVERB_DEFAULT)
             .coerceIn(REVERB_MIN, REVERB_MAX)
         audioLatencyMs = roundedAudioLatencyMs(
@@ -1632,6 +1855,97 @@ class MainActivity : ComponentActivity(), RenderFramePacer.InteractionListener {
         settingsPreferences().edit()
             .putBoolean(PREF_TOUCH_KEYBOARD_PROGRAM_CONTROLS_MIDI, enabled)
             .apply()
+    }
+
+    private fun syncKeyboardSettingsUiState() {
+        shellUiState.keyboardLayoutMode = keyboardLayoutMode
+        shellUiState.hexKeyboardColumns = hexKeyboardColumns
+        shellUiState.hexKeyboardRows = hexKeyboardRows
+        shellUiState.hexKeyboardStepQ = hexKeyboardStepQ
+        shellUiState.hexKeyboardStepR = hexKeyboardStepR
+        shellUiState.hexTouchSensitivityPercent = hexTouchSensitivityPercent
+        shellUiState.hexPseudoPressureEnabled = hexPseudoPressureEnabled
+        shellUiState.hexDisplayMode = hexDisplayMode
+    }
+
+    private fun persistKeyboardSettings() {
+        settingsPreferences().edit()
+            .putString(PREF_KEYBOARD_LAYOUT, keyboardLayoutMode.preferenceValue)
+            .putInt(PREF_HEX_COLUMNS, hexKeyboardColumns)
+            .putInt(PREF_HEX_ROWS, hexKeyboardRows)
+            .putInt(PREF_HEX_STEP_Q, hexKeyboardStepQ)
+            .putInt(PREF_HEX_STEP_R, hexKeyboardStepR)
+            .putInt(PREF_HEX_TOUCH_SENSITIVITY, hexTouchSensitivityPercent)
+            .putBoolean(PREF_HEX_PSEUDO_PRESSURE, hexPseudoPressureEnabled)
+            .putString(PREF_HEX_DISPLAY_MODE, hexDisplayMode)
+            .apply()
+    }
+
+    private fun syncHexKeyboardRuntimeSettings() {
+        hexKeyboardState.applySettings(
+            columns = hexKeyboardColumns,
+            rows = hexKeyboardRows,
+            edo = nativeEdo,
+            stepQ = hexKeyboardStepQ,
+            stepR = hexKeyboardStepR,
+            touchSensitivityPercent = hexTouchSensitivityPercent,
+            pseudoPressureEnabled = hexPseudoPressureEnabled,
+            displayModeValue = hexDisplayMode,
+            scaleGuide = currentScaleGuide
+        )
+    }
+
+    private fun startHexKeyboardNote(pointerId: Long, key: HexKey, velocity: Int) {
+        releaseHexKeyboardNote(pointerId)
+        val playbackPitch = hexKeyboardPlaybackPitch(
+            step = key.step,
+            edo = nativeEdo,
+            scaleGuide = currentScaleGuide
+        ) ?: return
+        if (!playbackPitch.isFinite()) return
+        val playbackKey = playbackPitch.roundToInt()
+        if (playbackKey !in MIDI_PITCH_MIN..MIDI_PITCH_MAX) return
+
+        if (!nativeAudioController.ready) {
+            nativePlayback.setAudioReady(nativeAudioController.recoverStartedStream())
+        }
+        if (!canUseNativeAudio()) {
+            prepareDefaultSoundFont()
+            return
+        }
+        nativeAudioController.noteOn(
+            key = playbackKey,
+            velocity = velocity.coerceIn(MIDI_VELOCITY_MIN, MIDI_VELOCITY_MAX),
+            cents = ((playbackPitch - playbackKey) * 100.0).toFloat(),
+            program = touchKeyboardProgram
+        )?.let { noteId ->
+            activeHexNotes[pointerId] = noteId
+        }
+    }
+
+    private fun updateHexKeyboardPressure(pointerId: Long, expression: Int) {
+        activeHexNotes[pointerId]?.let { noteId ->
+            nativeAudioController.setNotePressure(noteId, expression.coerceIn(0, 127))
+        }
+    }
+
+    private fun releaseHexKeyboardNote(pointerId: Long) {
+        activeHexNotes.remove(pointerId)?.let(nativeAudioController::noteOff)
+    }
+
+    private fun releaseHexKeyboardNotes(immediate: Boolean) {
+        if (immediate) {
+            hexKeyboardState.cancelTouches()
+        }
+        val notes = activeHexNotes.values.toList()
+        activeHexNotes.clear()
+        notes.forEach { noteId ->
+            if (immediate) {
+                nativeAudioController.noteOffImmediately(noteId)
+            } else {
+                nativeAudioController.noteOff(noteId)
+            }
+        }
     }
 
     private fun persistReverb(value: Int) {
@@ -1765,7 +2079,11 @@ class MainActivity : ComponentActivity(), RenderFramePacer.InteractionListener {
     }
 
     private fun updateWaterfallPlayheadFrame() {
-        if (!::waterfallView.isInitialized) {
+        hexKeyboardState.updatePlayhead(nativePlayheadSeconds)
+        if (
+            !::waterfallView.isInitialized ||
+            keyboardLayoutMode == KeyboardLayoutMode.Hexagonal
+        ) {
             return
         }
         waterfallView.setPlayhead(nativePlayheadSeconds)
@@ -2060,6 +2378,14 @@ class MainActivity : ComponentActivity(), RenderFramePacer.InteractionListener {
         const val PREF_EDO = "edo"
         const val PREF_TOUCH_KEYBOARD_PROGRAM = "touch_keyboard_program"
         const val PREF_TOUCH_KEYBOARD_PROGRAM_CONTROLS_MIDI = "touch_keyboard_program_controls_midi"
+        const val PREF_KEYBOARD_LAYOUT = "keyboard_layout"
+        const val PREF_HEX_COLUMNS = "hex_keyboard_columns"
+        const val PREF_HEX_ROWS = "hex_keyboard_rows"
+        const val PREF_HEX_STEP_Q = "hex_keyboard_step_q"
+        const val PREF_HEX_STEP_R = "hex_keyboard_step_r"
+        const val PREF_HEX_TOUCH_SENSITIVITY = "hex_touch_sensitivity_percent"
+        const val PREF_HEX_PSEUDO_PRESSURE = "hex_pseudo_pressure_enabled"
+        const val PREF_HEX_DISPLAY_MODE = "hex_display_mode"
         const val PREF_REVERB = "reverb"
         const val PREF_AUDIO_LATENCY_MS = "audio_latency_ms"
         const val SPEED_MIN = 0.2
@@ -2096,6 +2422,22 @@ class MainActivity : ComponentActivity(), RenderFramePacer.InteractionListener {
         const val GM_PROGRAM_MAX = 127
         const val GM_PROGRAM_DEFAULT = 0
         const val GM_PROGRAM_CONTROLS_MIDI_DEFAULT = false
+        const val HEX_COLUMNS_MIN = 4
+        const val HEX_COLUMNS_MAX = 64
+        const val HEX_COLUMNS_DEFAULT = 35
+        const val HEX_ROWS_MIN = 3
+        const val HEX_ROWS_MAX = 32
+        const val HEX_ROWS_DEFAULT = 8
+        const val HEX_STEP_MIN = -200
+        const val HEX_STEP_MAX = 200
+        const val HEX_STEP_Q_DEFAULT = 9
+        const val HEX_STEP_R_DEFAULT = 4
+        const val HEX_TOUCH_SENSITIVITY_MIN = 100
+        const val HEX_TOUCH_SENSITIVITY_MAX = 150
+        const val HEX_TOUCH_SENSITIVITY_DEFAULT = 120
+        const val HEX_PSEUDO_PRESSURE_DEFAULT = true
+        const val HEX_DISPLAY_MODE_DEFAULT = "pitch"
+        val HEX_DISPLAY_MODES = setOf("coordinates", "pitch", "period")
         const val MIDI_PREVIEW_POINTER_BASE = 20_000
         const val MIDI_PREVIEW_POINTER_MAX = 120_000
         const val TAG = "XenSynth"
@@ -2203,6 +2545,16 @@ private fun XenToolbar(
     onTouchKeyboardProgramChanged: (Float) -> Unit,
     onTouchKeyboardProgramTextChanged: (Int) -> Unit,
     onTouchKeyboardProgramMidiOverrideChanged: (Boolean) -> Unit,
+    onKeyboardLayoutChanged: (KeyboardLayoutMode) -> Unit,
+    onHexColumnsChanged: (Float) -> Unit,
+    onHexRowsChanged: (Float) -> Unit,
+    onHexStepQChanged: (Float) -> Unit,
+    onHexStepRChanged: (Float) -> Unit,
+    onHexTouchSensitivityChanged: (Float) -> Unit,
+    onHexPseudoPressureChanged: (Boolean) -> Unit,
+    onHexDisplayModeChanged: (String) -> Unit,
+    onHexKeyboardPan: (Offset) -> Unit,
+    onHexKeyboardZoom: (Float) -> Unit,
     onAudioLatencyChanged: (Float) -> Unit,
     onReverbChanged: (Float) -> Unit,
     onResetSettingsToDefaults: () -> Unit,
@@ -2363,6 +2715,14 @@ private fun XenToolbar(
                 onTouchKeyboardProgramChanged = onTouchKeyboardProgramChanged,
                 onTouchKeyboardProgramTextChanged = onTouchKeyboardProgramTextChanged,
                 onTouchKeyboardProgramMidiOverrideChanged = onTouchKeyboardProgramMidiOverrideChanged,
+                onKeyboardLayoutChanged = onKeyboardLayoutChanged,
+                onHexColumnsChanged = onHexColumnsChanged,
+                onHexRowsChanged = onHexRowsChanged,
+                onHexStepQChanged = onHexStepQChanged,
+                onHexStepRChanged = onHexStepRChanged,
+                onHexTouchSensitivityChanged = onHexTouchSensitivityChanged,
+                onHexPseudoPressureChanged = onHexPseudoPressureChanged,
+                onHexDisplayModeChanged = onHexDisplayModeChanged,
                 onAudioLatencyChanged = onAudioLatencyChanged,
                 onReverbChanged = onReverbChanged,
                 onResetSettingsToDefaults = onResetSettingsToDefaults,
@@ -2378,6 +2738,14 @@ private fun XenToolbar(
                 modifier = Modifier
                     .weight(1f)
                     .height(40.dp)
+                    .pointerInput(state.keyboardLayoutMode) {
+                        if (state.keyboardLayoutMode == KeyboardLayoutMode.Hexagonal) {
+                            detectHexKeyboardViewportGestures(
+                                onPan = onHexKeyboardPan,
+                                onZoom = onHexKeyboardZoom
+                            )
+                        }
+                    }
                     .padding(start = 2.dp),
                 verticalArrangement = Arrangement.Center,
                 horizontalAlignment = Alignment.End
@@ -2929,14 +3297,28 @@ private fun ToolbarSettingsMenu(
     onTouchKeyboardProgramChanged: (Float) -> Unit,
     onTouchKeyboardProgramTextChanged: (Int) -> Unit,
     onTouchKeyboardProgramMidiOverrideChanged: (Boolean) -> Unit,
+    onKeyboardLayoutChanged: (KeyboardLayoutMode) -> Unit,
+    onHexColumnsChanged: (Float) -> Unit,
+    onHexRowsChanged: (Float) -> Unit,
+    onHexStepQChanged: (Float) -> Unit,
+    onHexStepRChanged: (Float) -> Unit,
+    onHexTouchSensitivityChanged: (Float) -> Unit,
+    onHexPseudoPressureChanged: (Boolean) -> Unit,
+    onHexDisplayModeChanged: (String) -> Unit,
     onAudioLatencyChanged: (Float) -> Unit,
     onReverbChanged: (Float) -> Unit,
     onResetSettingsToDefaults: () -> Unit,
     onProgramTextFieldBoundsChanged: (Rect?) -> Unit
 ) {
     var expanded by remember { mutableStateOf(false) }
-    var audioLatencySliderValue by remember { mutableStateOf(state.audioLatencyMs.toFloat()) }
+    var audioLatencySliderValue by remember { mutableFloatStateOf(state.audioLatencyMs.toFloat()) }
     var audioLatencyDragging by remember { mutableStateOf(false) }
+    var hexColumnsSliderValue by remember { mutableFloatStateOf(state.hexKeyboardColumns.toFloat()) }
+    var hexRowsSliderValue by remember { mutableFloatStateOf(state.hexKeyboardRows.toFloat()) }
+    var hexStepQSliderValue by remember { mutableFloatStateOf(state.hexKeyboardStepQ.toFloat()) }
+    var hexStepRSliderValue by remember { mutableFloatStateOf(state.hexKeyboardStepR.toFloat()) }
+    var hexTouchSliderValue by remember { mutableFloatStateOf(state.hexTouchSensitivityPercent.toFloat()) }
+    var hexSettingsDirty by remember { mutableStateOf(false) }
     var resettingSettings by remember { mutableStateOf(false) }
     val gearRotation = remember { Animatable(0f) }
     val resetScope = rememberCoroutineScope()
@@ -2953,18 +3335,45 @@ private fun ToolbarSettingsMenu(
         onAudioLatencyChanged(audioLatencySliderValue)
     }
 
+    fun commitHexSettings() {
+        if (!hexSettingsDirty) return
+        hexSettingsDirty = false
+        onHexColumnsChanged(hexColumnsSliderValue)
+        onHexRowsChanged(hexRowsSliderValue)
+        onHexStepQChanged(hexStepQSliderValue)
+        onHexStepRChanged(hexStepRSliderValue)
+        onHexTouchSensitivityChanged(hexTouchSliderValue)
+    }
+
     LaunchedEffect(expanded) {
         if (!expanded) {
             onProgramTextFieldBoundsChanged(null)
             if (audioLatencyDragging) {
                 commitAudioLatency()
             }
+            commitHexSettings()
         }
     }
 
     LaunchedEffect(state.audioLatencyMs) {
         if (!audioLatencyDragging) {
             audioLatencySliderValue = state.audioLatencyMs.toFloat()
+        }
+    }
+
+    LaunchedEffect(
+        state.hexKeyboardColumns,
+        state.hexKeyboardRows,
+        state.hexKeyboardStepQ,
+        state.hexKeyboardStepR,
+        state.hexTouchSensitivityPercent
+    ) {
+        if (!hexSettingsDirty) {
+            hexColumnsSliderValue = state.hexKeyboardColumns.toFloat()
+            hexRowsSliderValue = state.hexKeyboardRows.toFloat()
+            hexStepQSliderValue = state.hexKeyboardStepQ.toFloat()
+            hexStepRSliderValue = state.hexKeyboardStepR.toFloat()
+            hexTouchSliderValue = state.hexTouchSensitivityPercent.toFloat()
         }
     }
 
@@ -3041,6 +3450,117 @@ private fun ToolbarSettingsMenu(
                 .background(XenPanel)
                 .width(COMPACT_SLIDER_WIDTH_DP.dp)
         ) {
+            SettingsChoiceRow(
+                label = "LAYOUT",
+                selectedValue = state.keyboardLayoutMode.preferenceValue,
+                choices = KeyboardLayoutMode.entries.map { it.preferenceValue to it.label },
+                onSelected = { value ->
+                    onKeyboardLayoutChanged(KeyboardLayoutMode.fromPreference(value))
+                }
+            )
+            if (state.keyboardLayoutMode == KeyboardLayoutMode.Hexagonal) {
+                SettingsChoiceRow(
+                    label = "VIEW",
+                    selectedValue = state.hexDisplayMode,
+                    choices = listOf(
+                        "coordinates" to "GRID",
+                        "pitch" to "PITCH",
+                        "period" to "PERIOD"
+                    ),
+                    onSelected = onHexDisplayModeChanged
+                )
+                SettingsValueRow(
+                    label = "COLUMNS",
+                    value = hexColumnsSliderValue.roundToInt().toString(),
+                    enabled = true
+                )
+                CompactSlider(
+                    value = hexColumnsSliderValue,
+                    onValueChange = { value ->
+                        hexSettingsDirty = true
+                        hexColumnsSliderValue = value
+                    },
+                    onValueChangeFinished = ::commitHexSettings,
+                    range = MainActivity.HEX_COLUMNS_MIN.toFloat()..
+                        MainActivity.HEX_COLUMNS_MAX.toFloat(),
+                    steps = MainActivity.HEX_COLUMNS_MAX - MainActivity.HEX_COLUMNS_MIN - 1,
+                    enabled = true
+                )
+                SettingsValueRow(
+                    label = "ROWS",
+                    value = hexRowsSliderValue.roundToInt().toString(),
+                    enabled = true
+                )
+                CompactSlider(
+                    value = hexRowsSliderValue,
+                    onValueChange = { value ->
+                        hexSettingsDirty = true
+                        hexRowsSliderValue = value
+                    },
+                    onValueChangeFinished = ::commitHexSettings,
+                    range = MainActivity.HEX_ROWS_MIN.toFloat()..MainActivity.HEX_ROWS_MAX.toFloat(),
+                    steps = MainActivity.HEX_ROWS_MAX - MainActivity.HEX_ROWS_MIN - 1,
+                    enabled = true
+                )
+                SettingsValueRow(
+                    label = "Q STEP",
+                    value = hexStepQSliderValue.roundToInt().toString(),
+                    enabled = true
+                )
+                CompactSlider(
+                    value = hexStepQSliderValue,
+                    onValueChange = { value ->
+                        hexSettingsDirty = true
+                        hexStepQSliderValue = value
+                    },
+                    onValueChangeFinished = ::commitHexSettings,
+                    range = MainActivity.HEX_STEP_MIN.toFloat()..MainActivity.HEX_STEP_MAX.toFloat(),
+                    steps = MainActivity.HEX_STEP_MAX - MainActivity.HEX_STEP_MIN - 1,
+                    enabled = true,
+                    showProgressTrack = false
+                )
+                SettingsValueRow(
+                    label = "R STEP",
+                    value = hexStepRSliderValue.roundToInt().toString(),
+                    enabled = true
+                )
+                CompactSlider(
+                    value = hexStepRSliderValue,
+                    onValueChange = { value ->
+                        hexSettingsDirty = true
+                        hexStepRSliderValue = value
+                    },
+                    onValueChangeFinished = ::commitHexSettings,
+                    range = MainActivity.HEX_STEP_MIN.toFloat()..MainActivity.HEX_STEP_MAX.toFloat(),
+                    steps = MainActivity.HEX_STEP_MAX - MainActivity.HEX_STEP_MIN - 1,
+                    enabled = true,
+                    showProgressTrack = false
+                )
+                SettingsValueRow(
+                    label = "TOUCH",
+                    value = "${hexTouchSliderValue.roundToInt()}%",
+                    enabled = true
+                )
+                CompactSlider(
+                    value = hexTouchSliderValue,
+                    onValueChange = { value ->
+                        hexSettingsDirty = true
+                        hexTouchSliderValue = value
+                    },
+                    onValueChangeFinished = ::commitHexSettings,
+                    range = MainActivity.HEX_TOUCH_SENSITIVITY_MIN.toFloat()..
+                        MainActivity.HEX_TOUCH_SENSITIVITY_MAX.toFloat(),
+                    steps = MainActivity.HEX_TOUCH_SENSITIVITY_MAX -
+                        MainActivity.HEX_TOUCH_SENSITIVITY_MIN - 1,
+                    enabled = true
+                )
+                SettingsToggleRow(
+                    label = "PRESSURE",
+                    checked = state.hexPseudoPressureEnabled,
+                    enabled = true,
+                    onCheckedChange = onHexPseudoPressureChanged
+                )
+            }
             SettingsTextFieldRow(
                 label = "PROG NUM",
                 inputValue = state.touchKeyboardProgram.toString(),
@@ -3236,6 +3756,98 @@ private fun SettingsValueRow(
             overflow = TextOverflow.Ellipsis,
             textAlign = TextAlign.End,
             fontFamily = FontFamily.Monospace
+        )
+    }
+}
+
+@Composable
+private fun SettingsChoiceRow(
+    label: String,
+    selectedValue: String,
+    choices: List<Pair<String, String>>,
+    onSelected: (String) -> Unit
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(38.dp)
+            .padding(horizontal = 8.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Text(
+            modifier = Modifier.width(48.dp),
+            text = label,
+            color = XenToolbarText,
+            fontSize = 10.sp,
+            lineHeight = 11.sp,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            fontFamily = FontFamily.Monospace
+        )
+        Row(
+            modifier = Modifier
+                .weight(1f)
+                .height(26.dp)
+                .clip(RoundedCornerShape(4.dp))
+                .background(XenMetricStroke.copy(alpha = 0.30f)),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            choices.forEach { (value, title) ->
+                val selected = selectedValue == value
+                Box(
+                    modifier = Modifier
+                        .weight(1f)
+                        .fillMaxHeight()
+                        .background(if (selected) XenActive else ComposeColor.Transparent)
+                        .clickable { onSelected(value) },
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text(
+                        text = title,
+                        color = if (selected) ComposeColor.White else XenMuted,
+                        fontSize = 9.sp,
+                        lineHeight = 10.sp,
+                        maxLines = 1,
+                        overflow = TextOverflow.Clip,
+                        textAlign = TextAlign.Center,
+                        fontFamily = FontFamily.Monospace
+                    )
+                }
+            }
+        }
+    }
+
+}
+
+@Composable
+private fun SettingsToggleRow(
+    label: String,
+    checked: Boolean,
+    enabled: Boolean,
+    onCheckedChange: (Boolean) -> Unit
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(36.dp)
+            .padding(horizontal = 12.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Text(
+            modifier = Modifier.weight(1f),
+            text = label,
+            color = if (enabled) XenToolbarText else XenMuted,
+            fontSize = 11.sp,
+            lineHeight = 12.sp,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            fontFamily = FontFamily.Monospace
+        )
+        Switch(
+            checked = checked,
+            onCheckedChange = onCheckedChange,
+            enabled = enabled,
+            modifier = Modifier.scale(0.78f)
         )
     }
 }

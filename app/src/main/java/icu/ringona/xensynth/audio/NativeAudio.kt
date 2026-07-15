@@ -22,6 +22,8 @@ interface NativeAudio {
     ): Int?
 
     fun noteOff(noteId: Int)
+    fun noteOffImmediately(noteId: Int) = noteOff(noteId)
+    fun setNotePressure(noteId: Int, expression: Int) = Unit
     fun allSoundOff()
     fun setGain(gain: Float)
     fun setReverb(value: Int)
