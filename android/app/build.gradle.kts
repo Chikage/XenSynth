@@ -36,11 +36,29 @@ android {
         }
     }
 
+    signingConfigs {
+        if (project.hasProperty("sign.store.file") &&
+            project.hasProperty("sign.store.password") &&
+            project.hasProperty("sign.key.alias") &&
+            project.hasProperty("sign.key.password")
+        ) {
+            val configuredStoreFile = file(project.property("sign.store.file") as String)
+            if (configuredStoreFile.isFile) {
+                create("shared") {
+                    storeFile = configuredStoreFile
+                    storePassword = project.property("sign.store.password") as String
+                    keyAlias = project.property("sign.key.alias") as String
+                    keyPassword = project.property("sign.key.password") as String
+                }
+            }
+        }
+    }
+
     buildTypes {
-        release {
-            // TODO: Add your own signing config for the release build.
-            // Signing with the debug keys for now, so `flutter run --release` works.
-            signingConfig = signingConfigs.getByName("debug")
+        configureEach {
+            signingConfigs.findByName("shared")?.let {
+                signingConfig = it
+            }
         }
     }
 

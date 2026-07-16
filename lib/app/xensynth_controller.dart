@@ -511,7 +511,6 @@ class XenSynthController extends ChangeNotifier {
         playhead = duration;
         playing = false;
         _stopClock();
-        unawaited(_native.stop());
       } else {
         playhead = next;
       }
