@@ -435,6 +435,16 @@ class _IntegerInputRowState extends State<_IntegerInputRow> {
     if (value != widget.value) widget.onChanged(value);
   }
 
+  void _step(int delta) {
+    final parsed = int.tryParse(_controller.text);
+    final current = (parsed ?? widget.value)
+        .clamp(widget.min, widget.max)
+        .toInt();
+    final value = (current + delta).clamp(widget.min, widget.max).toInt();
+    _setText(value);
+    if (value != widget.value) widget.onChanged(value);
+  }
+
   void _commit() {
     final parsed = int.tryParse(_controller.text);
     final value = (parsed ?? widget.value)
@@ -478,8 +488,12 @@ class _IntegerInputRowState extends State<_IntegerInputRow> {
                   ),
                 ),
               ),
+              _CompactIconButton(
+                onPressed: widget.value <= widget.min ? null : () => _step(-1),
+                icon: Icons.remove_rounded,
+              ),
               SizedBox(
-                width: 58,
+                width: 46,
                 height: 26,
                 child: TextField(
                   key: widget.fieldKey,
@@ -517,7 +531,10 @@ class _IntegerInputRowState extends State<_IntegerInputRow> {
                   onSubmitted: (_) => _commit(),
                 ),
               ),
-              const SizedBox(width: 5),
+              _CompactIconButton(
+                onPressed: widget.value >= widget.max ? null : () => _step(1),
+                icon: Icons.add_rounded,
+              ),
             ],
           ),
         ),

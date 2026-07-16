@@ -67,13 +67,11 @@ class _XenSynthScreenState extends State<XenSynthScreen>
                 Positioned.fill(
                   child: ColoredBox(
                     color: AppPalette.background,
-                    child: settings.layoutMode == KeyboardLayoutMode.linear
-                        ? Image.asset(
-                            'assets/images/waterfall.webp',
-                            fit: BoxFit.cover,
-                            filterQuality: FilterQuality.low,
-                          )
-                        : const SizedBox.expand(),
+                    child: Image.asset(
+                      'assets/images/waterfall.webp',
+                      fit: BoxFit.cover,
+                      filterQuality: FilterQuality.low,
+                    ),
                   ),
                 ),
                 Positioned.fill(

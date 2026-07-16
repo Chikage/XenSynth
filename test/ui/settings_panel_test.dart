@@ -40,6 +40,14 @@ void main() {
     await tester.pump();
     expect(settings.program, 42);
 
+    await tester.tap(find.byIcon(Icons.add_rounded));
+    await tester.pump();
+    expect(settings.program, 43);
+
+    await tester.tap(find.byIcon(Icons.remove_rounded));
+    await tester.pump();
+    expect(settings.program, 42);
+
     await tester.enterText(input, '999');
     await tester.testTextInput.receiveAction(TextInputAction.done);
     await tester.pump();
