@@ -33,3 +33,4 @@ ios/.symlinks/
 ios/Runner.xcworkspace/xcuserdata/
 ios/Runner.xcodeproj/xcuserdata/
 *.xcuserstate
+/.build
