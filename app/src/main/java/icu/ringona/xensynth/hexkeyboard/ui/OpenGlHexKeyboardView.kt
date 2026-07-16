@@ -266,7 +266,14 @@ private class OpenGlHexKeyboardRenderer(
                 max(1f, radius * 0.045f),
                 LINE_DARK,
             )
-            appendKeyLabel(key, center.x, center.y, radius, scene.displayMode)
+            appendKeyLabel(
+                key = key,
+                centerX = center.x,
+                centerY = center.y,
+                radius = radius,
+                mode = scene.displayMode,
+                period = layout.configuration.period,
+            )
         }
 
         if (!scene.playbackMode && scene.displayMode == KeyboardDisplayMode.Period) {
@@ -566,11 +573,12 @@ private class OpenGlHexKeyboardRenderer(
         centerY: Float,
         radius: Float,
         mode: KeyboardDisplayMode,
+        period: Int,
     ) {
         if (radius < 5f || mode == KeyboardDisplayMode.Coordinates) return
         appendLabel(
             batch = keyLabels,
-            text = key.pitchClass.toString(),
+            text = hexKeyLabel(key, period),
             centerX = centerX,
             centerY = centerY,
             textSize = max(7f, radius * 0.43f),
@@ -587,9 +595,37 @@ private class OpenGlHexKeyboardRenderer(
         color: Color4,
     ) {
         val atlas = labelAtlas ?: return
-        val glyph = atlas.glyphs[text] ?: return
         val scale = textSize / LABEL_SOURCE_TEXT_SIZE
-        batch.appendQuad(
+        val glyph = atlas.glyphs[text]
+        if (glyph != null) {
+            batch.appendLabelQuad(centerX, centerY, scale, glyph, color)
+            return
+        }
+
+        val characterGlyphs = text.map { character ->
+            atlas.glyphs[character.toString()] ?: return
+        }
+        val advance = textSize * LABEL_COMPOSITE_CHARACTER_ADVANCE_RATIO
+        val firstCenterX = centerX - advance * (characterGlyphs.lastIndex / 2f)
+        characterGlyphs.forEachIndexed { index, characterGlyph ->
+            batch.appendLabelQuad(
+                centerX = firstCenterX + advance * index,
+                centerY = centerY,
+                scale = scale,
+                glyph = characterGlyph,
+                color = color,
+            )
+        }
+    }
+
+    private fun TextureGeometryBatch.appendLabelQuad(
+        centerX: Float,
+        centerY: Float,
+        scale: Float,
+        glyph: AtlasGlyph,
+        color: Color4,
+    ) {
+        appendQuad(
             left = centerX - LABEL_CELL_WIDTH * scale / 2f,
             top = centerY - LABEL_CELL_HEIGHT * scale / 2f,
             right = centerX + LABEL_CELL_WIDTH * scale / 2f,
@@ -714,6 +750,8 @@ private class OpenGlHexKeyboardRenderer(
             repeat(MAX_LABEL_NUMBER + 1) { add(it.toString()) }
             add("P1")
             add("P2")
+            add("C")
+            add("-")
         }
         val rows = ceil(labels.size / LABEL_ATLAS_COLUMNS.toFloat()).roundToInt()
         val width = LABEL_CELL_WIDTH * LABEL_ATLAS_COLUMNS
@@ -1258,6 +1296,7 @@ private class OpenGlHexKeyboardRenderer(
         private const val LABEL_CELL_HEIGHT = 72
         private const val LABEL_ATLAS_COLUMNS = 9
         private const val MAX_LABEL_NUMBER = 199
+        private const val LABEL_COMPOSITE_CHARACTER_ADVANCE_RATIO = 0.62f
         private const val PLAYBACK_TRACK_GOLDEN_ANGLE = 137.508f
         private const val PLAYBACK_DIM_VALUE = 0.22f
         private const val PLAYBACK_PREVIEW_VALUE = 0.76f

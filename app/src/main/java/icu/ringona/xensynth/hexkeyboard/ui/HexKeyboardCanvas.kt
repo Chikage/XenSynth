@@ -520,6 +520,7 @@ private fun DrawScope.drawKeyboard(
             center = center,
             radius = radius,
             mode = displayMode,
+            period = layout.configuration.period,
             paint = primaryPaint,
         )
     }
@@ -928,12 +929,13 @@ private fun DrawScope.drawKeyLabel(
     center: Offset,
     radius: Float,
     mode: KeyboardDisplayMode,
+    period: Int,
     paint: Paint,
 ) {
     if (radius < 5f) return
     if (mode == KeyboardDisplayMode.Coordinates) return
 
-    val label = key.pitchClass.toString()
+    val label = hexKeyLabel(key, period)
     paint.textSize = max(7f, radius * 0.43f)
     val baseline = center.y - (paint.ascent() + paint.descent()) / 2f
     drawContext.canvas.nativeCanvas.drawText(label, center.x, baseline, paint)
