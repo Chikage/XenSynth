@@ -1372,7 +1372,7 @@ class MainActivity : ComponentActivity(), RenderFramePacer.InteractionListener {
     }
 
     private fun onHexStepQChanged(value: Float) {
-        val next = value.roundToInt().coerceIn(-nativeEdo, nativeEdo)
+        val next = value.roundToInt().coerceIn(hexStepRangeForEdo(nativeEdo))
         if (hexKeyboardStepQ == next) return
         releaseHexKeyboardNotes(immediate = true)
         hexKeyboardStepQ = next
@@ -1383,7 +1383,7 @@ class MainActivity : ComponentActivity(), RenderFramePacer.InteractionListener {
     }
 
     private fun onHexStepRChanged(value: Float) {
-        val next = value.roundToInt().coerceIn(-nativeEdo, nativeEdo)
+        val next = value.roundToInt().coerceIn(hexStepRangeForEdo(nativeEdo))
         if (hexKeyboardStepR == next) return
         releaseHexKeyboardNotes(immediate = true)
         hexKeyboardStepR = next
@@ -1851,8 +1851,9 @@ class MainActivity : ComponentActivity(), RenderFramePacer.InteractionListener {
         protectFromStatus: Boolean = false
     ) {
         val next = value.coerceIn(0, EDO_MAX)
-        val nextStepQ = hexKeyboardStepQ.coerceIn(-next, next)
-        val nextStepR = hexKeyboardStepR.coerceIn(-next, next)
+        val nextStepRange = hexStepRangeForEdo(next)
+        val nextStepQ = hexKeyboardStepQ.coerceIn(nextStepRange)
+        val nextStepR = hexKeyboardStepR.coerceIn(nextStepRange)
         val hexStepsChanged = hexKeyboardStepQ != nextStepQ || hexKeyboardStepR != nextStepR
         if (nativeEdo != next || hexStepsChanged) {
             releaseHexKeyboardNotes(immediate = true)
@@ -1896,9 +1897,9 @@ class MainActivity : ComponentActivity(), RenderFramePacer.InteractionListener {
         hexKeyboardRows = prefs.getInt(PREF_HEX_ROWS, HEX_ROWS_DEFAULT)
             .coerceIn(HEX_ROWS_MIN, HEX_ROWS_MAX)
         hexKeyboardStepQ = prefs.getInt(PREF_HEX_STEP_Q, HEX_STEP_Q_DEFAULT)
-            .coerceIn(-nativeEdo, nativeEdo)
+            .coerceIn(hexStepRangeForEdo(nativeEdo))
         hexKeyboardStepR = prefs.getInt(PREF_HEX_STEP_R, HEX_STEP_R_DEFAULT)
-            .coerceIn(-nativeEdo, nativeEdo)
+            .coerceIn(hexStepRangeForEdo(nativeEdo))
         hexOctaveGroupingEnabled = prefs.getBoolean(
             PREF_HEX_GROUP_BY_OCTAVE,
             HEX_OCTAVE_GROUPING_DEFAULT
@@ -3493,9 +3494,9 @@ private fun ToolbarSettingsMenu(
     val resetScope = rememberCoroutineScope()
     val focusManager = LocalFocusManager.current
     val hexagonalSettings = state.keyboardLayoutMode == KeyboardLayoutMode.Hexagonal
-    val hexStepLimit = state.edo.coerceIn(0, MainActivity.EDO_MAX)
-    val hexStepRange = -hexStepLimit.toFloat()..hexStepLimit.toFloat()
-    val hexStepSliderSteps = (hexStepLimit * 2 - 1).coerceAtLeast(0)
+    val hexStepRange = hexStepRangeForEdo(state.edo)
+    val hexStepSliderRange = hexStepRange.first.toFloat()..hexStepRange.last.toFloat()
+    val hexStepSliderSteps = (hexStepRange.last - hexStepRange.first - 1).coerceAtLeast(0)
     val settingsMenuWidthDp = if (hexagonalSettings) {
         HEX_SETTINGS_MENU_WIDTH_DP
     } else {
@@ -3731,7 +3732,7 @@ private fun ToolbarSettingsMenu(
                                 hexStepQSliderValue = value
                             },
                             onValueChangeFinished = ::commitHexSettings,
-                            range = hexStepRange,
+                            range = hexStepSliderRange,
                             steps = hexStepSliderSteps,
                             showProgressTrack = false
                         )
@@ -3787,7 +3788,7 @@ private fun ToolbarSettingsMenu(
                                 hexStepRSliderValue = value
                             },
                             onValueChangeFinished = ::commitHexSettings,
-                            range = hexStepRange,
+                            range = hexStepSliderRange,
                             steps = hexStepSliderSteps,
                             showProgressTrack = false
                         )
