@@ -24,6 +24,8 @@ class XenSynthScreen extends StatefulWidget {
 class _XenSynthScreenState extends State<XenSynthScreen>
     with WidgetsBindingObserver {
   late final XenSynthController _controller;
+  final HexKeyboardViewportController _hexKeyboardViewportController =
+      HexKeyboardViewportController();
   bool _ownsController = false;
   bool _settingsOpen = false;
   DateTime? _lastBackPress;
@@ -59,81 +61,102 @@ class _XenSynthScreenState extends State<XenSynthScreen>
           animation: _controller,
           builder: (context, _) {
             final settings = _controller.settings;
+            final meter = _controller.currentMeter;
             return Stack(
               children: [
                 Positioned.fill(
                   child: ColoredBox(
                     color: AppPalette.background,
-                    child: Opacity(
-                      opacity: 0.14,
-                      child: Image.asset(
-                        'assets/images/waterfall.webp',
-                        fit: BoxFit.cover,
-                        filterQuality: FilterQuality.low,
-                      ),
-                    ),
+                    child: settings.layoutMode == KeyboardLayoutMode.linear
+                        ? Image.asset(
+                            'assets/images/waterfall.webp',
+                            fit: BoxFit.cover,
+                            filterQuality: FilterQuality.low,
+                          )
+                        : const SizedBox.expand(),
                   ),
                 ),
                 Positioned.fill(
-                  top: 68,
+                  top: ControlToolbar.height,
                   child: settings.layoutMode == KeyboardLayoutMode.linear
                       ? WaterfallView(
                           score: _controller.score,
                           playhead: _controller.playhead,
                           edo: settings.edo,
+                          // Android shifts score/ruler visuals by the displayed
+                          // offset, while playback and touch pitch apply the
+                          // inverse offset in the controller.
                           pitchOffsetCents: settings.pitchOffsetCents,
+                          tuning: _controller.customTuningActive
+                              ? _controller.tuning
+                              : null,
+                          playing: _controller.playing,
+                          duration: _controller.duration,
+                          volumeGain: settings.volumeGain,
                           activePitches: _controller.activePitches,
                           onPitchDown: _controller.noteDown,
                           onPitchMove: _controller.noteMove,
                           onPitchUp: _controller.noteUp,
+                          onTogglePlayback: _controller.togglePlayback,
+                          onSeekStart: _controller.beginSeekGesture,
+                          onSeek: _controller.updateSeekGesture,
+                          onSeekEnd: _controller.endSeekGesture,
+                          onVolumeChanged: _controller.setVolumeGainFromGesture,
                         )
-                      : HexKeyboardView(
-                          score: _controller.score,
-                          playhead: _controller.playhead,
-                          settings: settings,
-                          activePitches: _controller.activePitches,
-                          onPitchDown: _controller.noteDown,
-                          onPitchMove: _controller.noteMove,
-                          onPitchUp: _controller.noteUp,
+                      : Padding(
+                          padding: const EdgeInsets.all(8),
+                          child: HexKeyboardView(
+                            score: _controller.score,
+                            playhead: _controller.playhead,
+                            settings: settings,
+                            activePitches: _controller.activePitches,
+                            viewportController: _hexKeyboardViewportController,
+                            onPitchDown: _controller.noteDown,
+                            onPitchMove: _controller.noteMove,
+                            onPitchUp: _controller.noteUp,
+                          ),
                         ),
                 ),
                 Positioned(
                   left: 0,
                   right: 0,
                   top: 0,
-                  child: SafeArea(
-                    bottom: false,
-                    child: ControlToolbar(
-                      title: _controller.scoreTitle,
-                      status: _controller.status,
-                      playing: _controller.playing,
-                      loading: _controller.loading,
-                      position: _controller.playhead,
-                      duration: _controller.duration,
-                      speed: settings.playbackSpeed,
-                      edo: settings.edo,
-                      offsetCents: settings.pitchOffsetCents,
-                      tuningLabel: _controller.tuningLabel,
-                      settingsOpen: _settingsOpen,
-                      onOpen: _controller.openDocument,
-                      onTogglePlayback: _controller.togglePlayback,
-                      onReset: _controller.resetPlayback,
-                      onStop: _controller.stop,
-                      onSpeedChanged: (value) => _controller.updateSettings(
-                        settings.copyWith(playbackSpeed: value),
-                      ),
-                      onEdoChanged: (value) => _controller.updateSettings(
-                        settings.copyWith(edo: value),
-                      ),
-                      onOffsetChanged: (value) => _controller.updateSettings(
-                        settings.copyWith(pitchOffsetCents: value),
-                      ),
-                      onSettings: () => setState(() {
-                        _settingsOpen = !_settingsOpen;
-                      }),
-                      onResetSettings: _controller.resetSettings,
-                      onSeek: _controller.seek,
+                  child: ControlToolbar(
+                    title: _controller.scoreTitle,
+                    status: _controller.status,
+                    playing: _controller.playing,
+                    loading: _controller.loading,
+                    position: _controller.playhead,
+                    duration: _controller.duration,
+                    bpm: _controller.currentBpm,
+                    meterNumerator: meter.numerator,
+                    meterDenominator: meter.denominator,
+                    speed: settings.playbackSpeed,
+                    edo: settings.edo,
+                    offsetCents: settings.pitchOffsetCents,
+                    tuningLabel: _controller.tuningLabel,
+                    settingsOpen: _settingsOpen,
+                    onOpen: _controller.openDocument,
+                    onTogglePlayback: _controller.togglePlayback,
+                    onReset: _controller.resetPlayback,
+                    onStop: _controller.stop,
+                    onSpeedChanged: (value) => _controller.updateSettings(
+                      settings.copyWith(playbackSpeed: value),
                     ),
+                    onEdoChanged: (value) =>
+                        _controller.updateSettings(settings.withEdo(value)),
+                    onOffsetChanged: (value) => _controller.updateSettings(
+                      settings.copyWith(pitchOffsetCents: value),
+                    ),
+                    onSettings: () => setState(() {
+                      _settingsOpen = !_settingsOpen;
+                    }),
+                    onResetSettings: _resetSettings,
+                    onSeek: _controller.seek,
+                    hexKeyboardGesturesEnabled:
+                        settings.layoutMode == KeyboardLayoutMode.hexagonal,
+                    onHexKeyboardPan: _hexKeyboardViewportController.panBy,
+                    onHexKeyboardZoom: _hexKeyboardViewportController.zoomBy,
                   ),
                 ),
                 if (!_controller.audioReady)
@@ -149,7 +172,7 @@ class _XenSynthScreenState extends State<XenSynthScreen>
                   ),
                 if (_settingsOpen) ...[
                   Positioned.fill(
-                    top: 68,
+                    top: ControlToolbar.height,
                     child: GestureDetector(
                       behavior: HitTestBehavior.opaque,
                       onTap: () => setState(() => _settingsOpen = false),
@@ -159,21 +182,19 @@ class _XenSynthScreenState extends State<XenSynthScreen>
                     ),
                   ),
                   Positioned(
-                    top: 76,
+                    top: ControlToolbar.height + 8,
                     right: 8,
                     bottom: 8,
                     child: SettingsPanel(
                       settings: settings,
                       onChanged: _controller.updateSettings,
-                      onClose: () => setState(() => _settingsOpen = false),
-                      onImportTuning: _controller.importTuning,
-                      onReset: _controller.resetSettings,
+                      onReset: _resetSettings,
                     ),
                   ),
                 ],
                 if (_controller.loading)
                   const Positioned.fill(
-                    top: 68,
+                    top: ControlToolbar.height,
                     child: IgnorePointer(
                       child: Center(
                         child: ToolSurface(
@@ -220,9 +241,15 @@ class _XenSynthScreenState extends State<XenSynthScreen>
     );
   }
 
+  void _resetSettings() {
+    _hexKeyboardViewportController.reset();
+    _controller.resetSettings();
+  }
+
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
+    _hexKeyboardViewportController.dispose();
     if (_ownsController) _controller.dispose();
     super.dispose();
   }

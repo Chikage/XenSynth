@@ -27,7 +27,13 @@ void main() {
     }
 
     expect(find.byIcon(Icons.folder_open_rounded), findsOneWidget);
-    expect(find.text('26 EDO'), findsOneWidget);
+    expect(find.text('EDO'), findsOneWidget);
+    await tester.tap(find.byKey(const ValueKey('toolbar-edo-trigger')));
+    await tester.pump();
+    final edoSlider = tester.widget<Slider>(
+      find.byKey(const ValueKey('toolbar-edo-slider')),
+    );
+    expect(edoSlider.value, 26);
     expect(tester.takeException(), isNull);
   });
 }

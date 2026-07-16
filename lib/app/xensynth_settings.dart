@@ -1,3 +1,5 @@
+// ignore_for_file: prefer_initializing_formals
+
 enum KeyboardLayoutMode { linear, hexagonal }
 
 class XenSynthSettings {
@@ -13,16 +15,22 @@ class XenSynthSettings {
     this.externalMidiControlsProgram = false,
     this.hexColumns = 35,
     this.hexRows = 8,
-    this.hexPeriod = 53,
-    this.hexStepQ = 9,
-    this.hexStepR = 4,
+    int? hexPeriod,
+    int hexStepQ = 9,
+    int hexStepR = 4,
     this.hexGroupByOctave = false,
     this.hexRotationDegrees = 12,
-    this.touchSensitivity = 0.58,
+    this.touchSensitivity = 0.4,
     this.pseudoPressureEnabled = true,
-    this.playbackPreviewSeconds = 2.8,
-    this.pitchSnapEnabled = true,
-  });
+    this.playbackPreviewSeconds = 1.8,
+    this.pitchSnapEnabled = false,
+  }) : _hexStepQ = hexStepQ,
+       _hexStepR = hexStepR;
+
+  static const double touchSensitivityPercentMin = 100;
+  static const double touchSensitivityPercentMax = 150;
+  static const double playbackPreviewSecondsMin = 0;
+  static const double playbackPreviewSecondsMax = 3;
 
   final KeyboardLayoutMode layoutMode;
   final double playbackSpeed;
@@ -35,9 +43,8 @@ class XenSynthSettings {
   final bool externalMidiControlsProgram;
   final int hexColumns;
   final int hexRows;
-  final int hexPeriod;
-  final int hexStepQ;
-  final int hexStepR;
+  final int _hexStepQ;
+  final int _hexStepR;
   final bool hexGroupByOctave;
   final int hexRotationDegrees;
   final double touchSensitivity;
@@ -45,8 +52,29 @@ class XenSynthSettings {
   final double playbackPreviewSeconds;
   final bool pitchSnapEnabled;
 
+  int get hexPeriod => edo > 0 ? edo : 12;
+  int get hexStepMaximum => hexStepMaximumForEdo(edo);
+  int get hexStepQ => _hexStepQ.clamp(1, hexStepMaximum);
+  int get hexStepR => _hexStepR.clamp(1, hexStepMaximum);
+  double get appliedPitchOffsetCents => -pitchOffsetCents;
+  double get touchSensitivityPercent =>
+      touchSensitivityPercentMin +
+      touchSensitivity.clamp(0.0, 1.0) *
+          (touchSensitivityPercentMax - touchSensitivityPercentMin);
+
+  static int hexStepMaximumForEdo(int edo) => edo > 1 ? edo - 1 : 1;
+
+  static double touchSensitivityFromPercent(double percent) {
+    return ((percent - touchSensitivityPercentMin) /
+            (touchSensitivityPercentMax - touchSensitivityPercentMin))
+        .clamp(0.0, 1.0);
+  }
+
   factory XenSynthSettings.fromMap(Map<String, Object?> map) {
     const defaults = XenSynthSettings();
+    final edoSource = map.containsKey('edo') ? map['edo'] : map['hexPeriod'];
+    final edo = _int(edoSource, defaults.edo).clamp(0, 72);
+    final hexStepMaximum = hexStepMaximumForEdo(edo);
     return XenSynthSettings(
       layoutMode: switch (map['keyboardLayoutMode']?.toString()) {
         'hexagonal' || 'hex' => KeyboardLayoutMode.hexagonal,
@@ -57,7 +85,7 @@ class XenSynthSettings {
         map['playbackSpeed'],
         defaults.playbackSpeed,
       ).clamp(0.2, 4),
-      edo: _int(map['edo'], defaults.edo).clamp(0, 72),
+      edo: edo,
       pitchOffsetCents: _double(
         map['pitchOffsetCents'],
         defaults.pitchOffsetCents,
@@ -75,9 +103,14 @@ class XenSynthSettings {
       ),
       hexColumns: _int(map['hexColumns'], defaults.hexColumns).clamp(4, 64),
       hexRows: _int(map['hexRows'], defaults.hexRows).clamp(3, 32),
-      hexPeriod: _int(map['hexPeriod'], defaults.hexPeriod).clamp(1, 200),
-      hexStepQ: _int(map['hexStepQ'], defaults.hexStepQ).clamp(-200, 200),
-      hexStepR: _int(map['hexStepR'], defaults.hexStepR).clamp(-200, 200),
+      hexStepQ: _int(
+        map['hexStepQ'],
+        defaults.hexStepQ,
+      ).clamp(1, hexStepMaximum),
+      hexStepR: _int(
+        map['hexStepR'],
+        defaults.hexStepR,
+      ).clamp(1, hexStepMaximum),
       hexGroupByOctave: _bool(
         map['hexGroupByOctave'],
         defaults.hexGroupByOctave,
@@ -86,10 +119,10 @@ class XenSynthSettings {
         map['hexRotationDegrees'],
         defaults.hexRotationDegrees,
       ).clamp(-60, 60),
-      touchSensitivity: _double(
+      touchSensitivity: _normalizedTouchSensitivity(
         map['touchSensitivity'],
         defaults.touchSensitivity,
-      ).clamp(0, 1),
+      ),
       pseudoPressureEnabled: _bool(
         map['pseudoPressureEnabled'],
         defaults.pseudoPressureEnabled,
@@ -97,7 +130,7 @@ class XenSynthSettings {
       playbackPreviewSeconds: _double(
         map['playbackPreviewSeconds'],
         defaults.playbackPreviewSeconds,
-      ).clamp(0.5, 8),
+      ).clamp(playbackPreviewSecondsMin, playbackPreviewSecondsMax),
       pitchSnapEnabled: _bool(
         map['pitchSnapEnabled'],
         defaults.pitchSnapEnabled,
@@ -117,16 +150,22 @@ class XenSynthSettings {
     'externalMidiControlsProgram': externalMidiControlsProgram,
     'hexColumns': hexColumns,
     'hexRows': hexRows,
+    // Keep writing the legacy key for older native builds and stored maps.
     'hexPeriod': hexPeriod,
     'hexStepQ': hexStepQ,
     'hexStepR': hexStepR,
     'hexGroupByOctave': hexGroupByOctave,
     'hexRotationDegrees': hexRotationDegrees,
-    'touchSensitivity': touchSensitivity,
+    'touchSensitivity': touchSensitivity.clamp(0.0, 1.0),
     'pseudoPressureEnabled': pseudoPressureEnabled,
-    'playbackPreviewSeconds': playbackPreviewSeconds,
+    'playbackPreviewSeconds': playbackPreviewSeconds.clamp(
+      playbackPreviewSecondsMin,
+      playbackPreviewSecondsMax,
+    ),
     'pitchSnapEnabled': pitchSnapEnabled,
   };
+
+  XenSynthSettings withEdo(int value) => copyWith(edo: value);
 
   XenSynthSettings copyWith({
     KeyboardLayoutMode? layoutMode,
@@ -150,10 +189,12 @@ class XenSynthSettings {
     double? playbackPreviewSeconds,
     bool? pitchSnapEnabled,
   }) {
+    final nextEdo = (edo ?? this.edo).clamp(0, 72);
+    final nextHexStepMaximum = hexStepMaximumForEdo(nextEdo);
     return XenSynthSettings(
       layoutMode: layoutMode ?? this.layoutMode,
       playbackSpeed: playbackSpeed ?? this.playbackSpeed,
-      edo: edo ?? this.edo,
+      edo: nextEdo,
       pitchOffsetCents: pitchOffsetCents ?? this.pitchOffsetCents,
       volumeGain: volumeGain ?? this.volumeGain,
       reverbMix: reverbMix ?? this.reverbMix,
@@ -163,16 +204,21 @@ class XenSynthSettings {
           externalMidiControlsProgram ?? this.externalMidiControlsProgram,
       hexColumns: hexColumns ?? this.hexColumns,
       hexRows: hexRows ?? this.hexRows,
-      hexPeriod: hexPeriod ?? this.hexPeriod,
-      hexStepQ: hexStepQ ?? this.hexStepQ,
-      hexStepR: hexStepR ?? this.hexStepR,
+      hexStepQ: (hexStepQ ?? this.hexStepQ).clamp(1, nextHexStepMaximum),
+      hexStepR: (hexStepR ?? this.hexStepR).clamp(1, nextHexStepMaximum),
       hexGroupByOctave: hexGroupByOctave ?? this.hexGroupByOctave,
       hexRotationDegrees: hexRotationDegrees ?? this.hexRotationDegrees,
-      touchSensitivity: touchSensitivity ?? this.touchSensitivity,
+      touchSensitivity: (touchSensitivity ?? this.touchSensitivity).clamp(
+        0.0,
+        1.0,
+      ),
       pseudoPressureEnabled:
           pseudoPressureEnabled ?? this.pseudoPressureEnabled,
       playbackPreviewSeconds:
-          playbackPreviewSeconds ?? this.playbackPreviewSeconds,
+          (playbackPreviewSeconds ?? this.playbackPreviewSeconds).clamp(
+            playbackPreviewSecondsMin,
+            playbackPreviewSecondsMax,
+          ),
       pitchSnapEnabled: pitchSnapEnabled ?? this.pitchSnapEnabled,
     );
   }
@@ -185,6 +231,12 @@ class XenSynthSettings {
     return value is num
         ? value.toDouble()
         : double.tryParse('$value') ?? fallback;
+  }
+
+  static double _normalizedTouchSensitivity(Object? value, double fallback) {
+    final parsed = _double(value, fallback);
+    if (parsed > 1) return touchSensitivityFromPercent(parsed);
+    return parsed.clamp(0.0, 1.0);
   }
 
   static bool _bool(Object? value, bool fallback) {

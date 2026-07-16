@@ -552,15 +552,15 @@ final class XenSynthPlatformBridge: NSObject, FlutterStreamHandler, UIDocumentPi
     "keyboardLayoutMode": "linear",
     "hexColumns": 35,
     "hexRows": 8,
-    "hexPeriod": 53,
+    "hexPeriod": 26,
     "hexStepQ": 9,
     "hexStepR": 4,
     "hexGroupByOctave": false,
     "hexRotationDegrees": 12,
-    "touchSensitivity": 0.58,
+    "touchSensitivity": 0.4,
     "pseudoPressureEnabled": true,
-    "playbackPreviewSeconds": 2.8,
-    "pitchSnapEnabled": true,
+    "playbackPreviewSeconds": 1.8,
+    "pitchSnapEnabled": false,
   ]
 }
 

@@ -26,6 +26,7 @@ class XenSynthController extends ChangeNotifier {
 
   XenSynthSettings settings = const XenSynthSettings();
   TuningDefinition tuning = TuningDefinition.standard;
+  bool customTuningActive = false;
   ParsedScore? score;
   String status = 'INITIALIZING';
   bool initialized = false;
@@ -35,10 +36,45 @@ class XenSynthController extends ChangeNotifier {
   double playhead = 0;
   Map<int, double> activePitches = const {};
   double _clockBase = 0;
+  bool _seekGestureActive = false;
+  bool _resumeAfterSeekGesture = false;
+  Future<void>? _seekPauseFuture;
 
   double get duration => score?.duration ?? 0;
   String get scoreTitle => score?.title ?? 'XEN SYNTH';
   String get tuningLabel => tuning.profile.isEmpty ? 'TUN' : tuning.profile;
+  double get currentBpm {
+    final currentScore = score;
+    if (currentScore == null || currentScore.tempoMap.isEmpty) {
+      return 120 * settings.playbackSpeed;
+    }
+    var tempo = currentScore.tempoMap.first;
+    for (final candidate in currentScore.tempoMap) {
+      if (candidate.second > playhead) break;
+      tempo = candidate;
+    }
+    return 60000000 / tempo.usPerQuarter * settings.playbackSpeed;
+  }
+
+  MeterEvent get currentMeter {
+    final currentScore = score;
+    if (currentScore == null ||
+        currentScore.meters.isEmpty ||
+        currentScore.tempoMap.isEmpty) {
+      return const MeterEvent(tick: 0, numerator: 4, denominator: 4);
+    }
+    final tick = MidiWaterfallParser.secondsToTick(
+      playhead,
+      currentScore.tempoMap,
+      currentScore.ticksPerQuarter,
+    );
+    var meter = currentScore.meters.first;
+    for (final candidate in currentScore.meters) {
+      if (candidate.tick > tick) break;
+      meter = candidate;
+    }
+    return meter;
+  }
 
   Future<void> initialize() async {
     if (initialized || loading) return;
@@ -87,24 +123,10 @@ class XenSynthController extends ChangeNotifier {
     try {
       final document = await _native.pickDocument(
         kind: 'scoreOrTuning',
-        extensions: const [
-          'mid',
-          'midi',
-          'midx',
-          'midix',
-          'midi2',
-          'kar',
-          'mscz',
-          'mscx',
-          'json',
-        ],
+        extensions: _supportedDocumentExtensions,
       );
       if (document == null) return;
-      if (_looksLikeTuning(document.name, document.bytes)) {
-        await _loadTuning(document.bytes);
-      } else {
-        await loadScoreBytes(document.bytes, document.name);
-      }
+      await _processDocument(document);
     } on PlatformException catch (error) {
       _setStatus(error.message ?? error.code);
     } catch (error) {
@@ -112,21 +134,10 @@ class XenSynthController extends ChangeNotifier {
     }
   }
 
-  Future<void> importTuning() async {
-    try {
-      final document = await _native.pickDocument(
-        kind: 'tuning',
-        extensions: const ['json'],
-      );
-      if (document != null) await _loadTuning(document.bytes);
-    } catch (error) {
-      _setStatus('TUNING FAILED · $error');
-    }
-  }
-
   Future<void> loadScoreBytes(Uint8List bytes, String title) async {
     loading = true;
     playing = false;
+    _clearSeekGestureState();
     _stopClock();
     await _native.stop();
     notifyListeners();
@@ -172,33 +183,16 @@ class XenSynthController extends ChangeNotifier {
   Future<void> play() async {
     final currentScore = score;
     if (currentScore == null || currentScore.duration <= 0) return;
+    _clearSeekGestureState();
     if (playhead >= currentScore.duration - 0.001) playhead = 0;
     playing = true;
-    _clockBase = playhead;
-    _clock
-      ..reset()
-      ..start();
-    _clockTimer?.cancel();
-    _clockTimer = Timer.periodic(const Duration(milliseconds: 16), (_) {
-      final next =
-          _clockBase +
-          _clock.elapsedMicroseconds / 1000000 * settings.playbackSpeed;
-      if (next >= duration) {
-        playhead = duration;
-        playing = false;
-        _stopClock();
-        unawaited(_native.stop());
-      } else {
-        playhead = next;
-      }
-      notifyListeners();
-    });
+    _startPlaybackClock();
     notifyListeners();
     try {
       await _native.play(
         from: playhead,
         speed: settings.playbackSpeed,
-        offsetCents: settings.pitchOffsetCents,
+        offsetCents: settings.appliedPitchOffsetCents,
         audioStartDelaySeconds: settings.audioLatencyMs / 1000,
       );
     } catch (error) {
@@ -211,12 +205,17 @@ class XenSynthController extends ChangeNotifier {
   Future<void> pause() async {
     _syncClockPosition();
     playing = false;
+    _clearSeekGestureState();
     _stopClock();
     notifyListeners();
     await _native.pause();
   }
 
   Future<void> seek(double position) async {
+    if (_seekGestureActive) {
+      updateSeekGesture(position);
+      return;
+    }
     playhead = position.clamp(0, duration).toDouble();
     if (playing) {
       _clockBase = playhead;
@@ -228,8 +227,61 @@ class XenSynthController extends ChangeNotifier {
     await _native.seek(playhead);
   }
 
+  void beginSeekGesture() {
+    if (_seekGestureActive || duration <= 0) return;
+    _seekGestureActive = true;
+    _resumeAfterSeekGesture = playing;
+    if (!playing) return;
+    _syncClockPosition();
+    _stopClock();
+    notifyListeners();
+    _seekPauseFuture = _native.pause();
+  }
+
+  void updateSeekGesture(double position) {
+    if (!_seekGestureActive) {
+      unawaited(seek(position));
+      return;
+    }
+    final next = position.clamp(0, duration).toDouble();
+    if ((playhead - next).abs() < 0.000001) return;
+    playhead = next;
+    notifyListeners();
+  }
+
+  Future<void> endSeekGesture() async {
+    if (!_seekGestureActive) return;
+    final resume = _resumeAfterSeekGesture;
+    final pauseFuture = _seekPauseFuture;
+    _clearSeekGestureState();
+    if (pauseFuture != null) await pauseFuture;
+    await _native.seek(playhead);
+    if (!resume) return;
+    if (playhead >= duration - 0.001) {
+      playing = false;
+      notifyListeners();
+      return;
+    }
+    playing = true;
+    _startPlaybackClock();
+    notifyListeners();
+    try {
+      await _native.play(
+        from: playhead,
+        speed: settings.playbackSpeed,
+        offsetCents: settings.appliedPitchOffsetCents,
+        audioStartDelaySeconds: settings.audioLatencyMs / 1000,
+      );
+    } catch (error) {
+      playing = false;
+      _stopClock();
+      _setStatus('PLAYBACK FAILED · $error');
+    }
+  }
+
   Future<void> resetPlayback() async {
     playing = false;
+    _clearSeekGestureState();
     _stopClock();
     playhead = 0;
     notifyListeners();
@@ -239,6 +291,7 @@ class XenSynthController extends ChangeNotifier {
 
   Future<void> stop() async {
     playing = false;
+    _clearSeekGestureState();
     _stopClock();
     playhead = 0;
     await releaseAllNotes();
@@ -276,7 +329,7 @@ class XenSynthController extends ChangeNotifier {
       await _native.play(
         from: playhead,
         speed: next.playbackSpeed,
-        offsetCents: next.pitchOffsetCents,
+        offsetCents: next.appliedPitchOffsetCents,
         audioStartDelaySeconds: next.audioLatencyMs / 1000,
       );
     }
@@ -284,10 +337,16 @@ class XenSynthController extends ChangeNotifier {
       await _native.play(
         from: playhead,
         speed: next.playbackSpeed,
-        offsetCents: next.pitchOffsetCents,
+        offsetCents: next.appliedPitchOffsetCents,
         audioStartDelaySeconds: next.audioLatencyMs / 1000,
       );
     }
+  }
+
+  void setVolumeGainFromGesture(double gain) {
+    final nextGain = gain.clamp(0.0, 1.0).toDouble();
+    if ((settings.volumeGain - nextGain).abs() < 0.0001) return;
+    unawaited(updateSettings(settings.copyWith(volumeGain: nextGain)));
   }
 
   Future<void> resetSettings() async {
@@ -296,7 +355,7 @@ class XenSynthController extends ChangeNotifier {
   }
 
   void noteDown(int pointer, double pitch, int velocity) {
-    final targetPitch = pitch + settings.pitchOffsetCents / 100;
+    final targetPitch = pitch + settings.appliedPitchOffsetCents / 100;
     final nextActive = Map<int, double>.from(activePitches)..[pointer] = pitch;
     activePitches = nextActive;
     final epoch = (_noteEpochs[pointer] ?? 0) + 1;
@@ -360,12 +419,26 @@ class XenSynthController extends ChangeNotifier {
   Future<void> _loadTuning(Uint8List bytes) async {
     final definition = TuningDefinition.fromJson(utf8.decode(bytes));
     tuning = definition;
+    customTuningActive = true;
     final next = settings.copyWith(
       pitchOffsetCents: definition.displayOffsetCents,
     );
     await updateSettings(next);
     status = 'TUNING · ${definition.profile}';
     notifyListeners();
+  }
+
+  Future<void> _processDocument(NativeDocument document) async {
+    if (_looksLikeTuning(document.name, document.bytes)) {
+      try {
+        await _loadTuning(document.bytes);
+      } catch (error, stackTrace) {
+        debugPrint('Tuning import failed: $error\n$stackTrace');
+        _setStatus('TUNING FAILED · $error');
+      }
+      return;
+    }
+    await loadScoreBytes(document.bytes, document.name);
   }
 
   void _handleMidiEvent(NativeMidiEvent event) {
@@ -410,11 +483,7 @@ class XenSynthController extends ChangeNotifier {
         final bytes = event.payload['bytes'];
         if (bytes is Uint8List) {
           final name = event.payload['name']?.toString() ?? 'MIDI';
-          if (_looksLikeTuning(name, bytes)) {
-            unawaited(_loadTuning(bytes));
-          } else {
-            unawaited(loadScoreBytes(bytes, name));
-          }
+          unawaited(_processDocument(NativeDocument(name: name, bytes: bytes)));
         }
     }
   }
@@ -426,6 +495,34 @@ class XenSynthController extends ChangeNotifier {
                 _clock.elapsedMicroseconds / 1000000 * settings.playbackSpeed)
             .clamp(0, duration)
             .toDouble();
+  }
+
+  void _startPlaybackClock() {
+    _clockBase = playhead;
+    _clock
+      ..reset()
+      ..start();
+    _clockTimer?.cancel();
+    _clockTimer = Timer.periodic(const Duration(milliseconds: 16), (_) {
+      final next =
+          _clockBase +
+          _clock.elapsedMicroseconds / 1000000 * settings.playbackSpeed;
+      if (next >= duration) {
+        playhead = duration;
+        playing = false;
+        _stopClock();
+        unawaited(_native.stop());
+      } else {
+        playhead = next;
+      }
+      notifyListeners();
+    });
+  }
+
+  void _clearSeekGestureState() {
+    _seekGestureActive = false;
+    _resumeAfterSeekGesture = false;
+    _seekPauseFuture = null;
   }
 
   void _stopClock() {
@@ -448,6 +545,18 @@ class XenSynthController extends ChangeNotifier {
     return false;
   }
 
+  static const _supportedDocumentExtensions = [
+    'mid',
+    'midi',
+    'midx',
+    'midix',
+    'midi2',
+    'kar',
+    'mscz',
+    'mscx',
+    'json',
+  ];
+
   static double _initialPlayhead(ParsedScore score) {
     final first = score.notes.isEmpty ? null : score.notes.first.start;
     if (first == null || first * 160 >= 36) return 0;
@@ -456,6 +565,7 @@ class XenSynthController extends ChangeNotifier {
 
   @override
   void dispose() {
+    _clearSeekGestureState();
     _stopClock();
     _settingsSaveTimer?.cancel();
     _midiSubscription?.cancel();

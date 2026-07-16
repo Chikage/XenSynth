@@ -3,6 +3,7 @@ import 'dart:typed_data';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:xensynth/core/midi_parser.dart';
+import 'package:xensynth/core/score.dart';
 
 void main() {
   group('MidiWaterfallParser', () {
@@ -79,6 +80,23 @@ void main() {
           title: 'bad.bin',
         ),
         throwsFormatException,
+      );
+    });
+
+    test('converts seconds back to ticks and computes measure length', () {
+      const tempoMap = <TempoPoint>[
+        TempoPoint(tick: 0, second: 0, usPerQuarter: 500000),
+        TempoPoint(tick: 960, second: 1, usPerQuarter: 1000000),
+      ];
+
+      expect(MidiWaterfallParser.secondsToTick(0.5, tempoMap, 480), 480);
+      expect(MidiWaterfallParser.secondsToTick(2, tempoMap, 480), 1440);
+      expect(
+        MidiWaterfallParser.measureTicks(
+          const MeterEvent(tick: 0, numerator: 3, denominator: 4),
+          480,
+        ),
+        1440,
       );
     });
   });

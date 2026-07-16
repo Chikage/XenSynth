@@ -99,6 +99,37 @@ abstract final class MidiWaterfallParser {
         (tick - point.tick) * point.usPerQuarter / 1000000 / ticksPerQuarter;
   }
 
+  static double secondsToTick(
+    double second,
+    List<TempoPoint> tempoMap,
+    int ticksPerQuarter,
+  ) {
+    final safeSecond = math.max(0.0, second);
+    var low = 0;
+    var high = tempoMap.length - 1;
+    while (low <= high) {
+      final middle = (low + high) >> 1;
+      if (tempoMap[middle].second <= safeSecond) {
+        low = middle + 1;
+      } else {
+        high = middle - 1;
+      }
+    }
+    final point = tempoMap[math.max(0, high)];
+    return point.tick +
+        (safeSecond - point.second) *
+            1000000 *
+            ticksPerQuarter /
+            point.usPerQuarter;
+  }
+
+  static double measureTicks(MeterEvent meter, int ticksPerQuarter) {
+    return math.max(
+      1.0,
+      ticksPerQuarter * 4.0 * meter.numerator / meter.denominator,
+    );
+  }
+
   static ParsedScore _parseSmfMidx(Uint8List bytes, String title) {
     final reader = _ByteReader(bytes, title);
     if (reader.readAscii(4) != 'MThd') {
