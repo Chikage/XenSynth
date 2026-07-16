@@ -1,4 +1,3 @@
-import AVFoundation
 import Foundation
 
 final class ScorePlaybackController {
@@ -107,8 +106,6 @@ final class ScorePlaybackController {
   }
 
   private let synth = FluidSynthEngine.shared
-  private let audioSessionQueue = DispatchQueue(label: "icu.ringona.xensynth.audio-session")
-  private var isAudioSessionConfigured = false
   private var events: [ScheduledEvent] = []
   private var nextEventIndex = 0
   private var activeNotes: Set<ActiveNote> = []
@@ -221,7 +218,6 @@ final class ScorePlaybackController {
   }
 
   private func prepareAudio() throws {
-    try configureAudioSession()
     synth.setGain(Self.fluidGain(for: volumeGain))
     synth.setReverbMixIntensity(reverbMixIntensity)
     try synth.loadDefaultSoundFontIfNeeded()
@@ -369,16 +365,6 @@ final class ScorePlaybackController {
     activePreviewNotes.removeAll()
   }
 
-  private func configureAudioSession() throws {
-    guard !isAudioSessionConfigured else { return }
-    try audioSessionQueue.sync {
-      let session = AVAudioSession.sharedInstance()
-      try session.setCategory(.playback, mode: .default, options: [])
-      try session.setActive(true, options: [])
-    }
-    isAudioSessionConfigured = true
-  }
-
   deinit {
     stop()
     synth.allSoundsOff()
@@ -431,6 +417,6 @@ final class ScorePlaybackController {
   }
 
   private static func fluidGain(for gain: Float) -> Float {
-    (gain / defaultVolumeGain).clamped(to: 0...3)
+    (gain / defaultVolumeGain).clamped(to: 0...1)
   }
 }

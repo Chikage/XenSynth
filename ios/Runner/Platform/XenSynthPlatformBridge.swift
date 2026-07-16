@@ -8,6 +8,10 @@ final class XenSynthPlatformBridge: NSObject, FlutterStreamHandler, UIDocumentPi
 
   private let playbackController = ScorePlaybackController()
   private let midiController = MIDIKeyboardController()
+  private let audioInitializationQueue = DispatchQueue(
+    label: "icu.ringona.xensynth.audio-initialization",
+    qos: .userInitiated
+  )
   private let methodChannel: FlutterMethodChannel
   private let eventChannel: FlutterEventChannel
   private var midiEventSink: FlutterEventSink?
@@ -48,8 +52,21 @@ final class XenSynthPlatformBridge: NSObject, FlutterStreamHandler, UIDocumentPi
     do {
       switch call.method {
       case "initializeAudio":
-        try playbackController.initializeAudio()
-        result(true)
+        audioInitializationQueue.async { [weak self] in
+          guard let self else {
+            DispatchQueue.main.async { result(false) }
+            return
+          }
+          do {
+            try self.playbackController.initializeAudio()
+            DispatchQueue.main.async { result(true) }
+          } catch {
+            DispatchQueue.main.async {
+              result(self.flutterError(error))
+            }
+          }
+        }
+        return
 
       case "setGain":
         let gain = (arguments.double(forAnyKey: ["gain", "value", "volumeGain"]) ?? 0.85)

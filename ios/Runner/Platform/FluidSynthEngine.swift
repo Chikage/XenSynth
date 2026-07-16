@@ -20,6 +20,13 @@ private func fluidSettingsSetInteger(
   _ value: Int32
 ) -> Int32
 
+@_silgen_name("fluid_settings_setstr")
+private func fluidSettingsSetString(
+  _ settings: OpaquePointer?,
+  _ name: UnsafePointer<CChar>,
+  _ value: UnsafePointer<CChar>
+) -> Int32
+
 @_silgen_name("new_fluid_synth")
 private func fluidNewSynth(_ settings: OpaquePointer?) -> OpaquePointer?
 
@@ -270,7 +277,7 @@ final class FluidSynthEngine {
 
   func setGain(_ gain: Float) {
     withLock {
-      self.gain = gain.clamped(to: 0...3)
+      self.gain = gain.clamped(to: 0...1)
       applyGainLocked()
     }
   }
@@ -287,15 +294,21 @@ final class FluidSynthEngine {
   }
 
   private func configure(_ settings: OpaquePointer) {
-    _ = fluidSettingsSetInteger(settings, "synth.polyphony", 1_024)
+    _ = fluidSettingsSetInteger(settings, "synth.threadsafe-api", 1)
+    _ = fluidSettingsSetInteger(settings, "synth.polyphony", 256)
     _ = fluidSettingsSetInteger(settings, "synth.midi-channels", Int32(Self.midiChannelCount))
     _ = fluidSettingsSetInteger(settings, "synth.chorus.active", 0)
+    _ = fluidSettingsSetNumber(settings, "synth.sample-rate", Self.sampleRate)
     _ = fluidSettingsSetNumber(settings, "synth.gain", Double(gain))
-    _ = fluidSettingsSetNumber(settings, "synth.reverb.active", reverbMixIntensity > 0 ? 1 : 0)
+    _ = fluidSettingsSetInteger(settings, "synth.reverb.active", reverbMixIntensity > 0 ? 1 : 0)
     _ = fluidSettingsSetNumber(settings, "synth.reverb.room-size", 0.78)
     _ = fluidSettingsSetNumber(settings, "synth.reverb.damp", 0.46)
     _ = fluidSettingsSetNumber(settings, "synth.reverb.width", 0.86)
     _ = fluidSettingsSetNumber(settings, "synth.reverb.level", Double(reverbMixIntensity))
+    _ = fluidSettingsSetString(settings, "audio.driver", "coreaudio")
+    _ = fluidSettingsSetString(settings, "audio.coreaudio.performance-mode", "LowLatency")
+    _ = fluidSettingsSetInteger(settings, "audio.period-size", Self.periodSize)
+    _ = fluidSettingsSetInteger(settings, "audio.periods", Self.periodCount)
   }
 
   private func prepareChannelLocked(
@@ -394,6 +407,9 @@ final class FluidSynthEngine {
   }
 
   private static let midiChannelCount = 16
+  private static let sampleRate = 48_000.0
+  private static let periodSize: Int32 = 256
+  private static let periodCount: Int32 = 4
   private static let pitchBendRangeSemitones = 2
   private static let fluidOK: Int32 = 0
 }
