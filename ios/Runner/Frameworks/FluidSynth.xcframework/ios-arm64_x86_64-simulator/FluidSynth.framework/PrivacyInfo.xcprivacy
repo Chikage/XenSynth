@@ -1,0 +1,51 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- FluidSynth is a SoundFont synthesizer library.
+	     It uses file I/O to load SoundFont (.sf2) files and read audio sample data.
+	     Privacy manifest covers Required Reason APIs used by FluidSynth's file handling. -->
+
+	<key>NSPrivacyAccessedAPITypes</key>
+	<array>
+
+		<!-- File Timestamp APIs
+		     FluidSynth reads file modification timestamps when loading SoundFont files
+		     to check if cached data is still valid.
+		     Reason C617.1: Displaying file timestamps to the user. -->
+		<dict>
+			<key>NSPrivacyAccessedAPIType</key>
+			<string>NSPrivacyAccessedAPICategoryFileTimestamp</string>
+			<key>NSPrivacyAccessedAPITypeReasons</key>
+			<array>
+				<string>C617.1</string>
+			</array>
+		</dict>
+
+		<!-- Disk Space APIs
+		     FluidSynth checks available disk space before writing temporary audio files.
+		     Reason E174.1: Displaying disk space information to the user. -->
+		<dict>
+			<key>NSPrivacyAccessedAPIType</key>
+			<string>NSPrivacyAccessedAPICategoryDiskSpace</string>
+			<key>NSPrivacyAccessedAPITypeReasons</key>
+			<array>
+				<string>E174.1</string>
+			</array>
+		</dict>
+
+	</array>
+
+	<!-- No tracking -->
+	<key>NSPrivacyTracking</key>
+	<false/>
+
+	<key>NSPrivacyTrackingDomains</key>
+	<array/>
+
+	<!-- No data collected by FluidSynth -->
+	<key>NSPrivacyCollectedDataTypes</key>
+	<array/>
+
+</dict>
+</plist>

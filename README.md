@@ -1,89 +1,88 @@
-# Xen Synth
+# XenSynth Flutter
 
-Xen Synth is an Android landscape app for playing and visualizing microtonal
-MIDX / MIDI 2.0 waterfall files.
+XenSynth 的 iOS / Android 跨平台版本。界面、乐谱解析、瀑布流和六边形键盘由 Flutter 共享；低延迟合成、乐谱排程、外部 MIDI、文档选择和设置持久化继续复用两端原生实现。
 
-## Current Scope
+## 功能
 
-- Android package: `icu.ringona.xensynth`
-- App label: `Xen Synth`
-- Minimum SDK: 24
-- Orientation: sensor landscape
-- File access: Android Storage Access Framework, plus `ACTION_VIEW` handling for MIDI-like files
-- MIDI-related manifest capability: optional `android.software.midi` and USB host feature declarations
-- Waterfall and hex-keyboard engines: OpenGL ES 3.0 renderers with automatic Canvas fallbacks
-- Supported score inputs: `.mid`, `.midi`, `.midx`, `.midix`, `.midi2`, `.mscz`, `.mscx`
-- MuseScore conversion helper: `MsczToMidx` can emit `.midx` with microtonal offsets or plain `.mid/.midi`
-- Sound mode: native Oboe / FluidSynth playback with the bundled SoundFont
-- Touch layouts: the original linear waterfall ruler or a HexaKeyboard-style
-  isomorphic surface, selected and persisted from Settings
+- 横屏沉浸式瀑布流与可触摸线性键盘
+- 可配置的等距六边形键盘
+- Standard MIDI、MIDX 微分音扩展和 MIDI 2.0 Clip 解析
+- `.mscz` / `.mscx` 原生转换后导入
+- JSON 调律、EDO、音高偏移、速度、音量、混响和延迟设置
+- USB / 系统 MIDI 键盘输入，支持延音踏板与音色切换
+- FluidSynth SoundFont 合成；Android 使用 Oboe，iOS 使用原生音频排程
 
-The hexagonal surface reuses XenSynth's parsed `ParsedScore`, tuning guide,
-transport, program selection, and native audio engine. It does not embed a
-second MIDI/MSCZ parser, playback scheduler, synthesizer, or SoundFont. Hex
-touches are converted to XenSynth floating-point pitches before they enter the
-same per-note tuning and FluidSynth/Oboe path as the linear ruler.
-
-The app no longer embeds a WebView waterfall runtime; score parsing,
-visualization, gestures, transport, and audio scheduling all run in the native
-Android layer.
-
-## Waterfall Rendering
-
-On devices reporting OpenGL ES 3.0 or newer, the waterfall background, pitch
-grid, measure lines, score notes, manual notes, and playhead are rendered by a
-batched GLES backend. The existing Android overlay continues to draw the glass
-ruler, labels, impacts, and particles. Devices without ES 3.0 keep using the
-previous hardware-accelerated Canvas renderer; GLES support is declared as an
-optional manifest feature, so it does not filter those devices at install time.
-
-## Hex Keyboard Rendering
-
-The hexagonal keyboard uses a dirty-rendered GLES 3.0 surface for key fills,
-outlines, labels, period vectors, touch feedback, and score playback effects.
-Compose continues to own multi-touch input and publishes immutable visual
-snapshots to the GL render thread. Devices without ES 3.0, or devices whose GL
-renderer fails at runtime, automatically retain the Canvas backend.
-
-## Build
-
-This repository uses the Gradle wrapper copied from the Android toolchain used by
-the related projects. AGP 9 requires Java 17+.
-
-```sh
-JAVA_HOME="/Applications/Android Studio.app/Contents/jbr/Contents/Home" \
-ANDROID_HOME="$HOME/Library/Android/sdk" \
-ANDROID_SDK_ROOT="$HOME/Library/Android/sdk" \
-./gradlew :app:assembleDebug
-```
-
-The debug APK is written to:
+## 目录
 
 ```text
-app/build/outputs/apk/debug/app-debug.apk
+lib/       Flutter UI、控制器、MIDI/MIDX/MIDI 2.0 解析和调律模型
+android/   Kotlin 平台桥、MIDI 输入、C++ Oboe/FluidSynth 音频引擎
+ios/       Swift 平台桥、CoreMIDI、FluidSynth 和原生乐谱排程
+assets/    演示乐谱、背景图和共享资源
 ```
 
-## Audio Notes
+平台通道：
 
-The app copies the bundled SoundFont from assets into cache on first use and
-loads it into the native FluidSynth backend.
+```text
+MethodChannel  icu.ringona.xensynth/platform
+EventChannel   icu.ringona.xensynth/platform/midi
+```
 
-The JustPiano `feature_5.1` native audio stack is the reference for the next
-audio milestone:
+## 环境要求
 
-- `SoundEngineUtil` Java/Kotlin-facing API
-- `SoundEngine.cpp` native Oboe / FluidSynth rendering
-- SF2 loading via `loadSf2(path)`
-- pitch calibration / tuning behavior through FluidSynth key tuning
-- on-demand FluidSynth pooling with up to eight instances, providing roughly
-  1,920 isolated per-note tuning channels before best-effort channel sharing
+- Flutter 3.44 或兼容的稳定版本（Dart 3.12）
+- Android Studio / Android SDK，NDK `28.2.13676358`
+- Android 9（API 28）及以上的 `arm64-v8a` 设备
+- Xcode 16 或更新版本，iOS 16 及以上
 
-The MIDX/MIDI2 parser, renderer, transport, and low-latency audio backend are
-now integrated as the primary runtime.
+Android 当前仅打包 `arm64-v8a`，因为仓库内复用的 FluidSynth 预编译库为 arm64 版本。
 
-## HexaKeyboard Source
+## 运行与构建
 
-The hexagonal geometry, canvas styling, multi-touch hysteresis, pseudo-pressure,
-chord selection, and playback effects were adapted from HexaKeyboard-Android.
-See `HEX_KEYBOARD_NOTICE.md` for the exact source revision and integration
-boundary.
+```sh
+flutter pub get
+flutter analyze
+flutter test
+```
+
+连接设备后运行：
+
+```sh
+flutter run -d <device-id>
+```
+
+构建 Android 调试 APK：
+
+```sh
+flutter build apk --debug
+```
+
+输出位置：
+
+```text
+build/app/outputs/flutter-apk/app-debug.apk
+```
+
+构建 iOS（不签名）：
+
+```sh
+flutter build ios --debug --no-codesign
+```
+
+构建模拟器版本：
+
+```sh
+flutter build ios --simulator --debug
+```
+
+发布前请在 Android 和 Xcode 工程中配置自己的签名信息。
+
+## 文件与调律
+
+支持的乐谱扩展名包括 `.mid`、`.midi`、`.kar`、`.midx`、`.midix`、`.midi2`、`.mscz` 和 `.mscx`。JSON 调律格式见 [TUNING_JSON.md](TUNING_JSON.md)。
+
+六边形键盘的来源和整合边界见 [HEX_KEYBOARD_NOTICE.md](HEX_KEYBOARD_NOTICE.md)。
+
+## 许可
+
+项目按 [GPLv3](LICENSE) 发布。FluidSynth 及其预编译框架遵循上游 LGPL 许可；iOS 产物同时打包对应的隐私清单。

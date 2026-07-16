@@ -1,0 +1,16 @@
+.section .rodata.xensf,"a",%progbits
+.balign 16
+
+.global xen_soundfont_blob_start
+.hidden xen_soundfont_blob_start
+.type xen_soundfont_blob_start, %object
+xen_soundfont_blob_start:
+.incbin "@SOUNDFONT_BLOB@"
+
+.global xen_soundfont_blob_end
+.hidden xen_soundfont_blob_end
+.type xen_soundfont_blob_end, %object
+xen_soundfont_blob_end:
+.size xen_soundfont_blob_start, xen_soundfont_blob_end - xen_soundfont_blob_start
+
+.section .note.GNU-stack,"",%progbits

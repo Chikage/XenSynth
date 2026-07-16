@@ -8,3 +8,28 @@ local.properties
 .idea/
 .DS_Store
 key.jks
+
+# Flutter / Dart
+.dart_tool/
+.flutter-plugins
+.flutter-plugins-dependencies
+.packages
+.pub-cache/
+.pub/
+coverage/
+doc/api/
+flutter_*.png
+
+# Platform build products and local configuration
+android/.gradle/
+android/.cxx/
+android/app/build/
+android/local.properties
+ios/Flutter/ephemeral/
+ios/Flutter/Generated.xcconfig
+ios/Flutter/flutter_export_environment.sh
+ios/Pods/
+ios/.symlinks/
+ios/Runner.xcworkspace/xcuserdata/
+ios/Runner.xcodeproj/xcuserdata/
+*.xcuserstate
