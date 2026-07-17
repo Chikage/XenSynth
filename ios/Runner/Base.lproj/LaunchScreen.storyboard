@@ -16,16 +16,11 @@
                     <view key="view" contentMode="scaleToFill" id="Ze5-6b-2t3">
                         <autoresizingMask key="autoresizingMask" widthSizable="YES" heightSizable="YES"/>
                         <subviews>
-                            <imageView opaque="NO" clipsSubviews="YES" contentMode="scaleAspectFit" image="LaunchLogoRounded" translatesAutoresizingMaskIntoConstraints="NO" id="YRO-k0-Ey4">
+                            <imageView opaque="YES" contentMode="scaleAspectFit" image="LaunchLogoSeamless" translatesAutoresizingMaskIntoConstraints="NO" id="YRO-k0-Ey4">
                                 <constraints>
                                     <constraint firstAttribute="width" constant="168" id="6N9-1D-vWo"/>
                                     <constraint firstAttribute="height" constant="168" id="F6B-vA-szH"/>
                                 </constraints>
-                                <userDefinedRuntimeAttributes>
-                                    <userDefinedRuntimeAttribute type="number" keyPath="layer.cornerRadius">
-                                        <real key="value" value="38"/>
-                                    </userDefinedRuntimeAttribute>
-                                </userDefinedRuntimeAttributes>
                             </imageView>
                         </subviews>
                         <color key="backgroundColor" red="0.05490196078" green="0.07450980392" blue="0.07450980392" alpha="1" colorSpace="custom" customColorSpace="sRGB"/>
@@ -41,6 +36,6 @@
         </scene>
     </scenes>
     <resources>
-        <image name="LaunchLogoRounded" width="168" height="168"/>
+        <image name="LaunchLogoSeamless" width="168" height="168"/>
     </resources>
 </document>
