@@ -24,7 +24,23 @@ const double _spatialRepeatGapIntervalRatio = 0.22;
 const double _spatialMinimumVisibleNotePreviewRatio = 0.003;
 const double _spatialMinimumVisibleNoteSeconds = 0.004;
 
-double _spatialNoteRadiusScale(int velocity) {
+double _spatialNoteStrokeWidth(
+  _SpatialScene scene,
+  _SpatialCell cell,
+  int velocity,
+) {
+  final velocityRatio = velocity.clamp(1, 127) / 127;
+  final projectedRadius = scene.noteRadiusFor(cell);
+  // Width is derived only from the key's projected XOY footprint. It is not
+  // recomputed from the note's z position, so a single note stays equally
+  // thin from its leading edge to its landing edge.
+  return math.max(
+    scene.physicalPixel,
+    projectedRadius * (0.064 + velocityRatio * 0.018),
+  );
+}
+
+double _spatialLandingRadiusScale(int velocity) {
   final velocityRatio = velocity.clamp(1, 127) / 127;
   return 0.18 + velocityRatio * 0.055;
 }
@@ -969,6 +985,18 @@ class _SpatialScene {
   final List<_SpatialCell> cells;
   final Map<AxialCoordinate, _SpatialCell> cellsByCoordinate;
 
+  double noteRadiusFor(_SpatialCell cell) {
+    if (projection == SpatialProjectionMode.perspective) {
+      // Perspective may scale different XOY positions by different amounts,
+      // but the radius is sampled at z=0 so it does not change along a note.
+      return cell.projectedRadius;
+    }
+    // Oblique projection is affine: all translated copies of the same key
+    // share one projected radius. Use one scene-wide value to preserve its
+    // equal-scale drawing principle explicitly.
+    return cells.first.projectedRadius;
+  }
+
   Offset project(HexPoint point, double z) {
     final raw = projectionTransform.project(point, z);
     return offset + raw * scale;
@@ -1683,35 +1711,25 @@ class _SpatialNotesPainter extends CustomPainter {
     visible.sort(
       (first, second) => first.depthOrder.compareTo(second.depthOrder),
     );
-    final simplifyDenseScore = visible.length > 96;
     for (final note in visible) {
-      if (simplified ||
-          simplifyDenseScore ||
-          note.bottomZ > scene.zMaximum * 0.58) {
-        _paintSimplifiedNote(canvas, note);
-      } else {
-        _paintNotePrism(canvas, note);
-      }
+      _paintNoteLine(canvas, note);
     }
   }
 
-  void _paintSimplifiedNote(Canvas canvas, _VisibleSpatialNote visible) {
+  void _paintNoteLine(Canvas canvas, _VisibleSpatialNote visible) {
     final velocityRatio = visible.note.velocity.clamp(1, 127) / 127;
     final color = _spatialTrackColor(visible.note);
     final cell = scene.cellsByCoordinate[visible.cell.coordinate]!;
     final bottom = scene.project(visible.cell.center, visible.bottomZ);
     final top = scene.project(visible.cell.center, visible.topZ);
-    final width = math.max(
-      scene.physicalPixel,
-      cell.projectedRadius * (0.12 + velocityRatio * 0.055),
-    );
+    final width = _spatialNoteStrokeWidth(scene, cell, visible.note.velocity);
     canvas.drawLine(
       bottom,
       top,
       Paint()
         ..strokeCap = StrokeCap.square
-        ..strokeWidth = width * 1.9
-        ..color = color.withValues(alpha: 0.22 + velocityRatio * 0.14),
+        ..strokeWidth = width * 2.15
+        ..color = color.withValues(alpha: 0.18 + velocityRatio * 0.12),
     );
     canvas.drawLine(
       bottom,
@@ -1720,55 +1738,6 @@ class _SpatialNotesPainter extends CustomPainter {
         ..strokeCap = StrokeCap.square
         ..strokeWidth = width
         ..color = color.withValues(alpha: 0.72 + velocityRatio * 0.22),
-    );
-  }
-
-  void _paintNotePrism(Canvas canvas, _VisibleSpatialNote visible) {
-    final note = visible.note;
-    final velocityRatio = note.velocity.clamp(1, 127) / 127;
-    final radiusScale = _spatialNoteRadiusScale(note.velocity);
-    final bottom = scene.verticesFor(
-      visible.cell,
-      z: visible.bottomZ,
-      radiusScale: radiusScale,
-    );
-    final top = scene.verticesFor(
-      visible.cell,
-      z: visible.topZ,
-      radiusScale: radiusScale,
-    );
-    final color = _spatialTrackColor(note);
-    final cell = scene.cellsByCoordinate[visible.cell.coordinate]!;
-    canvas.drawLine(
-      scene.project(visible.cell.center, visible.bottomZ),
-      scene.project(visible.cell.center, visible.topZ),
-      Paint()
-        ..strokeWidth = math.max(
-          scene.physicalPixel,
-          cell.projectedRadius * 0.075,
-        )
-        ..color = color.withValues(alpha: 0.16),
-    );
-    for (var index = 0; index < 6; index++) {
-      final next = (index + 1) % 6;
-      canvas.drawPath(
-        _pathFrom([bottom[index], bottom[next], top[next], top[index]]),
-        Paint()
-          ..color = color.withValues(
-            alpha: (0.24 + velocityRatio * 0.28) * (index.isEven ? 1 : 0.72),
-          ),
-      );
-    }
-    canvas.drawPath(
-      _pathFrom(top),
-      Paint()..color = color.withValues(alpha: 0.68 + velocityRatio * 0.24),
-    );
-    canvas.drawPath(
-      _pathFrom(bottom),
-      Paint()
-        ..style = PaintingStyle.stroke
-        ..strokeWidth = math.max(scene.physicalPixel, scene.scale * 0.01)
-        ..color = color.withValues(alpha: 0.88),
     );
   }
 
@@ -2028,7 +1997,7 @@ class _SpatialOverlayPainter extends CustomPainter {
     double depth,
   ) {
     final strongest = notes.first;
-    final radiusScale = _spatialNoteRadiusScale(strongest.velocity);
+    final radiusScale = _spatialLandingRadiusScale(strongest.velocity);
     final footprint = _pathFrom(
       scene.verticesFor(cell.key, z: -depth, radiusScale: radiusScale),
     );

@@ -206,7 +206,25 @@ void main() {
     },
   );
 
-  test('same-key repeats keep a small visual gap between note prisms', () {
+  test(
+    'oblique projection keeps one shared note scale across the XOY plane',
+    () {
+      const settings = XenSynthSettings(
+        layoutMode: KeyboardLayoutMode.spatial,
+        spatialProjection: SpatialProjectionMode.oblique,
+      );
+      final range = SpatialWaterfallView.debugProjectedKeyRadiusRange(
+        size: const Size(1000, 640),
+        settings: settings,
+        rotationXDegrees: 24,
+        rotationYDegrees: -30,
+        rotationDegrees: 42,
+      );
+      expect(range.maximum / range.minimum, closeTo(1, 0.000001));
+    },
+  );
+
+  test('same-key repeats keep a small visual gap between note lines', () {
     const settings = XenSynthSettings(
       layoutMode: KeyboardLayoutMode.spatial,
       playbackPreviewSeconds: 1.8,
