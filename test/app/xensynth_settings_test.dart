@@ -1,5 +1,6 @@
 import 'package:flutter_test/flutter_test.dart';
 import 'package:xensynth/app/xensynth_settings.dart';
+import 'package:xensynth/core/hex_keyboard.dart';
 
 void main() {
   group('XenSynthSettings hex semantics', () {
@@ -16,6 +17,28 @@ void main() {
       expect(
         settings.spatialProjection,
         SpatialProjectionMode.obliquePerspective,
+      );
+    });
+
+    test('rotates the Q axis counterclockwise and reverses the R axis', () {
+      const settings = XenSynthSettings(hexStepQ: 9, hexStepR: 4);
+      final configuration = settings.hexKeyboardConfiguration;
+
+      expect(
+        PitchMapper.step(
+          const AxialCoordinate(q: 1, r: -1),
+          stepQ: configuration.stepQ,
+          stepR: configuration.stepR,
+        ),
+        9,
+      );
+      expect(
+        PitchMapper.step(
+          const AxialCoordinate(q: 0, r: -1),
+          stepQ: configuration.stepQ,
+          stepR: configuration.stepR,
+        ),
+        4,
       );
     });
 

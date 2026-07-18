@@ -139,7 +139,6 @@ Future<_TapResult> _tapConcreteKey(
   await tester.binding.setSurfaceSize(const Size(1200, 700));
   addTearDown(() => tester.binding.setSurfaceSize(null));
 
-  final effectivePeriod = settings.edo > 0 ? settings.edo : 12;
   final pitches = <double>[];
   final released = <int>[];
   await tester.pumpWidget(
@@ -173,15 +172,7 @@ Future<_TapResult> _tapConcreteKey(
   }
 
   final layout = HexaKeyboardLayoutEngine.build(
-    HexKeyboardConfiguration(
-      columns: settings.hexColumns,
-      rows: settings.hexRows,
-      period: effectivePeriod,
-      stepQ: settings.hexStepQ,
-      stepR: settings.hexStepR,
-      groupByOctave: settings.hexGroupByOctave,
-      rotationDegrees: settings.hexRotationDegrees,
-    ),
+    settings.hexKeyboardConfiguration,
   );
   final candidates = layout.cells.where((cell) => cell.step != 0).toList()
     ..sort((first, second) {

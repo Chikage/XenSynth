@@ -71,8 +71,10 @@ class XenSynthSettings {
         columns: hexColumns,
         rows: hexRows,
         period: hexPeriod,
-        stepQ: hexStepQ,
-        stepR: hexStepR,
+        // The UI Q axis is 60° counterclockwise from native +q, while the
+        // UI R axis points opposite native +r.
+        stepQ: hexStepQ - hexStepR,
+        stepR: -hexStepR,
         groupByOctave: hexGroupByOctave,
         radius: 24,
         rotationDegrees: hexRotationDegrees,
