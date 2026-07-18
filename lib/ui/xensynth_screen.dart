@@ -127,6 +127,7 @@ class _XenSynthScreenState extends State<XenSynthScreen>
                         onPitchDown: _controller.noteDown,
                         onPitchMove: _controller.noteMove,
                         onPitchUp: _controller.noteUp,
+                        onTogglePlayback: _controller.togglePlayback,
                       ),
                     ),
                   },

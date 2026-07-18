@@ -224,6 +224,65 @@ void main() {
     },
   );
 
+  test('note line widths preserve both projection principles', () {
+    const size = Size(1000, 640);
+    const rotationXDegrees = 24.0;
+    const rotationYDegrees = -30.0;
+    const rotationDegrees = 42.0;
+    const devicePixelRatio = 3.0;
+
+    for (final projection in SpatialProjectionMode.values) {
+      final settings = XenSynthSettings(
+        layoutMode: KeyboardLayoutMode.spatial,
+        spatialProjection: projection,
+      );
+      final radii = SpatialWaterfallView.debugProjectedKeyRadiusRange(
+        size: size,
+        settings: settings,
+        rotationXDegrees: rotationXDegrees,
+        rotationYDegrees: rotationYDegrees,
+        rotationDegrees: rotationDegrees,
+        devicePixelRatio: devicePixelRatio,
+      );
+      final quiet = SpatialWaterfallView.debugNoteStrokeWidthRange(
+        size: size,
+        settings: settings,
+        velocity: 1,
+        rotationXDegrees: rotationXDegrees,
+        rotationYDegrees: rotationYDegrees,
+        rotationDegrees: rotationDegrees,
+        devicePixelRatio: devicePixelRatio,
+      );
+      final loud = SpatialWaterfallView.debugNoteStrokeWidthRange(
+        size: size,
+        settings: settings,
+        velocity: 127,
+        rotationXDegrees: rotationXDegrees,
+        rotationYDegrees: rotationYDegrees,
+        rotationDegrees: rotationDegrees,
+        devicePixelRatio: devicePixelRatio,
+      );
+
+      expect(loud.minimum, greaterThan(quiet.minimum));
+      expect(loud.maximum, lessThan(quiet.maximum * 1.3));
+      switch (projection) {
+        case SpatialProjectionMode.oblique:
+          expect(quiet.maximum / quiet.minimum, closeTo(1, 0.000001));
+          expect(loud.maximum / loud.minimum, closeTo(1, 0.000001));
+        case SpatialProjectionMode.perspective:
+          final projectedRadiusRatio = radii.maximum / radii.minimum;
+          expect(
+            quiet.maximum / quiet.minimum,
+            closeTo(projectedRadiusRatio, 0.000001),
+          );
+          expect(
+            loud.maximum / loud.minimum,
+            closeTo(projectedRadiusRatio, 0.000001),
+          );
+      }
+    }
+  });
+
   test('same-key repeats keep a small visual gap between note lines', () {
     const settings = XenSynthSettings(
       layoutMode: KeyboardLayoutMode.spatial,
@@ -479,6 +538,124 @@ void main() {
 
     await first.up();
     await second.up();
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('corner controls pan and rotate the 3D waterfall', (
+    tester,
+  ) async {
+    await tester.binding.setSurfaceSize(const Size(1000, 640));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+    final controller = HexKeyboardViewportController();
+    final playedPitches = <double>[];
+    addTearDown(controller.dispose);
+
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: SpatialWaterfallView(
+            score: null,
+            playhead: 0,
+            settings: const XenSynthSettings(
+              layoutMode: KeyboardLayoutMode.spatial,
+            ),
+            activePitches: const {},
+            viewportController: controller,
+            onPitchDown: (_, pitch, _) => playedPitches.add(pitch),
+            onPitchMove: (_, pitch, _) => playedPitches.add(pitch),
+            onPitchUp: (_) {},
+          ),
+        ),
+      ),
+    );
+
+    final viewRect = tester.getRect(find.byType(SpatialWaterfallView));
+    final panRect = tester.getRect(
+      find.byKey(const ValueKey('spatial-pan-control')),
+    );
+    final rotationRect = tester.getRect(
+      find.byKey(const ValueKey('spatial-rotation-control')),
+    );
+    expect(panRect.top, closeTo(rotationRect.top, 0.001));
+    expect(
+      panRect.left - viewRect.left,
+      closeTo(viewRect.right - rotationRect.right, 0.001),
+    );
+
+    await tester.tap(find.byKey(const ValueKey('spatial-pan-up')));
+    await tester.tap(find.byKey(const ValueKey('spatial-pan-right')));
+    await tester.pump();
+    expect(controller.pan, const Offset(32, -32));
+    expect(playedPitches, isEmpty);
+
+    final sphereCenter = rotationRect.center;
+    final xyGesture = await tester.startGesture(sphereCenter);
+    await xyGesture.moveBy(const Offset(14, -12));
+    await xyGesture.moveBy(const Offset(12, -10));
+    await tester.pump();
+    await xyGesture.up();
+    await tester.pump();
+    expect(controller.rotationXDegrees.abs(), greaterThan(1));
+    expect(controller.rotationYDegrees.abs(), greaterThan(1));
+    expect(controller.rotationZDegrees, closeTo(0, 0.001));
+
+    final outerGesture = await tester.startGesture(
+      sphereCenter + Offset(0, -rotationRect.height * 0.43),
+    );
+    await outerGesture.moveTo(
+      sphereCenter + Offset(rotationRect.width * 0.43, 0),
+    );
+    await tester.pump();
+    await outerGesture.up();
+    await tester.pump();
+    expect(controller.rotationZDegrees.abs(), greaterThan(20));
+    expect(playedPitches, isEmpty);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('empty-space tap toggles playback but key taps still play', (
+    tester,
+  ) async {
+    await tester.binding.setSurfaceSize(const Size(1000, 640));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+    const settings = XenSynthSettings(layoutMode: KeyboardLayoutMode.spatial);
+    var playbackToggles = 0;
+    final playedPitches = <double>[];
+
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: SpatialWaterfallView(
+            score: null,
+            playhead: 0,
+            settings: settings,
+            activePitches: const {},
+            onPitchDown: (_, pitch, _) => playedPitches.add(pitch),
+            onPitchMove: (_, pitch, _) => playedPitches.add(pitch),
+            onPitchUp: (_) {},
+            onTogglePlayback: () => playbackToggles++,
+          ),
+        ),
+      ),
+    );
+
+    final viewRect = tester.getRect(find.byType(SpatialWaterfallView));
+    await tester.tapAt(
+      viewRect.topLeft + Offset(viewRect.width / 2, viewRect.height * 0.12),
+    );
+    await tester.pump();
+    expect(playbackToggles, 1);
+    expect(playedPitches, isEmpty);
+
+    final landingCenter = SpatialWaterfallView.debugLandingCenterForPitch(
+      size: viewRect.size,
+      settings: settings,
+      pitch: 60,
+    )!;
+    await tester.tapAt(viewRect.topLeft + landingCenter);
+    await tester.pump();
+    expect(playedPitches, isNotEmpty);
+    expect(playbackToggles, 1);
     expect(tester.takeException(), isNull);
   });
 }

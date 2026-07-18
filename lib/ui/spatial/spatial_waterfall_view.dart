@@ -23,6 +23,8 @@ const double _spatialRepeatGapMaximumSeconds = 0.04;
 const double _spatialRepeatGapIntervalRatio = 0.22;
 const double _spatialMinimumVisibleNotePreviewRatio = 0.003;
 const double _spatialMinimumVisibleNoteSeconds = 0.004;
+const double _spatialNoteBaseRadiusRatio = 0.072;
+const double _spatialNoteVelocityRadiusRatio = 0.020;
 
 double _spatialNoteStrokeWidth(
   _SpatialScene scene,
@@ -32,11 +34,13 @@ double _spatialNoteStrokeWidth(
   final velocityRatio = velocity.clamp(1, 127) / 127;
   final projectedRadius = scene.noteRadiusFor(cell);
   // Width is derived only from the key's projected XOY footprint. It is not
-  // recomputed from the note's z position, so a single note stays equally
-  // thin from its leading edge to its landing edge.
+  // recomputed from the note's z position, so a single note keeps a consistent
+  // body from its leading edge to its landing edge.
   return math.max(
     scene.physicalPixel,
-    projectedRadius * (0.064 + velocityRatio * 0.018),
+    projectedRadius *
+        (_spatialNoteBaseRadiusRatio +
+            velocityRatio * _spatialNoteVelocityRadiusRatio),
   );
 }
 
@@ -67,6 +71,7 @@ class SpatialWaterfallView extends StatefulWidget {
     required this.onPitchUp,
     this.playing = false,
     this.viewportController,
+    this.onTogglePlayback,
     super.key,
   });
 
@@ -79,6 +84,7 @@ class SpatialWaterfallView extends StatefulWidget {
   final SpatialPitchPointerCallback onPitchMove;
   final ValueChanged<int> onPitchUp;
   final HexKeyboardViewportController? viewportController;
+  final VoidCallback? onTogglePlayback;
 
   @visibleForTesting
   static Offset? debugLandingCenterForPitch({
@@ -255,6 +261,37 @@ class SpatialWaterfallView extends StatefulWidget {
     );
   }
 
+  @visibleForTesting
+  static ({double minimum, double maximum}) debugNoteStrokeWidthRange({
+    required Size size,
+    required XenSynthSettings settings,
+    required int velocity,
+    double rotationXDegrees = 0,
+    double rotationYDegrees = 0,
+    double rotationDegrees = 0,
+    double devicePixelRatio = 1,
+  }) {
+    final layout = HexaKeyboardLayoutEngine.build(
+      settings.hexKeyboardConfiguration,
+    );
+    final scene = _SpatialScene.fit(
+      layout: layout,
+      size: size,
+      projection: settings.spatialProjection,
+      previewSeconds: settings.playbackPreviewSeconds,
+      scaleMultiplier: HexKeyboardViewportController.minimumScale,
+      pan: Offset.zero,
+      rotationXDegrees: rotationXDegrees,
+      rotationYDegrees: rotationYDegrees,
+      rotationDegrees: rotationDegrees,
+      devicePixelRatio: devicePixelRatio,
+    );
+    final widths = scene.cells.map(
+      (cell) => _spatialNoteStrokeWidth(scene, cell, velocity),
+    );
+    return (minimum: widths.reduce(math.min), maximum: widths.reduce(math.max));
+  }
+
   @override
   State<SpatialWaterfallView> createState() => _SpatialWaterfallViewState();
 }
@@ -266,10 +303,15 @@ class _SpatialWaterfallViewState extends State<SpatialWaterfallView>
   static const _transformPanThreshold = 9.0;
   static const _transformScaleThreshold = 0.035;
   static const _transformRotationThresholdDegrees = 3.0;
+  static const _tapMovementThreshold = 9.0;
+  static const _controlMargin = 14.0;
+  static const _panStep = 32.0;
+  static const _rotationDegreesPerPixel = 0.42;
 
   final Map<int, HexKey> _pointerCells = {};
   final Map<int, double> _pointerForces = {};
   final Map<int, Offset> _pointerPositions = {};
+  final Map<int, Offset> _backgroundTapOrigins = {};
   final WaterfallParticleSystem _particleSystem = WaterfallParticleSystem(
     maximumLiveParticles: 480,
   );
@@ -288,6 +330,12 @@ class _SpatialWaterfallViewState extends State<SpatialWaterfallView>
   _PendingSpatialTransform? _pendingSpatialTransform;
   bool _spatialTransformScheduled = false;
   bool _transformConsumed = false;
+  _SpatialRotationControlMode? _rotationControlMode;
+  Offset? _rotationDragOrigin;
+  double _rotationDragStartXDegrees = 0;
+  double _rotationDragStartYDegrees = 0;
+  double _rotationDragStartZDegrees = 0;
+  double _rotationDragStartAngle = 0;
   int _particleCursor = 0;
 
   @override
@@ -345,17 +393,20 @@ class _SpatialWaterfallViewState extends State<SpatialWaterfallView>
         _latestScene = scene;
         final selectedCoordinates = _selectedCoordinates();
         final activeForces = _activeForces(selectedCoordinates);
+        final controlExtent = _controlExtentFor(scene.size);
         return Semantics(
           container: true,
           label:
               'Spatial waterfall hexagonal keyboard with ${_layout.cells.length} keys',
-          hint: 'Use two fingers to pan, pinch, and rotate the 3D view',
+          hint:
+              'Tap empty space to play or pause. Use the corner controls or two fingers to transform the 3D view',
           child: Listener(
             behavior: HitTestBehavior.opaque,
             onPointerDown: (event) => _handlePointerDown(event, scene),
             onPointerMove: (event) => _handlePointerMove(event, scene),
-            onPointerUp: (event) => _handlePointerEnd(event.pointer),
-            onPointerCancel: (event) => _handlePointerEnd(event.pointer),
+            onPointerUp: (event) => _handlePointerEnd(event),
+            onPointerCancel: (event) =>
+                _handlePointerEnd(event, cancelled: true),
             child: RepaintBoundary(
               child: Stack(
                 fit: StackFit.expand,
@@ -447,6 +498,37 @@ class _SpatialWaterfallViewState extends State<SpatialWaterfallView>
                       size: Size.infinite,
                     ),
                   ),
+                  Positioned(
+                    left: _controlMargin,
+                    top: _controlMargin,
+                    width: controlExtent,
+                    height: controlExtent,
+                    child: _SpatialPanControl(
+                      extent: controlExtent,
+                      onUp: () => _panBy(const Offset(0, -_panStep)),
+                      onDown: () => _panBy(const Offset(0, _panStep)),
+                      onLeft: () => _panBy(const Offset(-_panStep, 0)),
+                      onRight: () => _panBy(const Offset(_panStep, 0)),
+                    ),
+                  ),
+                  Positioned(
+                    right: _controlMargin,
+                    top: _controlMargin,
+                    width: controlExtent,
+                    height: controlExtent,
+                    child: _SpatialRotationControl(
+                      extent: controlExtent,
+                      rotationXDegrees: _viewportController.rotationXDegrees,
+                      rotationYDegrees: _viewportController.rotationYDegrees,
+                      rotationZDegrees: _viewportController.rotationZDegrees,
+                      onPanStart: (details) =>
+                          _startRotationControl(details, controlExtent),
+                      onPanUpdate: (details) =>
+                          _updateRotationControl(details, controlExtent),
+                      onPanEnd: (_) => _endRotationControl(),
+                      onPanCancel: _endRotationControl,
+                    ),
+                  ),
                 ],
               ),
             ),
@@ -502,11 +584,96 @@ class _SpatialWaterfallViewState extends State<SpatialWaterfallView>
     );
   }
 
+  double _controlExtentFor(Size size) {
+    return (size.shortestSide * 0.19).clamp(84.0, 108.0).toDouble();
+  }
+
+  bool _isInsideCornerControl(Offset position, Size size) {
+    final extent = _controlExtentFor(size);
+    final leftControl = Rect.fromLTWH(
+      _controlMargin,
+      _controlMargin,
+      extent,
+      extent,
+    );
+    final rightControl = Rect.fromLTWH(
+      size.width - _controlMargin - extent,
+      _controlMargin,
+      extent,
+      extent,
+    );
+    return leftControl.contains(position) || rightControl.contains(position);
+  }
+
+  void _panBy(Offset delta) {
+    _viewportController.panBy(delta);
+  }
+
+  void _startRotationControl(DragStartDetails details, double extent) {
+    final center = Offset(extent / 2, extent / 2);
+    final radialOffset = details.localPosition - center;
+    _rotationControlMode = radialOffset.distance >= extent * 0.36
+        ? _SpatialRotationControlMode.zAxis
+        : _SpatialRotationControlMode.xyAxes;
+    _rotationDragOrigin = details.localPosition;
+    _rotationDragStartXDegrees = _viewportController.rotationXDegrees;
+    _rotationDragStartYDegrees = _viewportController.rotationYDegrees;
+    _rotationDragStartZDegrees = _viewportController.rotationZDegrees;
+    _rotationDragStartAngle = math.atan2(radialOffset.dy, radialOffset.dx);
+  }
+
+  void _updateRotationControl(DragUpdateDetails details, double extent) {
+    final mode = _rotationControlMode;
+    final origin = _rotationDragOrigin;
+    if (mode == null || origin == null) return;
+
+    var rotationXDegrees = _rotationDragStartXDegrees;
+    var rotationYDegrees = _rotationDragStartYDegrees;
+    var rotationZDegrees = _rotationDragStartZDegrees;
+    switch (mode) {
+      case _SpatialRotationControlMode.xyAxes:
+        final delta = details.localPosition - origin;
+        rotationXDegrees -= delta.dy * _rotationDegreesPerPixel;
+        rotationYDegrees += delta.dx * _rotationDegreesPerPixel;
+      case _SpatialRotationControlMode.zAxis:
+        final center = Offset(extent / 2, extent / 2);
+        final radialOffset = details.localPosition - center;
+        var angleDelta =
+            math.atan2(radialOffset.dy, radialOffset.dx) -
+            _rotationDragStartAngle;
+        if (angleDelta > math.pi) angleDelta -= math.pi * 2;
+        if (angleDelta < -math.pi) angleDelta += math.pi * 2;
+        rotationZDegrees += angleDelta * 180 / math.pi;
+    }
+    _queueSpatialTransform(
+      scaleMultiplier: _viewportController.scaleMultiplier,
+      pan: _viewportController.pan,
+      rotationXDegrees: rotationXDegrees,
+      rotationYDegrees: rotationYDegrees,
+      rotationDegrees: rotationZDegrees,
+    );
+  }
+
+  void _endRotationControl() {
+    _rotationControlMode = null;
+    _rotationDragOrigin = null;
+  }
+
   void _handlePointerDown(PointerDownEvent event, _SpatialScene scene) {
+    if (_isInsideCornerControl(event.localPosition, scene.size)) {
+      _backgroundTapOrigins.clear();
+      return;
+    }
     _pointerPositions[event.pointer] = event.localPosition;
     if (_transformConsumed) return;
-    _processPointer(event, scene, true);
+    final hitKey = _processPointer(event, scene, true);
+    if (_pointerPositions.length == 1 && !hitKey) {
+      _backgroundTapOrigins[event.pointer] = event.localPosition;
+    } else {
+      _backgroundTapOrigins.clear();
+    }
     if (_pointerPositions.length >= 2) {
+      _backgroundTapOrigins.clear();
       _transformGesture ??= _SpatialTransformGesture.capture(
         _pointerPositions,
         scaleMultiplier: _viewportController.scaleMultiplier,
@@ -521,11 +688,19 @@ class _SpatialWaterfallViewState extends State<SpatialWaterfallView>
   void _handlePointerMove(PointerMoveEvent event, _SpatialScene scene) {
     if (!_pointerPositions.containsKey(event.pointer)) return;
     _pointerPositions[event.pointer] = event.localPosition;
+    final tapOrigin = _backgroundTapOrigins[event.pointer];
+    if (tapOrigin != null &&
+        (event.localPosition - tapOrigin).distance > _tapMovementThreshold) {
+      _backgroundTapOrigins.remove(event.pointer);
+    }
     final gesture = _transformGesture;
     if (gesture == null || _pointerPositions.length < 2) {
-      if (!_transformConsumed) _processPointer(event, scene, false);
+      if (!_transformConsumed && _processPointer(event, scene, false)) {
+        _backgroundTapOrigins.remove(event.pointer);
+      }
       return;
     }
+    _backgroundTapOrigins.clear();
     final metrics = gesture.measure(_pointerPositions);
     if (metrics == null) return;
     if (!_transformConsumed) {
@@ -545,6 +720,7 @@ class _SpatialWaterfallViewState extends State<SpatialWaterfallView>
         return;
       }
       _transformConsumed = true;
+      _backgroundTapOrigins.clear();
       _releaseAllPointers(notify: true);
     }
     _queueSpatialTransform(
@@ -591,7 +767,17 @@ class _SpatialWaterfallViewState extends State<SpatialWaterfallView>
     });
   }
 
-  void _handlePointerEnd(int pointer) {
+  void _handlePointerEnd(PointerEvent event, {bool cancelled = false}) {
+    final pointer = event.pointer;
+    if (!_pointerPositions.containsKey(pointer)) return;
+    final tapOrigin = _backgroundTapOrigins.remove(pointer);
+    final shouldTogglePlayback =
+        !cancelled &&
+        !_transformConsumed &&
+        _pointerPositions.length == 1 &&
+        !_pointerCells.containsKey(pointer) &&
+        tapOrigin != null &&
+        (event.localPosition - tapOrigin).distance <= _tapMovementThreshold;
     _pointerPositions.remove(pointer);
     if (!_transformConsumed) _releasePointer(pointer);
     if (_pointerPositions.length >= 2) {
@@ -610,9 +796,10 @@ class _SpatialWaterfallViewState extends State<SpatialWaterfallView>
       _transformConsumed = false;
       if (mounted) setState(() {});
     }
+    if (shouldTogglePlayback) widget.onTogglePlayback?.call();
   }
 
-  void _processPointer(PointerEvent event, _SpatialScene scene, bool isDown) {
+  bool _processPointer(PointerEvent event, _SpatialScene scene, bool isDown) {
     final previous = _pointerCells[event.pointer];
     final next = scene.keyAt(
       event.localPosition,
@@ -623,14 +810,14 @@ class _SpatialWaterfallViewState extends State<SpatialWaterfallView>
 
     if (next == null) {
       if (previous != null) _releasePointer(event.pointer);
-      return;
+      return false;
     }
     if (next.coordinate == previous?.coordinate) {
       final oldForce = _pointerForces[event.pointer];
       if (oldForce == null || (oldForce - force).abs() >= 0.02) {
         setState(() => _pointerForces[event.pointer] = force);
       }
-      return;
+      return true;
     }
 
     setState(() {
@@ -647,6 +834,7 @@ class _SpatialWaterfallViewState extends State<SpatialWaterfallView>
     } else {
       widget.onPitchMove(event.pointer, pitch, velocity);
     }
+    return true;
   }
 
   double _normalizedForce(PointerEvent event) {
@@ -673,6 +861,7 @@ class _SpatialWaterfallViewState extends State<SpatialWaterfallView>
     final pointers = _pointerCells.keys.toList(growable: false);
     _pointerCells.clear();
     _pointerForces.clear();
+    _backgroundTapOrigins.clear();
     if (notify && pointers.isNotEmpty && mounted) setState(() {});
     for (final pointer in pointers) {
       widget.onPitchUp(pointer);
@@ -814,10 +1003,421 @@ class _SpatialWaterfallViewState extends State<SpatialWaterfallView>
   @override
   void dispose() {
     _releaseAllPointers();
+    _pointerPositions.clear();
+    _endRotationControl();
     _detachViewportController();
     _particleTicker.dispose();
     _particleRepaint.dispose();
     super.dispose();
+  }
+}
+
+enum _SpatialRotationControlMode { xyAxes, zAxis }
+
+class _SpatialPanControl extends StatelessWidget {
+  const _SpatialPanControl({
+    required this.extent,
+    required this.onUp,
+    required this.onDown,
+    required this.onLeft,
+    required this.onRight,
+  });
+
+  final double extent;
+  final VoidCallback onUp;
+  final VoidCallback onDown;
+  final VoidCallback onLeft;
+  final VoidCallback onRight;
+
+  @override
+  Widget build(BuildContext context) {
+    final segment = extent / 3;
+    return Semantics(
+      key: const ValueKey('spatial-pan-control'),
+      container: true,
+      label: '3D瀑布流平移十字控制键',
+      child: Stack(
+        children: [
+          Positioned.fill(
+            child: IgnorePointer(
+              child: CustomPaint(painter: const _SpatialPanControlPainter()),
+            ),
+          ),
+          Positioned(
+            left: segment,
+            top: 0,
+            width: segment,
+            height: segment,
+            child: _SpatialControlHitTarget(
+              key: const ValueKey('spatial-pan-up'),
+              label: '向上平移3D瀑布流',
+              onTap: onUp,
+            ),
+          ),
+          Positioned(
+            left: segment,
+            bottom: 0,
+            width: segment,
+            height: segment,
+            child: _SpatialControlHitTarget(
+              key: const ValueKey('spatial-pan-down'),
+              label: '向下平移3D瀑布流',
+              onTap: onDown,
+            ),
+          ),
+          Positioned(
+            left: 0,
+            top: segment,
+            width: segment,
+            height: segment,
+            child: _SpatialControlHitTarget(
+              key: const ValueKey('spatial-pan-left'),
+              label: '向左平移3D瀑布流',
+              onTap: onLeft,
+            ),
+          ),
+          Positioned(
+            right: 0,
+            top: segment,
+            width: segment,
+            height: segment,
+            child: _SpatialControlHitTarget(
+              key: const ValueKey('spatial-pan-right'),
+              label: '向右平移3D瀑布流',
+              onTap: onRight,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _SpatialControlHitTarget extends StatelessWidget {
+  const _SpatialControlHitTarget({
+    required this.label,
+    required this.onTap,
+    super.key,
+  });
+
+  final String label;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    return Semantics(
+      button: true,
+      label: label,
+      onTap: onTap,
+      child: GestureDetector(
+        behavior: HitTestBehavior.opaque,
+        excludeFromSemantics: true,
+        onTap: onTap,
+      ),
+    );
+  }
+}
+
+class _SpatialRotationControl extends StatelessWidget {
+  const _SpatialRotationControl({
+    required this.extent,
+    required this.rotationXDegrees,
+    required this.rotationYDegrees,
+    required this.rotationZDegrees,
+    required this.onPanStart,
+    required this.onPanUpdate,
+    required this.onPanEnd,
+    required this.onPanCancel,
+  });
+
+  final double extent;
+  final double rotationXDegrees;
+  final double rotationYDegrees;
+  final double rotationZDegrees;
+  final GestureDragStartCallback onPanStart;
+  final GestureDragUpdateCallback onPanUpdate;
+  final GestureDragEndCallback onPanEnd;
+  final VoidCallback onPanCancel;
+
+  @override
+  Widget build(BuildContext context) {
+    return Semantics(
+      key: const ValueKey('spatial-rotation-control'),
+      container: true,
+      label: '3D瀑布流球形旋转控制器',
+      hint: '在球体内拖动控制X和Y轴，在外环拖动控制Z轴',
+      child: GestureDetector(
+        behavior: HitTestBehavior.opaque,
+        excludeFromSemantics: true,
+        onPanStart: onPanStart,
+        onPanUpdate: onPanUpdate,
+        onPanEnd: onPanEnd,
+        onPanCancel: onPanCancel,
+        child: CustomPaint(
+          painter: _SpatialRotationControlPainter(
+            rotationXDegrees: rotationXDegrees,
+            rotationYDegrees: rotationYDegrees,
+            rotationZDegrees: rotationZDegrees,
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _SpatialPanControlPainter extends CustomPainter {
+  const _SpatialPanControlPainter();
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final unit = size.width / 3;
+    final cross = Path()
+      ..moveTo(unit, 0)
+      ..lineTo(unit * 2, 0)
+      ..lineTo(unit * 2, unit)
+      ..lineTo(size.width, unit)
+      ..lineTo(size.width, unit * 2)
+      ..lineTo(unit * 2, unit * 2)
+      ..lineTo(unit * 2, size.height)
+      ..lineTo(unit, size.height)
+      ..lineTo(unit, unit * 2)
+      ..lineTo(0, unit * 2)
+      ..lineTo(0, unit)
+      ..lineTo(unit, unit)
+      ..close();
+    final bounds = Offset.zero & size;
+    canvas.drawPath(
+      cross,
+      Paint()
+        ..color = const Color(0x99070F12)
+        ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 10),
+    );
+    canvas.drawPath(
+      cross,
+      Paint()
+        ..shader = const LinearGradient(
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+          colors: [Color(0xD92A3D3F), Color(0xC9142022)],
+        ).createShader(bounds),
+    );
+    canvas.drawPath(
+      cross,
+      Paint()
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = 1.4
+        ..color = AppPalette.accent.withValues(alpha: 0.7),
+    );
+
+    final divider = Paint()
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 1
+      ..color = AppPalette.line.withValues(alpha: 0.65);
+    canvas
+      ..drawLine(Offset(unit, unit), Offset(unit * 2, unit), divider)
+      ..drawLine(Offset(unit, unit * 2), Offset(unit * 2, unit * 2), divider)
+      ..drawLine(Offset(unit, unit), Offset(unit, unit * 2), divider)
+      ..drawLine(Offset(unit * 2, unit), Offset(unit * 2, unit * 2), divider);
+
+    final center = Offset(size.width / 2, size.height / 2);
+    canvas.drawCircle(
+      center,
+      unit * 0.22,
+      Paint()..color = AppPalette.accent.withValues(alpha: 0.22),
+    );
+    final arrowPaint = Paint()
+      ..style = PaintingStyle.fill
+      ..color = AppPalette.primaryText.withValues(alpha: 0.88);
+    _drawArrow(
+      canvas,
+      Offset(center.dx, unit * 0.48),
+      -math.pi / 2,
+      unit,
+      arrowPaint,
+    );
+    _drawArrow(
+      canvas,
+      Offset(center.dx, size.height - unit * 0.48),
+      math.pi / 2,
+      unit,
+      arrowPaint,
+    );
+    _drawArrow(
+      canvas,
+      Offset(unit * 0.48, center.dy),
+      math.pi,
+      unit,
+      arrowPaint,
+    );
+    _drawArrow(
+      canvas,
+      Offset(size.width - unit * 0.48, center.dy),
+      0,
+      unit,
+      arrowPaint,
+    );
+  }
+
+  void _drawArrow(
+    Canvas canvas,
+    Offset center,
+    double angle,
+    double unit,
+    Paint paint,
+  ) {
+    canvas.save();
+    canvas.translate(center.dx, center.dy);
+    canvas.rotate(angle);
+    final length = unit * 0.25;
+    final halfWidth = unit * 0.15;
+    canvas.drawPath(
+      Path()
+        ..moveTo(length, 0)
+        ..lineTo(-length, -halfWidth)
+        ..lineTo(-length, halfWidth)
+        ..close(),
+      paint,
+    );
+    canvas.restore();
+  }
+
+  @override
+  bool shouldRepaint(covariant _SpatialPanControlPainter oldDelegate) => false;
+}
+
+class _SpatialRotationControlPainter extends CustomPainter {
+  const _SpatialRotationControlPainter({
+    required this.rotationXDegrees,
+    required this.rotationYDegrees,
+    required this.rotationZDegrees,
+  });
+
+  final double rotationXDegrees;
+  final double rotationYDegrees;
+  final double rotationZDegrees;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final center = size.center(Offset.zero);
+    final outerRadius = size.shortestSide * 0.46;
+    final sphereRadius = size.shortestSide * 0.34;
+    canvas.drawCircle(
+      center,
+      outerRadius,
+      Paint()
+        ..color = const Color(0x99070F12)
+        ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 10),
+    );
+    canvas.drawCircle(
+      center,
+      outerRadius,
+      Paint()
+        ..style = PaintingStyle.fill
+        ..color = const Color(0xB9162224),
+    );
+    canvas.drawCircle(
+      center,
+      outerRadius,
+      Paint()
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = 2.2
+        ..color = AppPalette.outline.withValues(alpha: 0.68),
+    );
+    canvas.drawCircle(
+      center,
+      sphereRadius,
+      Paint()
+        ..shader = const RadialGradient(
+          center: Alignment(-0.35, -0.42),
+          radius: 1.08,
+          colors: [Color(0xFFE8FFFF), Color(0xFF348D98), Color(0xFF10282E)],
+          stops: [0, 0.34, 1],
+        ).createShader(Rect.fromCircle(center: center, radius: sphereRadius)),
+    );
+    canvas.drawCircle(
+      center,
+      sphereRadius,
+      Paint()
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = 1.2
+        ..color = AppPalette.primaryText.withValues(alpha: 0.58),
+    );
+
+    canvas.save();
+    canvas.translate(center.dx, center.dy);
+    canvas.rotate(rotationZDegrees * math.pi / 180);
+    final gridPaint = Paint()
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 1
+      ..color = AppPalette.primaryText.withValues(alpha: 0.28);
+    canvas.drawOval(
+      Rect.fromCenter(
+        center: Offset.zero,
+        width: sphereRadius * 0.72,
+        height: sphereRadius * 2,
+      ),
+      gridPaint,
+    );
+    canvas.drawOval(
+      Rect.fromCenter(
+        center: Offset.zero,
+        width: sphereRadius * 2,
+        height: sphereRadius * 0.62,
+      ),
+      gridPaint,
+    );
+    canvas.restore();
+
+    final xRatio =
+        (rotationXDegrees / HexKeyboardViewportController.maximumTiltDegrees)
+            .clamp(-1.0, 1.0);
+    final yRatio =
+        (rotationYDegrees / HexKeyboardViewportController.maximumTiltDegrees)
+            .clamp(-1.0, 1.0);
+    final tiltMarker =
+        center +
+        Offset(yRatio * sphereRadius * 0.48, -xRatio * sphereRadius * 0.48);
+    canvas.drawCircle(
+      tiltMarker,
+      math.max(2.5, size.shortestSide * 0.035),
+      Paint()..color = AppPalette.selection,
+    );
+
+    final zAngle = (rotationZDegrees - 90) * math.pi / 180;
+    final zMarker =
+        center + Offset(math.cos(zAngle), math.sin(zAngle)) * outerRadius;
+    canvas.drawCircle(
+      zMarker,
+      math.max(2.2, size.shortestSide * 0.03),
+      Paint()..color = AppPalette.outline,
+    );
+    _paintLabel(canvas, 'XY', center + Offset(0, sphereRadius * 0.62));
+    _paintLabel(canvas, 'Z', center + Offset(0, -outerRadius * 0.78));
+  }
+
+  void _paintLabel(Canvas canvas, String value, Offset center) {
+    final painter = TextPainter(
+      text: TextSpan(
+        text: value,
+        style: TextStyle(
+          color: AppPalette.primaryText.withValues(alpha: 0.82),
+          fontSize: 9,
+          fontWeight: FontWeight.w700,
+        ),
+      ),
+      textDirection: TextDirection.ltr,
+    )..layout();
+    painter.paint(
+      canvas,
+      center - Offset(painter.width / 2, painter.height / 2),
+    );
+  }
+
+  @override
+  bool shouldRepaint(covariant _SpatialRotationControlPainter oldDelegate) {
+    return oldDelegate.rotationXDegrees != rotationXDegrees ||
+        oldDelegate.rotationYDegrees != rotationYDegrees ||
+        oldDelegate.rotationZDegrees != rotationZDegrees;
   }
 }
 
