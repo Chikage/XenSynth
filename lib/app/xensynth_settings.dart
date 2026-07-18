@@ -4,7 +4,7 @@ import '../core/hex_keyboard.dart';
 
 enum KeyboardLayoutMode { linear, hexagonal, spatial }
 
-enum SpatialProjectionMode { oblique, perspective }
+enum SpatialProjectionMode { cabinet, obliquePerspective }
 
 extension KeyboardLayoutModeSemantics on KeyboardLayoutMode {
   bool get usesHexKeyboard => this != KeyboardLayoutMode.linear;
@@ -32,7 +32,7 @@ class XenSynthSettings {
     this.pseudoPressureEnabled = true,
     this.playbackPreviewSeconds = 1.8,
     this.pitchSnapEnabled = false,
-    this.spatialProjection = SpatialProjectionMode.perspective,
+    this.spatialProjection = SpatialProjectionMode.obliquePerspective,
   }) : _hexStepQ = hexStepQ,
        _hexStepR = hexStepR;
 
@@ -163,10 +163,12 @@ class XenSynthSettings {
         defaults.pitchSnapEnabled,
       ),
       spatialProjection: switch (map['spatialProjection']?.toString()) {
-        'perspective' => SpatialProjectionMode.perspective,
+        'obliquePerspective' ||
+        'perspective' => SpatialProjectionMode.obliquePerspective,
+        'cabinet' ||
         'oblique' ||
         'axonometric' ||
-        'isometric' => SpatialProjectionMode.oblique,
+        'isometric' => SpatialProjectionMode.cabinet,
         _ => defaults.spatialProjection,
       },
     );

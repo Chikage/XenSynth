@@ -92,8 +92,8 @@ void main() {
       expect(tester.takeException(), isNull);
     }
 
-    await pumpProjection(SpatialProjectionMode.oblique);
-    await pumpProjection(SpatialProjectionMode.perspective);
+    await pumpProjection(SpatialProjectionMode.cabinet);
+    await pumpProjection(SpatialProjectionMode.obliquePerspective);
   });
 
   testWidgets('projected hex keys remain playable by touch', (tester) async {
@@ -181,11 +181,11 @@ void main() {
   });
 
   test(
-    'perspective keeps projected key deformation bounded while rotating',
+    'oblique perspective keeps projected key deformation bounded while rotating',
     () {
       const settings = XenSynthSettings(
         layoutMode: KeyboardLayoutMode.spatial,
-        spatialProjection: SpatialProjectionMode.perspective,
+        spatialProjection: SpatialProjectionMode.obliquePerspective,
       );
 
       for (final rotation in <({double x, double y, double z})>[
@@ -207,11 +207,11 @@ void main() {
   );
 
   test(
-    'oblique projection keeps one shared note scale across the XOY plane',
+    'cabinet projection keeps one shared note scale across the XOY plane',
     () {
       const settings = XenSynthSettings(
         layoutMode: KeyboardLayoutMode.spatial,
-        spatialProjection: SpatialProjectionMode.oblique,
+        spatialProjection: SpatialProjectionMode.cabinet,
       );
       final range = SpatialWaterfallView.debugProjectedKeyRadiusRange(
         size: const Size(1000, 640),
@@ -221,6 +221,91 @@ void main() {
         rotationDegrees: 42,
       );
       expect(range.maximum / range.minimum, closeTo(1, 0.000001));
+    },
+  );
+
+  test('cabinet projection uses an exact 1:2 45-degree depth axis', () {
+    const settings = XenSynthSettings(
+      layoutMode: KeyboardLayoutMode.spatial,
+      spatialProjection: SpatialProjectionMode.cabinet,
+    );
+    const size = Size(1000, 640);
+    final layout = HexaKeyboardLayoutEngine.build(
+      settings.hexKeyboardConfiguration,
+    );
+    final center = layout.modelBounds.center;
+    const axisLength = 24.0;
+
+    Offset project(HexPoint point, double z) {
+      return SpatialWaterfallView.debugProjectModelPoint(
+        size: size,
+        settings: settings,
+        point: point,
+        z: z,
+      );
+    }
+
+    final origin = project(center, 0);
+    final xAxis =
+        project(HexPoint(center.x + axisLength, center.y), 0) - origin;
+    final yAxis =
+        project(HexPoint(center.x, center.y + axisLength), 0) - origin;
+    final zAxis = project(center, axisLength) - origin;
+
+    expect(yAxis.distance / xAxis.distance, closeTo(0.5, 0.0000001));
+    expect(zAxis.distance / xAxis.distance, closeTo(1, 0.0000001));
+    expect(yAxis.dx.abs(), closeTo(yAxis.dy.abs(), 0.0000001));
+  });
+
+  test(
+    'oblique perspective preserves lines and applies coherent depth scale',
+    () {
+      const settings = XenSynthSettings(
+        layoutMode: KeyboardLayoutMode.spatial,
+        spatialProjection: SpatialProjectionMode.obliquePerspective,
+      );
+      const size = Size(1000, 640);
+      final layout = HexaKeyboardLayoutEngine.build(
+        settings.hexKeyboardConfiguration,
+      );
+      final bounds = layout.modelBounds;
+      final center = bounds.center;
+      final yOffsets = <double>[-0.38, 0, 0.38];
+
+      Offset project(double x, double y) {
+        return SpatialWaterfallView.debugProjectModelPoint(
+          size: size,
+          settings: settings,
+          point: HexPoint(x, y),
+          z: 0,
+        );
+      }
+
+      for (final xOffset in <double>[-0.24, 0, 0.24]) {
+        final points = yOffsets
+            .map(
+              (yOffset) => project(
+                center.x + bounds.width * xOffset,
+                center.y + bounds.height * yOffset,
+              ),
+            )
+            .toList(growable: false);
+        final first = points[1] - points[0];
+        final second = points[2] - points[0];
+        final normalizedArea =
+            (first.dx * second.dy - first.dy * second.dx).abs() /
+            (first.distance * second.distance);
+        expect(normalizedArea, lessThan(0.0000001));
+      }
+
+      const unit = 24.0;
+      final farY = center.y - bounds.height * 0.38;
+      final nearY = center.y + bounds.height * 0.38;
+      final farScale =
+          (project(center.x + unit, farY) - project(center.x, farY)).distance;
+      final nearScale =
+          (project(center.x + unit, nearY) - project(center.x, nearY)).distance;
+      expect(nearScale, greaterThan(farScale * 1.08));
     },
   );
 
@@ -266,10 +351,10 @@ void main() {
       expect(loud.minimum, greaterThan(quiet.minimum));
       expect(loud.maximum, lessThan(quiet.maximum * 1.3));
       switch (projection) {
-        case SpatialProjectionMode.oblique:
+        case SpatialProjectionMode.cabinet:
           expect(quiet.maximum / quiet.minimum, closeTo(1, 0.000001));
           expect(loud.maximum / loud.minimum, closeTo(1, 0.000001));
-        case SpatialProjectionMode.perspective:
+        case SpatialProjectionMode.obliquePerspective:
           final projectedRadiusRatio = radii.maximum / radii.minimum;
           expect(
             quiet.maximum / quiet.minimum,

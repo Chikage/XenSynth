@@ -121,17 +121,29 @@ class SettingsPanel extends StatelessWidget {
                     if (settings.layoutMode == KeyboardLayoutMode.spatial) ...[
                       const _SectionLabel('3D WATERFALL'),
                       SegmentedButton<SpatialProjectionMode>(
-                        style: _compactButtonStyle,
+                        style: _compactButtonStyle.copyWith(
+                          minimumSize: const WidgetStatePropertyAll(
+                            Size(0, 42),
+                          ),
+                        ),
+                        showSelectedIcon: false,
                         segments: const [
                           ButtonSegment(
-                            value: SpatialProjectionMode.oblique,
-                            label: Text('OBLIQUE'),
-                            icon: Icon(Icons.grid_4x4_rounded, size: 15),
+                            value: SpatialProjectionMode.cabinet,
+                            label: Text(
+                              'CABINET\nPROJECTION',
+                              textAlign: TextAlign.center,
+                            ),
+                            tooltip:
+                                'Cabinet projection (1:2 oblique dimetric)',
                           ),
                           ButtonSegment(
-                            value: SpatialProjectionMode.perspective,
-                            label: Text('PERSPECTIVE'),
-                            icon: Icon(Icons.filter_center_focus, size: 15),
+                            value: SpatialProjectionMode.obliquePerspective,
+                            label: Text(
+                              'OBLIQUE\nPERSPECTIVE',
+                              textAlign: TextAlign.center,
+                            ),
+                            tooltip: 'Oblique perspective projection',
                           ),
                         ],
                         selected: {settings.spatialProjection},

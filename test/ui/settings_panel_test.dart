@@ -125,7 +125,7 @@ void main() {
               child: SettingsPanel(
                 settings: const XenSynthSettings(
                   layoutMode: KeyboardLayoutMode.spatial,
-                  spatialProjection: SpatialProjectionMode.perspective,
+                  spatialProjection: SpatialProjectionMode.obliquePerspective,
                 ),
                 onChanged: (_) {},
                 onReset: () {},
@@ -141,7 +141,12 @@ void main() {
           widget is Scrollable && widget.axisDirection == AxisDirection.down,
     );
     expect(find.text('3D WATERFALL'), findsOneWidget);
-    expect(find.text('PERSPECTIVE'), findsOneWidget);
+    expect(find.text('CABINET\nPROJECTION'), findsOneWidget);
+    expect(find.text('OBLIQUE\nPERSPECTIVE'), findsOneWidget);
+    expect(
+      find.byTooltip('Cabinet projection (1:2 oblique dimetric)'),
+      findsOneWidget,
+    );
     await tester.scrollUntilVisible(
       find.text('Q step'),
       120,

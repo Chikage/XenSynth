@@ -13,7 +13,10 @@ void main() {
       expect(settings.touchSensitivityPercent, closeTo(120, 0.000001));
       expect(settings.playbackPreviewSeconds, 1.8);
       expect(settings.pitchSnapEnabled, isFalse);
-      expect(settings.spatialProjection, SpatialProjectionMode.perspective);
+      expect(
+        settings.spatialProjection,
+        SpatialProjectionMode.obliquePerspective,
+      );
     });
 
     test('changing EDO synchronizes period and clamps both steps', () {
@@ -74,18 +77,38 @@ void main() {
       expect(negative.appliedPitchOffsetCents, 3);
     });
 
-    test('round-trips the spatial mode and perspective projection', () {
+    test('round-trips the spatial mode and oblique perspective', () {
       const settings = XenSynthSettings(
         layoutMode: KeyboardLayoutMode.spatial,
-        spatialProjection: SpatialProjectionMode.perspective,
+        spatialProjection: SpatialProjectionMode.obliquePerspective,
         pitchSnapEnabled: true,
       );
 
       final restored = XenSynthSettings.fromMap(settings.toMap());
 
       expect(restored.layoutMode, KeyboardLayoutMode.spatial);
-      expect(restored.spatialProjection, SpatialProjectionMode.perspective);
+      expect(
+        restored.spatialProjection,
+        SpatialProjectionMode.obliquePerspective,
+      );
       expect(restored.shouldSnapPlaybackPitch, isTrue);
+    });
+
+    test('migrates legacy projection names to the precise modes', () {
+      final perspective = XenSynthSettings.fromMap(<String, Object?>{
+        'spatialProjection': 'perspective',
+      });
+      final cabinet = XenSynthSettings.fromMap(<String, Object?>{
+        'spatialProjection': 'oblique',
+      });
+
+      expect(
+        perspective.spatialProjection,
+        SpatialProjectionMode.obliquePerspective,
+      );
+      expect(cabinet.spatialProjection, SpatialProjectionMode.cabinet);
+      expect(perspective.toMap()['spatialProjection'], 'obliquePerspective');
+      expect(cabinet.toMap()['spatialProjection'], 'cabinet');
     });
   });
 }

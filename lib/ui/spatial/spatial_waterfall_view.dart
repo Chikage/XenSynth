@@ -25,6 +25,11 @@ const double _spatialMinimumVisibleNotePreviewRatio = 0.003;
 const double _spatialMinimumVisibleNoteSeconds = 0.004;
 const double _spatialNoteBaseRadiusRatio = 0.072;
 const double _spatialNoteVelocityRadiusRatio = 0.020;
+const double _cabinetDepthScale = 0.5;
+const double _cabinetAxisComponent = _cabinetDepthScale * 0.7071067811865476;
+const double _obliquePerspectiveAzimuthDegrees = -3.25;
+const double _obliquePerspectiveElevationDegrees = 27.5;
+const double _obliquePerspectiveDepthRatio = 0.14;
 
 double _spatialNoteStrokeWidth(
   _SpatialScene scene,
@@ -36,12 +41,12 @@ double _spatialNoteStrokeWidth(
   // Width is derived only from the key's projected XOY footprint. It is not
   // recomputed from the note's z position, so a single note keeps a consistent
   // body from its leading edge to its landing edge.
-  return math.max(
+  final baseWidth = math.max(
     scene.physicalPixel,
-    projectedRadius *
-        (_spatialNoteBaseRadiusRatio +
-            velocityRatio * _spatialNoteVelocityRadiusRatio),
+    projectedRadius * _spatialNoteBaseRadiusRatio,
   );
+  return baseWidth +
+      projectedRadius * velocityRatio * _spatialNoteVelocityRadiusRatio;
 }
 
 double _spatialLandingRadiusScale(int velocity) {
@@ -290,6 +295,35 @@ class SpatialWaterfallView extends StatefulWidget {
       (cell) => _spatialNoteStrokeWidth(scene, cell, velocity),
     );
     return (minimum: widths.reduce(math.min), maximum: widths.reduce(math.max));
+  }
+
+  @visibleForTesting
+  static Offset debugProjectModelPoint({
+    required Size size,
+    required XenSynthSettings settings,
+    required HexPoint point,
+    required double z,
+    double rotationXDegrees = 0,
+    double rotationYDegrees = 0,
+    double rotationDegrees = 0,
+    double devicePixelRatio = 1,
+  }) {
+    final layout = HexaKeyboardLayoutEngine.build(
+      settings.hexKeyboardConfiguration,
+    );
+    final scene = _SpatialScene.fit(
+      layout: layout,
+      size: size,
+      projection: settings.spatialProjection,
+      previewSeconds: settings.playbackPreviewSeconds,
+      scaleMultiplier: HexKeyboardViewportController.minimumScale,
+      pan: Offset.zero,
+      rotationXDegrees: rotationXDegrees,
+      rotationYDegrees: rotationYDegrees,
+      rotationDegrees: rotationDegrees,
+      devicePixelRatio: devicePixelRatio,
+    );
+    return scene.project(point, z);
   }
 
   @override
@@ -1458,9 +1492,12 @@ class _SpatialScene {
     final bounds = layout.modelBounds;
     final safePreview = previewSeconds > 0 ? previewSeconds : 1.0;
     final zMaximum = math.max(bounds.height * 1.28, bounds.width * 0.42);
+    final thickness = layout.configuration.radius * 0.14;
+    final zMinimum = -layout.configuration.radius * 0.32;
     final projectionTransform = _SpatialProjectionTransform(
       bounds: bounds,
       projection: projection,
+      zMinimum: zMinimum,
       zMaximum: zMaximum,
       rotationXDegrees: rotationXDegrees,
       rotationYDegrees: rotationYDegrees,
@@ -1469,10 +1506,9 @@ class _SpatialScene {
     final rawPoints = <Offset>[];
     for (final x in <double>[bounds.minX, bounds.maxX]) {
       for (final y in <double>[bounds.minY, bounds.maxY]) {
-        final point = HexPoint(x, y);
-        rawPoints
-          ..add(projectionTransform.project(point, 0))
-          ..add(projectionTransform.project(point, zMaximum));
+        for (final z in <double>[zMinimum, zMaximum]) {
+          rawPoints.add(projectionTransform.project(HexPoint(x, y), z));
+        }
       }
     }
     final minX = rawPoints.map((point) => point.dx).reduce(math.min);
@@ -1522,17 +1558,12 @@ class _SpatialScene {
       return result;
     }
 
-    final thickness = layout.configuration.radius * 0.14;
     final cells = <_SpatialCell>[];
     for (final key in layout.cells) {
       final topVertices = verticesFor(key, 0, 0.92);
       final baseVertices = verticesFor(key, -thickness, 0.92);
       final center = project(key.center, 0);
-      final projectedRadius =
-          topVertices
-              .map((point) => (point - center).distance)
-              .reduce((a, b) => a + b) /
-          topVertices.length;
+      final projectedRadius = _projectedHexRadius(topVertices, center);
       cells.add(
         _SpatialCell(
           key: key,
@@ -1542,10 +1573,15 @@ class _SpatialScene {
           topPath: _pathFrom(topVertices),
           basePath: _pathFrom(baseVertices),
           projectedRadius: projectedRadius,
+          depthOrder: projectionTransform.depthFor(key.center, 0),
         ),
       );
     }
-    cells.sort((first, second) => first.center.dy.compareTo(second.center.dy));
+    cells.sort((first, second) {
+      final depth = first.depthOrder.compareTo(second.depthOrder);
+      if (depth != 0) return depth;
+      return first.center.dy.compareTo(second.center.dy);
+    });
 
     return _SpatialScene._(
       layout: layout,
@@ -1586,20 +1622,29 @@ class _SpatialScene {
   final Map<AxialCoordinate, _SpatialCell> cellsByCoordinate;
 
   double noteRadiusFor(_SpatialCell cell) {
-    if (projection == SpatialProjectionMode.perspective) {
-      // Perspective may scale different XOY positions by different amounts,
-      // but the radius is sampled at z=0 so it does not change along a note.
+    if (projection == SpatialProjectionMode.obliquePerspective) {
+      // Oblique perspective may scale different XOY positions by different
+      // amounts, but the radius is sampled at z=0 so it does not change along
+      // a note.
       return cell.projectedRadius;
     }
-    // Oblique projection is affine: all translated copies of the same key
-    // share one projected radius. Use one scene-wide value to preserve its
-    // equal-scale drawing principle explicitly.
+    // Cabinet projection is affine: all translated copies of the same key
+    // share one projected radius. One scene-wide value preserves its exact
+    // 1:2 oblique-dimetric scale.
     return cells.first.projectedRadius;
   }
 
   Offset project(HexPoint point, double z) {
     final raw = projectionTransform.project(point, z);
     return offset + raw * scale;
+  }
+
+  double depthFor(HexPoint point, double z) {
+    return projectionTransform.depthFor(point, z);
+  }
+
+  double depthToneFor(HexPoint point, double z) {
+    return projectionTransform.normalizedDepthFor(point, z);
   }
 
   bool matches({
@@ -1708,6 +1753,7 @@ class _SpatialProjectionTransform {
   _SpatialProjectionTransform({
     required HexBounds bounds,
     required this.projection,
+    required double zMinimum,
     required double zMaximum,
     required double rotationXDegrees,
     required double rotationYDegrees,
@@ -1719,12 +1765,37 @@ class _SpatialProjectionTransform {
        cosineY = math.cos(rotationYDegrees * math.pi / 180),
        sineY = math.sin(rotationYDegrees * math.pi / 180),
        cosineZ = math.cos(rotationDegrees * math.pi / 180),
-       sineZ = math.sin(rotationDegrees * math.pi / 180) {
-    halfDepthExtent =
-        (sineZ * cosineX).abs() * bounds.width / 2 +
-        (cosineZ * cosineX).abs() * bounds.height / 2 +
-        sineX.abs() * zMaximum / 2;
-    depthCenter = -sineX * zMaximum / 2;
+       sineZ = math.sin(rotationDegrees * math.pi / 180),
+       perspectiveCosine = math.cos(
+         _obliquePerspectiveAzimuthDegrees * math.pi / 180,
+       ),
+       perspectiveSine = math.sin(
+         _obliquePerspectiveAzimuthDegrees * math.pi / 180,
+       ),
+       perspectiveRise = math.tan(
+         _obliquePerspectiveElevationDegrees * math.pi / 180,
+       ) {
+    final depths = <double>[];
+    for (final x in <double>[bounds.minX, bounds.maxX]) {
+      for (final y in <double>[bounds.minY, bounds.maxY]) {
+        for (final z in <double>[zMinimum, zMaximum]) {
+          final rotated = _rotate(HexPoint(x, y), z);
+          depths.add(
+            projection == SpatialProjectionMode.cabinet
+                ? rotated.y
+                : _perspectiveDepth(rotated.x, rotated.y),
+          );
+        }
+      }
+    }
+    final minimumDepth = depths.reduce(math.min);
+    final maximumDepth = depths.reduce(math.max);
+    depthCenter = (minimumDepth + maximumDepth) / 2;
+    halfDepthExtent = math.max(0.000001, (maximumDepth - minimumDepth) / 2);
+    perspectiveFocalLength = math.max(
+      1.0,
+      halfDepthExtent / _obliquePerspectiveDepthRatio,
+    );
   }
 
   final SpatialProjectionMode projection;
@@ -1736,10 +1807,63 @@ class _SpatialProjectionTransform {
   final double sineY;
   final double cosineZ;
   final double sineZ;
+  final double perspectiveCosine;
+  final double perspectiveSine;
+  final double perspectiveRise;
   late final double halfDepthExtent;
   late final double depthCenter;
+  late final double perspectiveFocalLength;
 
   Offset project(HexPoint point, double z) {
+    final rotated = _rotate(point, z);
+
+    switch (projection) {
+      case SpatialProjectionMode.cabinet:
+        // Cabinet projection is the standard 1:2 oblique dimetric: the x/z
+        // picture plane remains full scale while the 45-degree depth axis is
+        // foreshortened to exactly one half.
+        return Offset(
+          rotated.x + rotated.y * _cabinetAxisComponent,
+          rotated.y * _cabinetAxisComponent - rotated.z,
+        );
+      case SpatialProjectionMode.obliquePerspective:
+        final horizontal =
+            rotated.x * perspectiveCosine - rotated.y * perspectiveSine;
+        final depth = _perspectiveDepth(rotated.x, rotated.y);
+        final relativeDepth = depth - depthCenter;
+        final denominator = math.max(
+          perspectiveFocalLength * 0.2,
+          perspectiveFocalLength - relativeDepth,
+        );
+        final perspectiveScale = perspectiveFocalLength / denominator;
+        // A single homogeneous divisor is shared by both screen axes. This
+        // keeps every projected 3D line straight and sends parallel depth
+        // lines to one mathematically consistent vanishing point.
+        return Offset(
+          horizontal * perspectiveScale,
+          (depth * perspectiveRise - rotated.z) * perspectiveScale,
+        );
+    }
+  }
+
+  double depthFor(HexPoint point, double z) {
+    final rotated = _rotate(point, z);
+    return switch (projection) {
+      SpatialProjectionMode.cabinet => rotated.y,
+      SpatialProjectionMode.obliquePerspective => _perspectiveDepth(
+        rotated.x,
+        rotated.y,
+      ),
+    };
+  }
+
+  double normalizedDepthFor(HexPoint point, double z) {
+    return ((depthFor(point, z) - depthCenter) / halfDepthExtent)
+        .clamp(-1.0, 1.0)
+        .toDouble();
+  }
+
+  ({double x, double y, double z}) _rotate(HexPoint point, double z) {
     final sourceX = point.x - centerX;
     final sourceY = point.y - centerY;
     final zRotationX = sourceX * cosineZ - sourceY * sineZ;
@@ -1749,24 +1873,64 @@ class _SpatialProjectionTransform {
     final dx = zRotationX * cosineY + xRotationZ * sineY;
     final dy = xRotationY;
     final dz = -zRotationX * sineY + xRotationZ * cosineY;
-
-    switch (projection) {
-      case SpatialProjectionMode.oblique:
-        return Offset(dx + dy * 0.42, dy * 0.50 - dz);
-      case SpatialProjectionMode.perspective:
-        final normalizedDepth =
-            ((dy - depthCenter) / math.max(1.0, halfDepthExtent)).clamp(
-              -1.0,
-              1.0,
-            );
-        final perspectiveDepth = 1 - normalizedDepth * 0.12;
-        final timeDepth = 1 + (perspectiveDepth - 1) * 0.45;
-        return Offset(
-          dx / perspectiveDepth + dy * 0.055,
-          dy * 0.52 / perspectiveDepth - dz / timeDepth,
-        );
-    }
+    return (x: dx, y: dy, z: dz);
   }
+
+  double _perspectiveDepth(double x, double y) {
+    return x * perspectiveSine + y * perspectiveCosine;
+  }
+}
+
+double _projectedHexRadius(List<Offset> vertices, Offset center) {
+  if (vertices.isEmpty) return 0;
+  final meanSquaredRadius =
+      vertices
+          .map((vertex) => (vertex - center).distanceSquared)
+          .reduce((first, second) => first + second) /
+      vertices.length;
+  return math.sqrt(meanSquaredRadius);
+}
+
+double _signedPolygonArea(List<Offset> vertices) {
+  var doubledArea = 0.0;
+  for (var index = 0; index < vertices.length; index++) {
+    final next = (index + 1) % vertices.length;
+    doubledArea +=
+        vertices[index].dx * vertices[next].dy -
+        vertices[next].dx * vertices[index].dy;
+  }
+  return doubledArea / 2;
+}
+
+double _cross2D(Offset first, Offset second) {
+  return first.dx * second.dy - first.dy * second.dx;
+}
+
+bool _isProjectedSideVisible(_SpatialCell cell, int index) {
+  final next = (index + 1) % cell.topVertices.length;
+  final edge = cell.topVertices[next] - cell.topVertices[index];
+  final topMidpoint = (cell.topVertices[index] + cell.topVertices[next]) / 2;
+  final baseMidpoint = (cell.baseVertices[index] + cell.baseVertices[next]) / 2;
+  final extrusion = baseMidpoint - topMidpoint;
+  final winding = _signedPolygonArea(cell.topVertices);
+  return _cross2D(edge, extrusion) * winding < -0.000001;
+}
+
+double _projectedSideLight(_SpatialCell cell, int index) {
+  final next = (index + 1) % cell.topVertices.length;
+  final edge = cell.topVertices[next] - cell.topVertices[index];
+  if (edge.distance <= 0.000001) return 0.5;
+  final winding = _signedPolygonArea(cell.topVertices);
+  final outward = winding >= 0
+      ? Offset(edge.dy, -edge.dx)
+      : Offset(-edge.dy, edge.dx);
+  final normal = outward / outward.distance;
+  const lightDirection = Offset(-0.52, -0.85);
+  return ((normal.dx * lightDirection.dx + normal.dy * lightDirection.dy) *
+              0.5 +
+          0.5)
+      .clamp(0.0, 1.0)
+      .toDouble();
 }
 
 class _SpatialCell {
@@ -1778,6 +1942,7 @@ class _SpatialCell {
     required this.topPath,
     required this.basePath,
     required this.projectedRadius,
+    required this.depthOrder,
   });
 
   final HexKey key;
@@ -1787,6 +1952,7 @@ class _SpatialCell {
   final Path topPath;
   final Path basePath;
   final double projectedRadius;
+  final double depthOrder;
 }
 
 Map<AxialCoordinate, double> _spatialImpactDepths(
@@ -2206,12 +2372,29 @@ class _SpatialMeasurePainter extends CustomPainter {
     final measures = playbackIndex.visibleMeasuresAt(playhead, previewSeconds);
     if (measures.isEmpty) return;
     final labelPainter = TextPainter(textDirection: TextDirection.ltr);
-    for (final measure in measures.reversed) {
-      // Keep the negative lead-in: at a negative playhead the first measure
-      // remains above the keyboard instead of being clamped to time zero.
-      final distanceSeconds = measure.second - playhead;
-      if (distanceSeconds < 0) continue;
-      final z = scene.zForSeconds(distanceSeconds);
+    final visible =
+        measures
+            .map((measure) {
+              // Keep the negative lead-in: at a negative playhead the first
+              // measure remains above the keyboard instead of being clamped to
+              // time zero.
+              final distanceSeconds = measure.second - playhead;
+              if (distanceSeconds < 0) return null;
+              final z = scene.zForSeconds(distanceSeconds);
+              return (
+                measure: measure,
+                distanceSeconds: distanceSeconds,
+                z: z,
+                depth: scene.depthFor(scene.layout.modelBounds.center, z),
+              );
+            })
+            .nonNulls
+            .toList(growable: false)
+          ..sort((first, second) => first.depth.compareTo(second.depth));
+    for (final entry in visible) {
+      final measure = entry.measure;
+      final distanceSeconds = entry.distanceSeconds;
+      final z = entry.z;
       final path = scene.outlineAt(z);
       final ratio = (distanceSeconds / scene.previewSeconds).clamp(0.0, 1.0);
       canvas.drawPath(
@@ -2304,7 +2487,7 @@ class _SpatialNotesPainter extends CustomPainter {
           cell: span.cell,
           bottomZ: bottomZ,
           topZ: topZ,
-          depthOrder: scene.project(span.cell.center, bottomZ).dy,
+          depthOrder: scene.depthFor(span.cell.center, (bottomZ + topZ) / 2),
         ),
       );
     }
@@ -2374,13 +2557,16 @@ class _SpatialKeyboardPainter extends CustomPainter {
           positiveModulo(key.pitchClass, scene.layout.configuration.period) /
           scene.layout.configuration.period *
           360;
+      final depthTone = (scene.depthToneFor(key.center, 0) + 1) / 2;
       if (!simplified) {
         canvas.drawPath(
           cell.basePath,
           Paint()..color = const Color(0xFF07100F).withValues(alpha: 0.94),
         );
         for (var index = 0; index < 6; index++) {
+          if (!_isProjectedSideVisible(cell, index)) continue;
           final next = (index + 1) % 6;
+          final light = _projectedSideLight(cell, index);
           canvas.drawPath(
             _pathFrom([
               cell.baseVertices[index],
@@ -2390,17 +2576,23 @@ class _SpatialKeyboardPainter extends CustomPainter {
             ]),
             Paint()
               ..color = HSVColor.fromAHSV(
-                0.42,
+                0.48,
                 hue,
-                0.66,
-                index.isEven ? 0.25 : 0.16,
+                0.58 + light * 0.12,
+                0.13 + light * 0.13 + depthTone * 0.035,
               ).toColor(),
           );
         }
       }
       canvas.drawPath(
         cell.topPath,
-        Paint()..color = HSVColor.fromAHSV(0.96, hue, 0.57, 0.38).toColor(),
+        Paint()
+          ..color = HSVColor.fromAHSV(
+            0.96,
+            hue,
+            0.55,
+            0.35 + depthTone * 0.065,
+          ).toColor(),
       );
       canvas.drawPath(cell.topPath, linePaint);
       if (simplified || cell.projectedRadius < 6 * scene.physicalPixel) {
