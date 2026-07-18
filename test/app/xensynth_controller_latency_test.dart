@@ -51,6 +51,49 @@ void main() {
       await pumpEventQueue();
     },
   );
+
+  test(
+    'keeps the visual clock running until the final effects clear',
+    () async {
+      final controller = XenSynthController()
+        ..settings = const XenSynthSettings(playbackSpeed: 2)
+        ..score = _shortScoreWithFinalNote();
+      final playbackEnded = Completer<void>();
+      final waterfallAdvanced = Completer<void>();
+      final waterfallEnded = Completer<void>();
+      double? tailStart;
+      controller.addListener(() {
+        if (!controller.playing &&
+            controller.waterfallAnimating &&
+            controller.playhead == controller.duration) {
+          tailStart ??= controller.visualPlayhead;
+          if (!playbackEnded.isCompleted) playbackEnded.complete();
+        }
+        final start = tailStart;
+        if (start != null && controller.visualPlayhead > start) {
+          if (!waterfallAdvanced.isCompleted) waterfallAdvanced.complete();
+        }
+        if (!controller.waterfallAnimating &&
+            controller.visualPlayhead > controller.duration) {
+          if (!waterfallEnded.isCompleted) waterfallEnded.complete();
+        }
+      });
+
+      await controller.play();
+      await playbackEnded.future.timeout(const Duration(seconds: 1));
+
+      await waterfallAdvanced.future.timeout(const Duration(seconds: 1));
+      expect(controller.playhead, controller.duration);
+      expect(controller.visualPlayhead, greaterThan(tailStart!));
+
+      await waterfallEnded.future.timeout(const Duration(seconds: 2));
+      expect(controller.playing, isFalse);
+      expect(controller.visualPlayhead, greaterThan(controller.duration));
+
+      controller.dispose();
+      await pumpEventQueue();
+    },
+  );
 }
 
 ParsedScore _shortScore() {
@@ -63,6 +106,36 @@ ParsedScore _shortScore() {
     tempoMap: <TempoPoint>[],
     rawEvents: <RawNoteEvent>[],
     notes: <WaterfallNote>[],
+    longNotes: <WaterfallNote>[],
+    duration: 0.02,
+  );
+}
+
+ParsedScore _shortScoreWithFinalNote() {
+  const note = WaterfallNote(
+    startTick: 0,
+    endTick: 20,
+    start: 0,
+    end: 0.02,
+    pitch: 60,
+    midiPitch: 60,
+    cents: 0,
+    velocity: 96,
+    channel: 0,
+    track: 0,
+    program: 0,
+    bankMsb: 0,
+    bankLsb: 0,
+  );
+  return const ParsedScore(
+    title: 'Waterfall tail test',
+    format: 'TEST',
+    ticksPerQuarter: 480,
+    tempos: <TempoEvent>[],
+    meters: <MeterEvent>[],
+    tempoMap: <TempoPoint>[],
+    rawEvents: <RawNoteEvent>[],
+    notes: <WaterfallNote>[note],
     longNotes: <WaterfallNote>[],
     duration: 0.02,
   );

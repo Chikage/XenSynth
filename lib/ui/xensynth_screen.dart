@@ -8,6 +8,7 @@ import '../app/xensynth_controller.dart';
 import '../app/xensynth_settings.dart';
 import 'app_palette.dart';
 import 'hex/hex_keyboard_view.dart';
+import 'spatial/spatial_waterfall_view.dart';
 import 'waterfall/waterfall_view.dart';
 import 'widgets/control_toolbar.dart';
 import 'widgets/settings_panel.dart';
@@ -76,44 +77,59 @@ class _XenSynthScreenState extends State<XenSynthScreen>
                 ),
                 Positioned.fill(
                   top: ControlToolbar.height,
-                  child: settings.layoutMode == KeyboardLayoutMode.linear
-                      ? WaterfallView(
-                          score: _controller.score,
-                          playhead: _controller.playhead,
-                          edo: settings.edo,
-                          // Android shifts score/ruler visuals by the displayed
-                          // offset, while playback and touch pitch apply the
-                          // inverse offset in the controller.
-                          pitchOffsetCents: settings.pitchOffsetCents,
-                          tuning: _controller.customTuningActive
-                              ? _controller.tuning
-                              : null,
-                          playing: _controller.playing,
-                          duration: _controller.duration,
-                          volumeGain: settings.volumeGain,
-                          activePitches: _controller.activePitches,
-                          onPitchDown: _controller.noteDown,
-                          onPitchMove: _controller.noteMove,
-                          onPitchUp: _controller.noteUp,
-                          onTogglePlayback: _controller.togglePlayback,
-                          onSeekStart: _controller.beginSeekGesture,
-                          onSeek: _controller.updateSeekGesture,
-                          onSeekEnd: _controller.endSeekGesture,
-                          onVolumeChanged: _controller.setVolumeGainFromGesture,
-                        )
-                      : Padding(
-                          padding: const EdgeInsets.all(8),
-                          child: HexKeyboardView(
-                            score: _controller.score,
-                            playhead: _controller.playhead,
-                            settings: settings,
-                            activePitches: _controller.activePitches,
-                            viewportController: _hexKeyboardViewportController,
-                            onPitchDown: _controller.noteDown,
-                            onPitchMove: _controller.noteMove,
-                            onPitchUp: _controller.noteUp,
-                          ),
-                        ),
+                  child: switch (settings.layoutMode) {
+                    KeyboardLayoutMode.linear => WaterfallView(
+                      score: _controller.score,
+                      playhead: _controller.visualPlayhead,
+                      edo: settings.edo,
+                      // Android shifts score/ruler visuals by the displayed
+                      // offset, while playback and touch pitch apply the
+                      // inverse offset in the controller.
+                      pitchOffsetCents: settings.pitchOffsetCents,
+                      tuning: _controller.customTuningActive
+                          ? _controller.tuning
+                          : null,
+                      playing: _controller.waterfallAnimating,
+                      duration: _controller.duration,
+                      volumeGain: settings.volumeGain,
+                      activePitches: _controller.activePitches,
+                      onPitchDown: _controller.noteDown,
+                      onPitchMove: _controller.noteMove,
+                      onPitchUp: _controller.noteUp,
+                      onTogglePlayback: _controller.togglePlayback,
+                      onSeekStart: _controller.beginSeekGesture,
+                      onSeek: _controller.updateSeekGesture,
+                      onSeekEnd: _controller.endSeekGesture,
+                      onVolumeChanged: _controller.setVolumeGainFromGesture,
+                    ),
+                    KeyboardLayoutMode.hexagonal => Padding(
+                      padding: const EdgeInsets.all(8),
+                      child: HexKeyboardView(
+                        score: _controller.score,
+                        playhead: _controller.visualPlayhead,
+                        settings: settings,
+                        activePitches: _controller.activePitches,
+                        viewportController: _hexKeyboardViewportController,
+                        onPitchDown: _controller.noteDown,
+                        onPitchMove: _controller.noteMove,
+                        onPitchUp: _controller.noteUp,
+                      ),
+                    ),
+                    KeyboardLayoutMode.spatial => Padding(
+                      padding: const EdgeInsets.all(8),
+                      child: SpatialWaterfallView(
+                        score: _controller.score,
+                        playhead: _controller.visualPlayhead,
+                        settings: settings,
+                        activePitches: _controller.activePitches,
+                        playing: _controller.waterfallAnimating,
+                        viewportController: _hexKeyboardViewportController,
+                        onPitchDown: _controller.noteDown,
+                        onPitchMove: _controller.noteMove,
+                        onPitchUp: _controller.noteUp,
+                      ),
+                    ),
+                  },
                 ),
                 Positioned(
                   left: 0,
@@ -152,7 +168,7 @@ class _XenSynthScreenState extends State<XenSynthScreen>
                     onResetSettings: _resetSettings,
                     onSeek: _controller.seek,
                     hexKeyboardGesturesEnabled:
-                        settings.layoutMode == KeyboardLayoutMode.hexagonal,
+                        settings.layoutMode.usesHexKeyboard,
                     onHexKeyboardPan: _hexKeyboardViewportController.panBy,
                     onHexKeyboardZoom: _hexKeyboardViewportController.zoomBy,
                   ),

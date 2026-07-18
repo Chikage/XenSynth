@@ -94,21 +94,30 @@ class WaterfallNote {
 
   double get duration => end - start;
 
-  Map<String, Object?> toNativeMap() => <String, Object?>{
-    'startTick': startTick,
-    'endTick': endTick,
-    'start': start,
-    'end': end,
-    'pitch': pitch,
-    'midiPitch': midiPitch,
-    'cents': cents,
-    'velocity': velocity,
-    'channel': channel,
-    'track': track,
-    'program': program,
-    'bankMsb': bankMsb,
-    'bankLsb': bankLsb,
-  };
+  Map<String, Object?> toNativeMap({double? playbackPitch}) {
+    final renderedPitch = playbackPitch ?? pitch;
+    final renderedMidiPitch = playbackPitch == null
+        ? midiPitch
+        : renderedPitch.round();
+    final renderedCents = playbackPitch == null
+        ? cents
+        : (renderedPitch - renderedMidiPitch) * 100;
+    return <String, Object?>{
+      'startTick': startTick,
+      'endTick': endTick,
+      'start': start,
+      'end': end,
+      'pitch': renderedPitch,
+      'midiPitch': renderedMidiPitch,
+      'cents': renderedCents,
+      'velocity': velocity,
+      'channel': channel,
+      'track': track,
+      'program': program,
+      'bankMsb': bankMsb,
+      'bankLsb': bankLsb,
+    };
+  }
 }
 
 class ParsedScore {
@@ -141,11 +150,18 @@ class ParsedScore {
       ? const MeterEvent(tick: 0, numerator: 4, denominator: 4)
       : meters.first;
 
-  Map<String, Object?> toNativeMap() => <String, Object?>{
+  Map<String, Object?> toNativeMap({
+    double Function(double)? pitchMapper,
+  }) => <String, Object?>{
     'title': title,
     'format': format,
     'ticksPerQuarter': ticksPerQuarter,
     'duration': duration,
-    'notes': notes.map((note) => note.toNativeMap()).toList(growable: false),
+    'notes': notes
+        .map(
+          (note) =>
+              note.toNativeMap(playbackPitch: pitchMapper?.call(note.pitch)),
+        )
+        .toList(growable: false),
   };
 }

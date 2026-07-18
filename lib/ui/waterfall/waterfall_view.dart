@@ -1442,10 +1442,9 @@ class _WaterfallParticlePainter extends CustomPainter {
     final pixel = layout.physicalPixel;
     for (final impact in impacts) {
       if (impact.maxLife <= 0) continue;
-      final progress = (impact.life / impact.maxLife).clamp(0.0, 1.0);
       final velocityRatio = impact.velocityRatio.clamp(0.0, 1.0);
-      final amount = math.sin(progress * math.pi) * velocityRatio;
-      final fade = math.pow(progress, 0.72).toDouble();
+      final amount = impact.animationAmount;
+      final fade = impact.fade;
       final tick = EdoScaleGuide.impactTickForPitch(
         edo: edo,
         pitch: impact.pitch,

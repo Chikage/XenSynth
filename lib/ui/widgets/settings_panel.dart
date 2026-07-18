@@ -60,6 +60,11 @@ class SettingsPanel extends StatelessWidget {
                           label: Text('HEX'),
                           icon: Icon(Icons.hive_outlined, size: 15),
                         ),
+                        ButtonSegment(
+                          value: KeyboardLayoutMode.spatial,
+                          label: Text('3D'),
+                          icon: Icon(Icons.view_in_ar_outlined, size: 15),
+                        ),
                       ],
                       selected: {settings.layoutMode},
                       onSelectionChanged: (value) => onChanged(
@@ -113,8 +118,29 @@ class SettingsPanel extends StatelessWidget {
                         settings.copyWith(externalMidiControlsProgram: value),
                       ),
                     ),
-                    if (settings.layoutMode ==
-                        KeyboardLayoutMode.hexagonal) ...[
+                    if (settings.layoutMode == KeyboardLayoutMode.spatial) ...[
+                      const _SectionLabel('3D WATERFALL'),
+                      SegmentedButton<SpatialProjectionMode>(
+                        style: _compactButtonStyle,
+                        segments: const [
+                          ButtonSegment(
+                            value: SpatialProjectionMode.oblique,
+                            label: Text('OBLIQUE'),
+                            icon: Icon(Icons.grid_4x4_rounded, size: 15),
+                          ),
+                          ButtonSegment(
+                            value: SpatialProjectionMode.perspective,
+                            label: Text('PERSPECTIVE'),
+                            icon: Icon(Icons.filter_center_focus, size: 15),
+                          ),
+                        ],
+                        selected: {settings.spatialProjection},
+                        onSelectionChanged: (value) => onChanged(
+                          settings.copyWith(spatialProjection: value.single),
+                        ),
+                      ),
+                    ],
+                    if (settings.layoutMode.usesHexKeyboard) ...[
                       const _SectionLabel('HEX KEYBOARD'),
                       Row(
                         children: [

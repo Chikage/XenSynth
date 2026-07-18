@@ -1,6 +1,14 @@
 // ignore_for_file: prefer_initializing_formals
 
-enum KeyboardLayoutMode { linear, hexagonal }
+import '../core/hex_keyboard.dart';
+
+enum KeyboardLayoutMode { linear, hexagonal, spatial }
+
+enum SpatialProjectionMode { oblique, perspective }
+
+extension KeyboardLayoutModeSemantics on KeyboardLayoutMode {
+  bool get usesHexKeyboard => this != KeyboardLayoutMode.linear;
+}
 
 class XenSynthSettings {
   const XenSynthSettings({
@@ -24,6 +32,7 @@ class XenSynthSettings {
     this.pseudoPressureEnabled = true,
     this.playbackPreviewSeconds = 1.8,
     this.pitchSnapEnabled = false,
+    this.spatialProjection = SpatialProjectionMode.perspective,
   }) : _hexStepQ = hexStepQ,
        _hexStepR = hexStepR;
 
@@ -51,11 +60,26 @@ class XenSynthSettings {
   final bool pseudoPressureEnabled;
   final double playbackPreviewSeconds;
   final bool pitchSnapEnabled;
+  final SpatialProjectionMode spatialProjection;
 
   int get hexPeriod => edo > 0 ? edo : 12;
   int get hexStepMaximum => hexStepMaximumForEdo(edo);
   int get hexStepQ => _hexStepQ.clamp(1, hexStepMaximum);
   int get hexStepR => _hexStepR.clamp(1, hexStepMaximum);
+  HexKeyboardConfiguration get hexKeyboardConfiguration =>
+      HexKeyboardConfiguration(
+        columns: hexColumns,
+        rows: hexRows,
+        period: hexPeriod,
+        stepQ: hexStepQ,
+        stepR: hexStepR,
+        groupByOctave: hexGroupByOctave,
+        radius: 24,
+        rotationDegrees: hexRotationDegrees,
+        frameAcuteAngleDegrees: 72,
+      ).normalized();
+  bool get shouldSnapPlaybackPitch =>
+      layoutMode.usesHexKeyboard && pitchSnapEnabled;
   double get appliedPitchOffsetCents => -pitchOffsetCents;
   double get touchSensitivityPercent =>
       touchSensitivityPercentMin +
@@ -78,6 +102,9 @@ class XenSynthSettings {
     return XenSynthSettings(
       layoutMode: switch (map['keyboardLayoutMode']?.toString()) {
         'hexagonal' || 'hex' => KeyboardLayoutMode.hexagonal,
+        'spatial' ||
+        'spatialWaterfall' ||
+        'waterfall3d' => KeyboardLayoutMode.spatial,
         'linear' => KeyboardLayoutMode.linear,
         _ => defaults.layoutMode,
       },
@@ -135,6 +162,13 @@ class XenSynthSettings {
         map['pitchSnapEnabled'],
         defaults.pitchSnapEnabled,
       ),
+      spatialProjection: switch (map['spatialProjection']?.toString()) {
+        'perspective' => SpatialProjectionMode.perspective,
+        'oblique' ||
+        'axonometric' ||
+        'isometric' => SpatialProjectionMode.oblique,
+        _ => defaults.spatialProjection,
+      },
     );
   }
 
@@ -163,6 +197,7 @@ class XenSynthSettings {
       playbackPreviewSecondsMax,
     ),
     'pitchSnapEnabled': pitchSnapEnabled,
+    'spatialProjection': spatialProjection.name,
   };
 
   XenSynthSettings withEdo(int value) => copyWith(edo: value);
@@ -188,6 +223,7 @@ class XenSynthSettings {
     bool? pseudoPressureEnabled,
     double? playbackPreviewSeconds,
     bool? pitchSnapEnabled,
+    SpatialProjectionMode? spatialProjection,
   }) {
     final nextEdo = (edo ?? this.edo).clamp(0, 72);
     final nextHexStepMaximum = hexStepMaximumForEdo(nextEdo);
@@ -220,6 +256,7 @@ class XenSynthSettings {
             playbackPreviewSecondsMax,
           ),
       pitchSnapEnabled: pitchSnapEnabled ?? this.pitchSnapEnabled,
+      spatialProjection: spatialProjection ?? this.spatialProjection,
     );
   }
 

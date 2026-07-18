@@ -107,4 +107,49 @@ void main() {
     expect(find.text('120%'), findsOneWidget);
     expect(find.text('1.8 s'), findsOneWidget);
   });
+
+  testWidgets('spatial mode retains hex controls and exposes projection', (
+    tester,
+  ) async {
+    await tester.binding.setSurfaceSize(const Size(874, 402));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: AppPalette.theme(),
+        home: Scaffold(
+          body: Align(
+            alignment: Alignment.topRight,
+            child: SizedBox(
+              height: 330,
+              child: SettingsPanel(
+                settings: const XenSynthSettings(
+                  layoutMode: KeyboardLayoutMode.spatial,
+                  spatialProjection: SpatialProjectionMode.perspective,
+                ),
+                onChanged: (_) {},
+                onReset: () {},
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+
+    final settingsScrollable = find.byWidgetPredicate(
+      (widget) =>
+          widget is Scrollable && widget.axisDirection == AxisDirection.down,
+    );
+    expect(find.text('3D WATERFALL'), findsOneWidget);
+    expect(find.text('PERSPECTIVE'), findsOneWidget);
+    await tester.scrollUntilVisible(
+      find.text('Q step'),
+      120,
+      scrollable: settingsScrollable,
+    );
+    expect(find.text('HEX KEYBOARD'), findsOneWidget);
+    expect(find.text('Q step'), findsOneWidget);
+    expect(find.text('R step'), findsOneWidget);
+    expect(tester.takeException(), isNull);
+  });
 }

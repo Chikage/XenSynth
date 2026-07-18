@@ -2,8 +2,14 @@ import 'dart:math' as math;
 
 /// Stateful hit-particle simulation ported from XenSynth-Android's waterfall.
 class WaterfallParticleSystem {
-  WaterfallParticleSystem({math.Random? random})
-    : _random = random ?? math.Random();
+  WaterfallParticleSystem({
+    math.Random? random,
+    int maximumLiveParticles = maximumParticleCount,
+  }) : maximumLiveParticles = maximumLiveParticles.clamp(
+         1,
+         maximumParticleCount,
+       ),
+       _random = random ?? math.Random();
 
   static const gravity = 360.0;
   static const maximumParticleCount = 1200;
@@ -20,6 +26,7 @@ class WaterfallParticleSystem {
   static const trackHues = <double>[190, 28, 132, 48, 264, 158, 330, 88];
 
   final math.Random _random;
+  final int maximumLiveParticles;
   final List<WaterfallHitParticle> _particles = [];
   final Map<int, WaterfallKeyImpact> _impacts = {};
 
@@ -78,7 +85,7 @@ class WaterfallParticleSystem {
       );
     }
 
-    final overflow = _particles.length - maximumParticleCount;
+    final overflow = _particles.length - maximumLiveParticles;
     if (overflow > 0) _particles.removeRange(0, overflow);
 
     final impactLife = noteEffectLife(keyImpactLife, noteDurationSeconds);
@@ -194,4 +201,13 @@ class WaterfallKeyImpact {
   final double maxLife;
   final double velocityRatio;
   final double hue;
+
+  double get progress =>
+      maxLife > 0 ? (life / maxLife).clamp(0.0, 1.0).toDouble() : 0.0;
+
+  /// Shared 2D/3D impact envelope: rest -> peak -> rest.
+  double get animationAmount =>
+      math.sin(progress * math.pi) * velocityRatio.clamp(0.0, 1.0);
+
+  double get fade => math.pow(progress, 0.72).toDouble();
 }

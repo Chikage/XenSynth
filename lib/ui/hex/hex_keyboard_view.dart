@@ -14,12 +14,20 @@ typedef HexPitchPointerCallback =
 class HexKeyboardViewportController extends ChangeNotifier {
   static const double minimumScale = 0.84;
   static const double maximumScale = 3;
+  static const double maximumTiltDegrees = 62;
 
   double _scaleMultiplier = minimumScale;
   Offset _pan = Offset.zero;
+  double _rotationXDegrees = 0;
+  double _rotationYDegrees = 0;
+  double _rotationZDegrees = 0;
 
   double get scaleMultiplier => _scaleMultiplier;
   Offset get pan => _pan;
+  double get rotationXDegrees => _rotationXDegrees;
+  double get rotationYDegrees => _rotationYDegrees;
+  double get rotationZDegrees => _rotationZDegrees;
+  double get rotationDegrees => _rotationZDegrees;
 
   void panBy(Offset delta) {
     if (!delta.dx.isFinite || !delta.dy.isFinite || delta == Offset.zero) {
@@ -38,10 +46,68 @@ class HexKeyboardViewportController extends ChangeNotifier {
     notifyListeners();
   }
 
+  void rotateBy(double deltaDegrees) {
+    if (!deltaDegrees.isFinite || deltaDegrees == 0) return;
+    final next = _normalizeRotation(_rotationZDegrees + deltaDegrees);
+    if (next == _rotationZDegrees) return;
+    _rotationZDegrees = next;
+    notifyListeners();
+  }
+
+  void setSpatialTransform({
+    required double scaleMultiplier,
+    required Offset pan,
+    required double rotationDegrees,
+    double? rotationXDegrees,
+    double? rotationYDegrees,
+  }) {
+    final requestedX = rotationXDegrees ?? _rotationXDegrees;
+    final requestedY = rotationYDegrees ?? _rotationYDegrees;
+    if (!scaleMultiplier.isFinite ||
+        !pan.dx.isFinite ||
+        !pan.dy.isFinite ||
+        !rotationDegrees.isFinite ||
+        !requestedX.isFinite ||
+        !requestedY.isFinite) {
+      return;
+    }
+    final nextScale = scaleMultiplier
+        .clamp(minimumScale, maximumScale)
+        .toDouble();
+    final nextRotationX = requestedX
+        .clamp(-maximumTiltDegrees, maximumTiltDegrees)
+        .toDouble();
+    final nextRotationY = requestedY
+        .clamp(-maximumTiltDegrees, maximumTiltDegrees)
+        .toDouble();
+    final nextRotationZ = _normalizeRotation(rotationDegrees);
+    if (nextScale == _scaleMultiplier &&
+        pan == _pan &&
+        nextRotationX == _rotationXDegrees &&
+        nextRotationY == _rotationYDegrees &&
+        nextRotationZ == _rotationZDegrees) {
+      return;
+    }
+    _scaleMultiplier = nextScale;
+    _pan = pan;
+    _rotationXDegrees = nextRotationX;
+    _rotationYDegrees = nextRotationY;
+    _rotationZDegrees = nextRotationZ;
+    notifyListeners();
+  }
+
   void reset() {
-    final changed = _scaleMultiplier != minimumScale || _pan != Offset.zero;
+    final changed =
+        _scaleMultiplier != minimumScale ||
+        _pan != Offset.zero ||
+        _rotationXDegrees != 0 ||
+        _rotationYDegrees != 0 ||
+        _rotationZDegrees != 0;
     _scaleMultiplier = minimumScale;
     _pan = Offset.zero;
+    _rotationXDegrees = 0;
+    _rotationYDegrees = 0;
+    _rotationZDegrees = 0;
     if (changed) notifyListeners();
   }
 
@@ -59,6 +125,11 @@ class HexKeyboardViewportController extends ChangeNotifier {
     if (_pan == pan) return;
     _pan = pan;
     notifyListeners();
+  }
+
+  static double _normalizeRotation(double value) {
+    final normalized = (value + 180) % 360;
+    return normalized < 0 ? normalized + 180 : normalized - 180;
   }
 }
 
@@ -291,9 +362,7 @@ class _HexKeyboardViewState extends State<HexKeyboardView> {
     };
     for (final entry in widget.activePitches.entries) {
       final direct = _pointerCells[entry.key];
-      final targetStep = ((entry.value - 60) * _configuration.period / 12)
-          .round();
-      final cell = direct ?? _layout.keyForStep(targetStep);
+      final cell = direct ?? _layout.keyForPitch(entry.value);
       if (cell != null) result.add(cell.coordinate);
     }
     return result;
@@ -330,18 +399,7 @@ class _HexKeyboardViewState extends State<HexKeyboardView> {
   }
 
   static HexKeyboardConfiguration _configurationFor(XenSynthSettings settings) {
-    final effectivePeriod = settings.edo > 0 ? settings.edo : 12;
-    return HexKeyboardConfiguration(
-      columns: settings.hexColumns,
-      rows: settings.hexRows,
-      period: effectivePeriod,
-      stepQ: settings.hexStepQ,
-      stepR: settings.hexStepR,
-      groupByOctave: settings.hexGroupByOctave,
-      radius: 24,
-      rotationDegrees: settings.hexRotationDegrees,
-      frameAcuteAngleDegrees: 72,
-    ).normalized();
+    return settings.hexKeyboardConfiguration;
   }
 
   @override
@@ -525,13 +583,11 @@ class _HexPlaybackIndex {
     if (source == null || source.isEmpty) {
       return const _HexPlaybackIndex(<_KeyboardPlaybackNote>[]);
     }
-    final period = layout.configuration.period;
     final notes = <_KeyboardPlaybackNote>[];
     final previousByCoordinate = <AxialCoordinate, _KeyboardPlaybackNote>{};
     for (var scoreIndex = 0; scoreIndex < source.length; scoreIndex++) {
       final note = source[scoreIndex];
-      final step = ((note.pitch - 60) * period / 12).round();
-      final cell = layout.keyForStep(step);
+      final cell = layout.keyForPitch(note.pitch);
       if (cell == null) continue;
       final previous = previousByCoordinate[cell.coordinate];
       final mapped = _KeyboardPlaybackNote(

@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 
+import '../core/hex_keyboard.dart';
 import '../core/midi_parser.dart';
 import '../core/score.dart';
 import '../core/tuning.dart';
@@ -23,6 +24,8 @@ class XenSynthController extends ChangeNotifier {
   final Set<int> _sustainedMidiPointers = {};
   final Set<int> _deferredMidiOffs = {};
   final Map<int, bool> _sustainByChannel = {};
+  HexKeyboardConfiguration? _pitchSnapConfiguration;
+  HexaKeyboardLayout? _pitchSnapLayout;
 
   XenSynthSettings settings = const XenSynthSettings();
   TuningDefinition tuning = TuningDefinition.standard;
@@ -33,9 +36,12 @@ class XenSynthController extends ChangeNotifier {
   bool loading = false;
   bool audioReady = false;
   bool playing = false;
+  // The score can finish while the waterfall still needs a short visual tail.
+  bool waterfallAnimating = false;
   double playhead = 0;
+  double visualPlayhead = 0;
   Map<int, double> activePitches = const {};
-  double _clockBase = 0;
+  double _visualClockBase = 0;
   bool _seekGestureActive = false;
   bool _resumeAfterSeekGesture = false;
   Future<void>? _seekPauseFuture;
@@ -137,6 +143,7 @@ class XenSynthController extends ChangeNotifier {
   Future<void> loadScoreBytes(Uint8List bytes, String title) async {
     loading = true;
     playing = false;
+    waterfallAnimating = false;
     _clearSeekGestureState();
     _stopClock();
     await _native.stop();
@@ -160,7 +167,8 @@ class XenSynthController extends ChangeNotifier {
       );
       score = parsed;
       playhead = _initialPlayhead(parsed);
-      await _native.loadScore(parsed.toNativeMap());
+      visualPlayhead = playhead;
+      await _native.loadScore(_nativeScoreMap(parsed, settings));
       status = '${parsed.format} · ${parsed.notes.length} NOTES';
     } catch (error, stackTrace) {
       debugPrint('Score parse failed: $error\n$stackTrace');
@@ -185,7 +193,9 @@ class XenSynthController extends ChangeNotifier {
     if (currentScore == null || currentScore.duration <= 0) return;
     _clearSeekGestureState();
     if (playhead >= currentScore.duration - 0.001) playhead = 0;
+    visualPlayhead = playhead;
     playing = true;
+    waterfallAnimating = true;
     _startPlaybackClock();
     notifyListeners();
     try {
@@ -197,6 +207,7 @@ class XenSynthController extends ChangeNotifier {
       );
     } catch (error) {
       playing = false;
+      waterfallAnimating = false;
       _stopClock();
       _setStatus('PLAYBACK FAILED · $error');
     }
@@ -205,6 +216,7 @@ class XenSynthController extends ChangeNotifier {
   Future<void> pause() async {
     _syncClockPosition();
     playing = false;
+    waterfallAnimating = false;
     _clearSeekGestureState();
     _stopClock();
     notifyListeners();
@@ -216,9 +228,14 @@ class XenSynthController extends ChangeNotifier {
       updateSeekGesture(position);
       return;
     }
+    if (waterfallAnimating && !playing) {
+      waterfallAnimating = false;
+      _stopClock();
+    }
     playhead = position.clamp(0, duration).toDouble();
+    visualPlayhead = playhead;
     if (playing) {
-      _clockBase = playhead;
+      _visualClockBase = visualPlayhead;
       _clock
         ..reset()
         ..start();
@@ -231,11 +248,15 @@ class XenSynthController extends ChangeNotifier {
     if (_seekGestureActive || duration <= 0) return;
     _seekGestureActive = true;
     _resumeAfterSeekGesture = playing;
-    if (!playing) return;
+    if (!playing && !waterfallAnimating) return;
     _syncClockPosition();
     _stopClock();
+    if (!playing) {
+      waterfallAnimating = false;
+      visualPlayhead = playhead;
+    }
     notifyListeners();
-    _seekPauseFuture = _native.pause();
+    _seekPauseFuture = playing ? _native.pause() : Future<void>.value();
   }
 
   void updateSeekGesture(double position) {
@@ -246,6 +267,7 @@ class XenSynthController extends ChangeNotifier {
     final next = position.clamp(0, duration).toDouble();
     if ((playhead - next).abs() < 0.000001) return;
     playhead = next;
+    visualPlayhead = next;
     notifyListeners();
   }
 
@@ -259,10 +281,14 @@ class XenSynthController extends ChangeNotifier {
     if (!resume) return;
     if (playhead >= duration - 0.001) {
       playing = false;
+      waterfallAnimating = false;
+      visualPlayhead = playhead;
       notifyListeners();
       return;
     }
     playing = true;
+    waterfallAnimating = true;
+    visualPlayhead = playhead;
     _startPlaybackClock();
     notifyListeners();
     try {
@@ -274,6 +300,7 @@ class XenSynthController extends ChangeNotifier {
       );
     } catch (error) {
       playing = false;
+      waterfallAnimating = false;
       _stopClock();
       _setStatus('PLAYBACK FAILED · $error');
     }
@@ -281,9 +308,11 @@ class XenSynthController extends ChangeNotifier {
 
   Future<void> resetPlayback() async {
     playing = false;
+    waterfallAnimating = false;
     _clearSeekGestureState();
     _stopClock();
     playhead = 0;
+    visualPlayhead = 0;
     notifyListeners();
     await _native.seek(0);
     await _native.pause();
@@ -291,9 +320,11 @@ class XenSynthController extends ChangeNotifier {
 
   Future<void> stop() async {
     playing = false;
+    waterfallAnimating = false;
     _clearSeekGestureState();
     _stopClock();
     playhead = 0;
+    visualPlayhead = 0;
     await releaseAllNotes();
     await _native.stop();
     notifyListeners();
@@ -301,7 +332,22 @@ class XenSynthController extends ChangeNotifier {
 
   Future<void> updateSettings(XenSynthSettings next) async {
     final previous = settings;
+    final snapMappingChanged = _pitchSnapMappingChanged(previous, next);
+    final playbackParametersChanged =
+        next.playbackSpeed != previous.playbackSpeed ||
+        next.pitchOffsetCents != previous.pitchOffsetCents ||
+        snapMappingChanged;
+    final clockActive = playing || waterfallAnimating;
+    if (clockActive && playbackParametersChanged) {
+      _syncClockPosition();
+    }
     settings = next;
+    if (clockActive && playbackParametersChanged && waterfallAnimating) {
+      _visualClockBase = visualPlayhead;
+      _clock
+        ..reset()
+        ..start();
+    }
     notifyListeners();
     _settingsSaveTimer?.cancel();
     _settingsSaveTimer = Timer(const Duration(milliseconds: 350), () {
@@ -320,20 +366,11 @@ class XenSynthController extends ChangeNotifier {
     if (next.program != previous.program) {
       await _native.setProgram(program: next.program);
     }
-    if (next.playbackSpeed != previous.playbackSpeed && playing) {
-      _syncClockPosition();
-      _clockBase = playhead;
-      _clock
-        ..reset()
-        ..start();
-      await _native.play(
-        from: playhead,
-        speed: next.playbackSpeed,
-        offsetCents: next.appliedPitchOffsetCents,
-        audioStartDelaySeconds: next.audioLatencyMs / 1000,
-      );
+    final currentScore = score;
+    if (snapMappingChanged && currentScore != null) {
+      await _native.loadScore(_nativeScoreMap(currentScore, next));
     }
-    if (next.pitchOffsetCents != previous.pitchOffsetCents && playing) {
+    if (playing && playbackParametersChanged) {
       await _native.play(
         from: playhead,
         speed: next.playbackSpeed,
@@ -355,8 +392,10 @@ class XenSynthController extends ChangeNotifier {
   }
 
   void noteDown(int pointer, double pitch, int velocity) {
-    final targetPitch = pitch + settings.appliedPitchOffsetCents / 100;
-    final nextActive = Map<int, double>.from(activePitches)..[pointer] = pitch;
+    final playbackPitch = _playbackPitch(pitch, settings);
+    final targetPitch = playbackPitch + settings.appliedPitchOffsetCents / 100;
+    final nextActive = Map<int, double>.from(activePitches)
+      ..[pointer] = playbackPitch;
     activePitches = nextActive;
     final epoch = (_noteEpochs[pointer] ?? 0) + 1;
     _noteEpochs[pointer] = epoch;
@@ -381,10 +420,11 @@ class XenSynthController extends ChangeNotifier {
   }
 
   void noteMove(int pointer, double pitch, int velocity) {
+    final playbackPitch = _playbackPitch(pitch, settings);
     final previous = activePitches[pointer];
-    if (previous != null && (previous - pitch).abs() < 0.001) return;
+    if (previous != null && (previous - playbackPitch).abs() < 0.001) return;
     noteUp(pointer);
-    noteDown(pointer, pitch, velocity);
+    noteDown(pointer, playbackPitch, velocity);
   }
 
   void noteUp(int pointer) {
@@ -490,32 +530,44 @@ class XenSynthController extends ChangeNotifier {
 
   void _syncClockPosition() {
     if (!_clock.isRunning) return;
-    playhead =
-        (_clockBase +
-                _clock.elapsedMicroseconds / 1000000 * settings.playbackSpeed)
-            .clamp(0, duration)
-            .toDouble();
+    _applyClockPosition(
+      _visualClockBase +
+          _clock.elapsedMicroseconds / 1000000 * settings.playbackSpeed,
+    );
   }
 
   void _startPlaybackClock() {
-    _clockBase = playhead;
+    _visualClockBase = visualPlayhead;
     _clock
       ..reset()
       ..start();
     _clockTimer?.cancel();
     _clockTimer = Timer.periodic(const Duration(milliseconds: 16), (_) {
       final next =
-          _clockBase +
+          _visualClockBase +
           _clock.elapsedMicroseconds / 1000000 * settings.playbackSpeed;
-      if (next >= duration) {
-        playhead = duration;
-        playing = false;
-        _stopClock();
-      } else {
-        playhead = next;
-      }
+      _applyClockPosition(next);
+      if (!waterfallAnimating) _stopClock();
       notifyListeners();
     });
+  }
+
+  void _applyClockPosition(double next) {
+    final scoreEnd = duration;
+    final waterfallEnd = _waterfallAnimationEnd;
+    if (next >= scoreEnd) {
+      playhead = scoreEnd;
+      playing = false;
+    } else {
+      playhead = next;
+    }
+    if (next >= waterfallEnd) {
+      visualPlayhead = waterfallEnd;
+      waterfallAnimating = false;
+    } else {
+      visualPlayhead = next;
+      waterfallAnimating = true;
+    }
   }
 
   void _clearSeekGestureState() {
@@ -556,10 +608,60 @@ class XenSynthController extends ChangeNotifier {
     'json',
   ];
 
+  // Covers the longest built-in completion burst/particle lifetime (0.70s).
+  static const double _waterfallTailSeconds = 0.75;
+
+  double get _waterfallAnimationEnd {
+    final currentScore = score;
+    if (currentScore == null || currentScore.notes.isEmpty) return duration;
+    var lastNoteEnd = currentScore.notes.first.end;
+    for (final note in currentScore.notes.skip(1)) {
+      if (note.end > lastNoteEnd) lastNoteEnd = note.end;
+    }
+    final noteEffectsEnd = lastNoteEnd + _waterfallTailSeconds;
+    return noteEffectsEnd > duration ? noteEffectsEnd : duration;
+  }
+
   static double _initialPlayhead(ParsedScore score) {
     final first = score.notes.isEmpty ? null : score.notes.first.start;
     if (first == null || first * 160 >= 36) return 0;
     return first - 36 / 160;
+  }
+
+  Map<String, Object?> _nativeScoreMap(
+    ParsedScore score,
+    XenSynthSettings settings,
+  ) {
+    if (!settings.shouldSnapPlaybackPitch) return score.toNativeMap();
+    return score.toNativeMap(
+      pitchMapper: _pitchSnapLayoutFor(settings).snapPitch,
+    );
+  }
+
+  double _playbackPitch(double pitch, XenSynthSettings settings) {
+    if (!settings.shouldSnapPlaybackPitch) return pitch;
+    return _pitchSnapLayoutFor(settings).snapPitch(pitch);
+  }
+
+  HexaKeyboardLayout _pitchSnapLayoutFor(XenSynthSettings settings) {
+    final configuration = settings.hexKeyboardConfiguration;
+    final cached = _pitchSnapLayout;
+    if (cached != null && configuration == _pitchSnapConfiguration) {
+      return cached;
+    }
+    _pitchSnapConfiguration = configuration;
+    return _pitchSnapLayout = HexaKeyboardLayoutEngine.build(configuration);
+  }
+
+  static bool _pitchSnapMappingChanged(
+    XenSynthSettings previous,
+    XenSynthSettings next,
+  ) {
+    if (previous.shouldSnapPlaybackPitch != next.shouldSnapPlaybackPitch) {
+      return true;
+    }
+    return next.shouldSnapPlaybackPitch &&
+        previous.hexKeyboardConfiguration != next.hexKeyboardConfiguration;
   }
 
   @override

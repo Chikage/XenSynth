@@ -454,6 +454,19 @@ class HexaKeyboardLayout {
     return result;
   }
 
+  /// Selects the same concrete key used by the keyboard playback visuals for
+  /// an arbitrary MIDI pitch.
+  HexKey? keyForPitch(double midiPitch) {
+    if (!midiPitch.isFinite) return null;
+    final targetStep = ((midiPitch - 60) * configuration.period / 12).round();
+    return keyForStep(targetStep);
+  }
+
+  /// Quantizes a MIDI pitch to the audio pitch of its nearest concrete key.
+  double snapPitch(double midiPitch) {
+    return keyForPitch(midiPitch)?.audioPitch.midiPitch ?? midiPitch;
+  }
+
   static HexKey _preferredCell(List<HexKey> candidates) {
     return candidates.reduce((best, candidate) {
       final bestDistance = HexGeometry.distance(best.coordinate);

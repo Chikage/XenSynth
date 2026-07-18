@@ -13,6 +13,7 @@ void main() {
       expect(settings.touchSensitivityPercent, closeTo(120, 0.000001));
       expect(settings.playbackPreviewSeconds, 1.8);
       expect(settings.pitchSnapEnabled, isFalse);
+      expect(settings.spatialProjection, SpatialProjectionMode.perspective);
     });
 
     test('changing EDO synchronizes period and clamps both steps', () {
@@ -71,6 +72,20 @@ void main() {
       expect(positive.pitchOffsetCents, 3);
       expect(positive.appliedPitchOffsetCents, -3);
       expect(negative.appliedPitchOffsetCents, 3);
+    });
+
+    test('round-trips the spatial mode and perspective projection', () {
+      const settings = XenSynthSettings(
+        layoutMode: KeyboardLayoutMode.spatial,
+        spatialProjection: SpatialProjectionMode.perspective,
+        pitchSnapEnabled: true,
+      );
+
+      final restored = XenSynthSettings.fromMap(settings.toMap());
+
+      expect(restored.layoutMode, KeyboardLayoutMode.spatial);
+      expect(restored.spatialProjection, SpatialProjectionMode.perspective);
+      expect(restored.shouldSnapPlaybackPitch, isTrue);
     });
   });
 }

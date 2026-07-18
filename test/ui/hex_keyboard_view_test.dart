@@ -90,6 +90,43 @@ void main() {
       HexKeyboardViewportController.minimumScale,
     );
   });
+
+  test('viewport controller stores and resets the spatial transform', () {
+    final controller = HexKeyboardViewportController();
+    addTearDown(controller.dispose);
+
+    controller.setSpatialTransform(
+      scaleMultiplier: 1.7,
+      pan: const Offset(42, -18),
+      rotationXDegrees: 80,
+      rotationYDegrees: -90,
+      rotationDegrees: 205,
+    );
+
+    expect(controller.scaleMultiplier, 1.7);
+    expect(controller.pan, const Offset(42, -18));
+    expect(
+      controller.rotationXDegrees,
+      HexKeyboardViewportController.maximumTiltDegrees,
+    );
+    expect(
+      controller.rotationYDegrees,
+      -HexKeyboardViewportController.maximumTiltDegrees,
+    );
+    expect(controller.rotationZDegrees, -155);
+    expect(controller.rotationDegrees, -155);
+
+    controller.reset();
+    expect(
+      controller.scaleMultiplier,
+      HexKeyboardViewportController.minimumScale,
+    );
+    expect(controller.pan, Offset.zero);
+    expect(controller.rotationXDegrees, 0);
+    expect(controller.rotationYDegrees, 0);
+    expect(controller.rotationZDegrees, 0);
+    expect(controller.rotationDegrees, 0);
+  });
 }
 
 Future<_TapResult> _tapConcreteKey(

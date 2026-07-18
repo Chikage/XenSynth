@@ -4,40 +4,37 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:xensynth/ui/waterfall/waterfall_particle_system.dart';
 
 void main() {
-  test(
-    'uses the Android particle count and extends sustained-note life',
-    () {
-      final system = WaterfallParticleSystem(random: math.Random(7));
+  test('uses the Android particle count and extends sustained-note life', () {
+    final system = WaterfallParticleSystem(random: math.Random(7));
 
-      system.spawn(
-        pitch: 60.25,
-        x: 120,
-        y: 240,
-        noteWidth: 5,
-        pixelScale: 1,
-        velocity: 127,
-        track: 2,
-        noteDurationSeconds: 2.4,
-      );
+    system.spawn(
+      pitch: 60.25,
+      x: 120,
+      y: 240,
+      noteWidth: 5,
+      pixelScale: 1,
+      velocity: 127,
+      track: 2,
+      noteDurationSeconds: 2.4,
+    );
 
-      expect(system.particles, hasLength(20));
-      expect(
-        system.particles.every((particle) => particle.maxLife >= 2.52),
-        isTrue,
-      );
-      expect(
-        system.particles.every(
-          (particle) => particle.hue == WaterfallParticleSystem.trackHues[2],
-        ),
-        isTrue,
-      );
-      final impact = system.impacts.single;
-      expect(impact.pitch, 60.25);
-      expect(impact.maxLife, closeTo(2.52, 0.000001));
-      expect(impact.velocityRatio, 1);
-      expect(impact.hue, WaterfallParticleSystem.trackHues[2]);
-    },
-  );
+    expect(system.particles, hasLength(20));
+    expect(
+      system.particles.every((particle) => particle.maxLife >= 2.52),
+      isTrue,
+    );
+    expect(
+      system.particles.every(
+        (particle) => particle.hue == WaterfallParticleSystem.trackHues[2],
+      ),
+      isTrue,
+    );
+    final impact = system.impacts.single;
+    expect(impact.pitch, 60.25);
+    expect(impact.maxLife, closeTo(2.52, 0.000001));
+    expect(impact.velocityRatio, 1);
+    expect(impact.hue, WaterfallParticleSystem.trackHues[2]);
+  });
 
   test('uses minimum impact life and replaces the same pitch impact', () {
     final system = WaterfallParticleSystem(random: math.Random(9));
@@ -68,6 +65,29 @@ void main() {
     expect(impact.maxLife, closeTo(1.62, 0.000001));
     expect(impact.velocityRatio, 1);
     expect(impact.hue, WaterfallParticleSystem.trackHues[3]);
+  });
+
+  test('shares the 2D impact envelope across its full lifetime', () {
+    final impact = WaterfallKeyImpact(
+      pitch: 60,
+      life: 0.26,
+      maxLife: 0.26,
+      velocityRatio: 0.75,
+      hue: 0,
+    );
+
+    expect(impact.progress, 1);
+    expect(impact.animationAmount, closeTo(0, 0.000001));
+    expect(impact.fade, 1);
+
+    impact.life = 0.13;
+    expect(impact.progress, 0.5);
+    expect(impact.animationAmount, closeTo(0.75, 0.000001));
+
+    impact.life = 0;
+    expect(impact.progress, 0);
+    expect(impact.animationAmount, 0);
+    expect(impact.fade, 0);
   });
 
   test('advances particles with Android gravity and horizontal damping', () {
@@ -116,5 +136,27 @@ void main() {
       system.particles,
       hasLength(WaterfallParticleSystem.maximumParticleCount),
     );
+  });
+
+  test('supports a smaller live-particle budget for spatial rendering', () {
+    final system = WaterfallParticleSystem(
+      random: math.Random(23),
+      maximumLiveParticles: 80,
+    );
+
+    for (var index = 0; index < 10; index++) {
+      system.spawn(
+        pitch: 60 + index / 100,
+        x: 100,
+        y: 200,
+        noteWidth: 4,
+        pixelScale: 1,
+        velocity: 127,
+        track: index,
+      );
+    }
+
+    expect(system.particles, hasLength(80));
+    expect(system.maximumLiveParticles, 80);
   });
 }
