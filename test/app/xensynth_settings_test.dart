@@ -14,6 +14,13 @@ void main() {
       expect(settings.touchSensitivityPercent, closeTo(120, 0.000001));
       expect(settings.playbackPreviewSeconds, 1.8);
       expect(settings.pitchSnapEnabled, isFalse);
+      expect(settings.hapticFeedbackEnabled, isTrue);
+      expect(settings.pitchRecognitionMode, PitchRecognitionMode.yin);
+      expect(settings.microphoneSensitivity, 1);
+      expect(
+        settings.hapticFeedbackStrength,
+        closeTo(XenSynthSettings.defaultHapticFeedbackStrength, 0.000001),
+      );
       expect(
         settings.spatialProjection,
         SpatialProjectionMode.obliquePerspective,
@@ -89,6 +96,78 @@ void main() {
 
       expect(settings.touchSensitivity, closeTo(0.4, 0.000001));
       expect(settings.touchSensitivityPercent, closeTo(120, 0.000001));
+    });
+
+    test('migrates, round-trips, and copies touch vibration strength', () {
+      final legacyEnabled = XenSynthSettings.fromMap(<String, Object?>{
+        'hapticFeedbackEnabled': true,
+      });
+      final legacyDisabled = XenSynthSettings.fromMap(<String, Object?>{
+        'hapticFeedbackEnabled': false,
+      });
+      final strong = XenSynthSettings.fromMap(<String, Object?>{
+        'hapticFeedbackStrength': 0.92,
+      });
+
+      expect(
+        legacyEnabled.hapticFeedbackStrength,
+        XenSynthSettings.defaultHapticFeedbackStrength,
+      );
+      expect(legacyDisabled.hapticFeedbackStrength, 0);
+      expect(legacyDisabled.hapticFeedbackEnabled, isFalse);
+      expect(strong.hapticFeedbackStrength, closeTo(0.92, 0.000001));
+      expect(strong.toMap()['hapticFeedbackStrength'], closeTo(0.92, 0.000001));
+      expect(strong.toMap()['hapticFeedbackEnabled'], isTrue);
+      expect(
+        strong.copyWith(hapticFeedbackStrength: 0).hapticFeedbackEnabled,
+        isFalse,
+      );
+    });
+
+    test('round-trips and copies microphone recognition mode', () {
+      final yin = XenSynthSettings.fromMap(<String, Object?>{
+        'pitchRecognitionMode': 'YIN',
+      });
+
+      expect(yin.pitchRecognitionMode, PitchRecognitionMode.yin);
+      expect(yin.toMap()['pitchRecognitionMode'], 'yin');
+      expect(
+        yin
+            .copyWith(pitchRecognitionMode: PitchRecognitionMode.piano)
+            .pitchRecognitionMode,
+        PitchRecognitionMode.piano,
+      );
+
+      final fft = XenSynthSettings.fromMap(<String, Object?>{
+        'pitchRecognitionMode': 'FFT',
+        'keyboardLayoutMode': 'spatial',
+      });
+      expect(fft.pitchRecognitionMode, PitchRecognitionMode.fft);
+      expect(fft.layoutMode, KeyboardLayoutMode.linear);
+      expect(fft.toMap()['pitchRecognitionMode'], 'fft');
+
+      final forcedLinear = const XenSynthSettings(
+        layoutMode: KeyboardLayoutMode.hexagonal,
+      ).copyWith(pitchRecognitionMode: PitchRecognitionMode.fft);
+      expect(forcedLinear.layoutMode, KeyboardLayoutMode.linear);
+    });
+
+    test('round-trips and clamps microphone sensitivity', () {
+      final quiet = XenSynthSettings.fromMap(<String, Object?>{
+        'microphoneSensitivity': 0.1,
+      });
+      final sensitive = XenSynthSettings.fromMap(<String, Object?>{
+        'microphoneSensitivity': 4,
+      });
+
+      expect(quiet.microphoneSensitivity, 0.5);
+      expect(sensitive.microphoneSensitivity, 2);
+      expect(
+        const XenSynthSettings()
+            .copyWith(microphoneSensitivity: 1.35)
+            .toMap()['microphoneSensitivity'],
+        closeTo(1.35, 0.000001),
+      );
     });
 
     test('applies pitch offset with the opposite sign', () {

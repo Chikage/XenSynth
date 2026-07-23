@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/scheduler.dart';
 
 import '../../core/midi_parser.dart';
+import '../../core/microphone_take.dart';
 import '../../core/score.dart';
 import '../../core/tuning.dart';
 import '../app_palette.dart';
@@ -33,6 +34,9 @@ class WaterfallView extends StatefulWidget {
     this.onSeek,
     this.onSeekEnd,
     this.onVolumeChanged,
+    this.spectrumFrames = const [],
+    this.pitchInputEvents = const [],
+    this.visualizationGeneration = 0,
     super.key,
   });
 
@@ -53,6 +57,9 @@ class WaterfallView extends StatefulWidget {
   final ValueChanged<double>? onSeek;
   final VoidCallback? onSeekEnd;
   final ValueChanged<double>? onVolumeChanged;
+  final List<SpectrumFrame> spectrumFrames;
+  final List<PitchInputEvent> pitchInputEvents;
+  final int visualizationGeneration;
 
   @override
   State<WaterfallView> createState() => _WaterfallViewState();
@@ -87,24 +94,35 @@ class _WaterfallViewState extends State<WaterfallView>
   Duration _lastParticleElapsed = Duration.zero;
   WaterfallLayout? _latestLayout;
   int _particleCursor = 0;
+  int _lastPitchInputSequence = 0;
 
   @override
   void initState() {
     super.initState();
     _particleCursor = _findParticleCursor(widget.playhead);
+    _lastPitchInputSequence = widget.pitchInputEvents.isEmpty
+        ? 0
+        : widget.pitchInputEvents.last.sequence;
     _particleTicker = createTicker(_advanceParticles);
   }
 
   @override
   void didUpdateWidget(covariant WaterfallView oldWidget) {
     super.didUpdateWidget(oldWidget);
-    if (!identical(oldWidget.score, widget.score)) {
+    final scoreChanged = !identical(oldWidget.score, widget.score);
+    if (widget.visualizationGeneration != oldWidget.visualizationGeneration) {
       _particleSystem.clear();
       _repaintParticles();
       _particleCursor = _findParticleCursor(widget.playhead);
       _stopParticleTickerIfIdle();
-      return;
+    } else if (scoreChanged) {
+      _particleSystem.clearTimedEffects();
+      _repaintParticles();
+      _particleCursor = _findParticleCursor(widget.playhead);
+      _stopParticleTickerIfIdle();
     }
+    _consumePitchInputEvents();
+    if (scoreChanged) return;
 
     final delta = widget.playhead - oldWidget.playhead;
     if (widget.playing && delta >= 0 && delta <= _maximumEmissionStepSeconds) {
@@ -175,6 +193,7 @@ class _WaterfallViewState extends State<WaterfallView>
                     edo: widget.edo,
                     tuning: widget.tuning,
                     activePitches: widget.activePitches.values.toSet(),
+                    spectrumFrames: widget.spectrumFrames,
                   ),
                   size: Size.infinite,
                 ),
@@ -187,6 +206,7 @@ class _WaterfallViewState extends State<WaterfallView>
                     tuning: widget.tuning,
                     particles: _particleSystem.particles,
                     impacts: _particleSystem.impacts,
+                    inputTraces: _particleSystem.inputTraces,
                     repaint: _particleRepaint,
                   ),
                   size: Size.infinite,
@@ -280,12 +300,6 @@ class _WaterfallViewState extends State<WaterfallView>
     _releaseRulerPointer(event.pointer);
     _rulerPointers[event.pointer] = sample.pitch;
     _rulerVelocities[event.pointer] = sample.velocity;
-    _spawnHitParticles(
-      pitch: sample.pitch,
-      velocity: sample.velocity,
-      track: 0,
-      layout: layout,
-    );
     widget.onPitchDown(event.pointer, sample.pitch, sample.velocity);
     return true;
   }
@@ -306,12 +320,6 @@ class _WaterfallViewState extends State<WaterfallView>
     if ((previous - sample.pitch).abs() < 0.06) return;
     final velocity = _rulerVelocities[event.pointer] ?? sample.velocity;
     _rulerPointers[event.pointer] = sample.pitch;
-    _spawnHitParticles(
-      pitch: sample.pitch,
-      velocity: velocity,
-      track: 0,
-      layout: layout,
-    );
     widget.onPitchMove(event.pointer, sample.pitch, velocity);
   }
 
@@ -730,6 +738,32 @@ class _WaterfallViewState extends State<WaterfallView>
     }
   }
 
+  void _consumePitchInputEvents() {
+    final layout = _latestLayout;
+    var changed = false;
+    for (final event in widget.pitchInputEvents) {
+      if (event.sequence <= _lastPitchInputSequence) continue;
+      _lastPitchInputSequence = event.sequence;
+      if (event.down) {
+        _particleSystem.beginInput(
+          pointer: event.pointer,
+          pitch: event.pitch,
+          velocity: event.velocity,
+          x: layout?.pitchToX(event.pitch),
+          y: layout?.keyboardTop,
+          noteWidth: layout?.noteWidth,
+          pixelScale: layout?.physicalPixel ?? 1,
+        );
+      } else {
+        _particleSystem.endInput(event.pointer);
+      }
+      changed = true;
+    }
+    if (!changed) return;
+    _repaintParticles();
+    _startParticleTicker();
+  }
+
   void _startParticleTicker() {
     if (_particleTicker.isActive) return;
     _lastParticleElapsed = Duration.zero;
@@ -879,6 +913,7 @@ class WaterfallPainter extends CustomPainter {
     required this.edo,
     required this.tuning,
     required this.activePitches,
+    this.spectrumFrames = const [],
   });
 
   static const _trackHues = <double>[190, 28, 132, 48, 264, 158, 330, 88];
@@ -896,6 +931,7 @@ class WaterfallPainter extends CustomPainter {
   final int edo;
   final TuningDefinition? tuning;
   final Set<double> activePitches;
+  final List<SpectrumFrame> spectrumFrames;
 
   @override
   void paint(Canvas canvas, Size size) {
@@ -903,6 +939,7 @@ class WaterfallPainter extends CustomPainter {
     _paintPitchGrid(canvas, size);
     _paintMeasures(canvas, size);
     _paintNotes(canvas, size);
+    _paintSpectrum(canvas, size);
     _paintPlayhead(canvas, size);
     _paintRulerGlass(canvas, size);
     _paintRulerTicks(canvas, size);
@@ -1119,6 +1156,104 @@ class WaterfallPainter extends CustomPainter {
     }
   }
 
+  void _paintSpectrum(Canvas canvas, Size size) {
+    if (spectrumFrames.isEmpty || layout.keyboardTop <= 0) return;
+    var low = 0;
+    var high = spectrumFrames.length;
+    while (low < high) {
+      final middle = (low + high) >> 1;
+      if (spectrumFrames[middle].time <= layout.playhead) {
+        low = middle + 1;
+      } else {
+        high = middle;
+      }
+    }
+    final currentIndex = (low - 1).clamp(0, spectrumFrames.length - 1);
+    final waterfallClip = Rect.fromLTWH(0, 0, size.width, layout.keyboardTop);
+    canvas.save();
+    canvas.clipRect(waterfallClip);
+
+    final trailPaint = Paint()
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = layout.physicalPixel
+      ..color = const Color(0x5AA9D6D0);
+    final visibleFuture = layout.keyboardTop / layout.pixelsPerSecond;
+    for (
+      var index = math.max(low, 0);
+      index < spectrumFrames.length;
+      index += 3
+    ) {
+      final frame = spectrumFrames[index];
+      if (frame.time > layout.playhead + visibleFuture) break;
+      final baseline = layout.timeToY(frame.time);
+      if (baseline < 0 || baseline > layout.keyboardTop) continue;
+      final path = _spectrumPath(
+        frame,
+        baseline: baseline,
+        amplitude: math.min(26.0, layout.keyboardHeight * 0.24),
+      );
+      canvas.drawPath(path, trailPaint);
+    }
+
+    final current = spectrumFrames[currentIndex];
+    final amplitude = math.min(148.0, layout.keyboardTop * 0.30);
+    final currentPath = _spectrumPath(
+      current,
+      baseline: layout.keyboardTop,
+      amplitude: amplitude,
+    );
+    final fillPath = Path.from(currentPath)
+      ..lineTo(size.width, layout.keyboardTop)
+      ..lineTo(0, layout.keyboardTop)
+      ..close();
+    canvas.drawPath(
+      fillPath,
+      Paint()
+        ..shader = const LinearGradient(
+          begin: Alignment.topCenter,
+          end: Alignment.bottomCenter,
+          colors: [Color(0x124EDBC2), Color(0x584EDBC2)],
+        ).createShader(waterfallClip),
+    );
+    canvas.drawPath(
+      currentPath,
+      Paint()
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = math.max(1.5, 2 * layout.physicalPixel)
+        ..strokeCap = StrokeCap.round
+        ..strokeJoin = StrokeJoin.round
+        ..color = const Color(0xFFFFDE6F),
+    );
+    canvas.restore();
+  }
+
+  Path _spectrumPath(
+    SpectrumFrame frame, {
+    required double baseline,
+    required double amplitude,
+  }) {
+    final values = frame.magnitudes;
+    final path = Path();
+    if (values.isEmpty) return path;
+    var started = false;
+    for (var index = 0; index < values.length; index++) {
+      final pitch =
+          index * 127 / math.max(1, values.length - 1) +
+          layout.offsetCents / 100;
+      final x = layout.pitchToX(pitch);
+      if (x < -2 || x > layout.size.width + 2) continue;
+      final value = values[index].clamp(0.0, 1.0);
+      final point = Offset(x, baseline - value * amplitude);
+      if (started) {
+        path.lineTo(point.dx, point.dy);
+      } else {
+        path.moveTo(point.dx, point.dy);
+        started = true;
+      }
+    }
+    return path;
+  }
+
   void _paintRulerGlass(Canvas canvas, Size size) {
     final rect = Rect.fromLTWH(
       0,
@@ -1240,7 +1375,9 @@ class WaterfallPainter extends CustomPainter {
   }
 
   void _paintEmptyState(Canvas canvas, Size size) {
-    if (score != null && score!.notes.isNotEmpty) return;
+    if (score?.format == 'MIC' || (score != null && score!.notes.isNotEmpty)) {
+      return;
+    }
     final painter = TextPainter(
       text: const TextSpan(
         text: 'OPEN A MIDX / MIDI SCORE',
@@ -1352,6 +1489,7 @@ class WaterfallPainter extends CustomPainter {
         oldDelegate.layout.devicePixelRatio != layout.devicePixelRatio ||
         oldDelegate.edo != edo ||
         oldDelegate.tuning != tuning ||
+        oldDelegate.spectrumFrames != spectrumFrames ||
         oldDelegate.activePitches != activePitches;
   }
 }
@@ -1363,6 +1501,7 @@ class _WaterfallParticlePainter extends CustomPainter {
     required this.tuning,
     required this.particles,
     required this.impacts,
+    required this.inputTraces,
     required Listenable repaint,
   }) : super(repaint: repaint);
 
@@ -1371,10 +1510,12 @@ class _WaterfallParticlePainter extends CustomPainter {
   final TuningDefinition? tuning;
   final List<WaterfallHitParticle> particles;
   final Iterable<WaterfallKeyImpact> impacts;
+  final List<WaterfallInputTrace> inputTraces;
 
   @override
   void paint(Canvas canvas, Size size) {
-    if (particles.isEmpty && impacts.isEmpty) return;
+    if (particles.isEmpty && impacts.isEmpty && inputTraces.isEmpty) return;
+    _paintInputTraces(canvas, size);
     _paintImpacts(canvas, size);
     if (particles.isEmpty) return;
     final trailPaint = Paint()
@@ -1432,6 +1573,39 @@ class _WaterfallParticlePainter extends CustomPainter {
         corePaint,
       );
     }
+  }
+
+  void _paintInputTraces(Canvas canvas, Size size) {
+    if (inputTraces.isEmpty) return;
+    canvas.save();
+    canvas.clipRect(Rect.fromLTWH(0, 0, size.width, layout.keyboardTop));
+    final glowPaint = Paint()
+      ..strokeCap = StrokeCap.square
+      ..blendMode = BlendMode.plus;
+    final corePaint = Paint()
+      ..strokeCap = StrokeCap.square
+      ..blendMode = BlendMode.plus;
+    for (final trace in inputTraces) {
+      final x = layout.pitchToX(trace.pitch);
+      if (x < -8 || x > size.width + 8) continue;
+      final top = layout.keyboardTop - trace.age * layout.pixelsPerSecond;
+      final bottom =
+          layout.keyboardTop - trace.releaseAge * layout.pixelsPerSecond;
+      if (bottom < 0 || top > layout.keyboardTop) continue;
+      final velocity = trace.velocityRatio.clamp(0.0, 1.0);
+      final width = layout.noteWidth * (0.52 + velocity * 1.10);
+      final start = Offset(x, bottom.clamp(0.0, layout.keyboardTop));
+      final end = Offset(x, top.clamp(0.0, layout.keyboardTop));
+      glowPaint
+        ..strokeWidth = width * 2.25
+        ..color = _hsv(trace.hue, 0.88, 0.92, 0.16 + velocity * 0.18);
+      corePaint
+        ..strokeWidth = math.max(layout.physicalPixel, width)
+        ..color = _hsv(trace.hue, 0.76, 1, 0.66 + velocity * 0.30);
+      canvas.drawLine(start, end, glowPaint);
+      canvas.drawLine(start, end, corePaint);
+    }
+    canvas.restore();
   }
 
   void _paintImpacts(Canvas canvas, Size size) {

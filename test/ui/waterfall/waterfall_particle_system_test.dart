@@ -90,6 +90,41 @@ void main() {
     expect(impact.fade, 0);
   });
 
+  test('holds live impact for the note and releases an upward trace', () {
+    final system = WaterfallParticleSystem(random: math.Random(29));
+
+    system.beginInput(
+      pointer: 7,
+      pitch: 69.25,
+      velocity: 96,
+      x: 100,
+      y: 200,
+      noteWidth: 4,
+    );
+    for (var frame = 0; frame < 25; frame++) {
+      system.advance(0.05);
+    }
+
+    final heldImpact = system.impacts.single;
+    final trace = system.inputTraces.single;
+    expect(heldImpact.held, isTrue);
+    expect(heldImpact.fade, 1);
+    expect(trace.held, isTrue);
+    expect(trace.duration, closeTo(1.25, 0.000001));
+    expect(trace.releaseAge, 0);
+    expect(trace.velocityRatio, closeTo(96 / 127, 0.000001));
+
+    system.endInput(7);
+    for (var frame = 0; frame < 8; frame++) {
+      system.advance(0.05);
+    }
+
+    expect(trace.held, isFalse);
+    expect(trace.duration, closeTo(1.25, 0.000001));
+    expect(trace.releaseAge, closeTo(0.4, 0.000001));
+    expect(system.impacts, isEmpty);
+  });
+
   test('advances particles with Android gravity and horizontal damping', () {
     final system = WaterfallParticleSystem(random: math.Random(11));
     system.spawn(

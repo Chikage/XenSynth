@@ -5,6 +5,119 @@ import 'package:xensynth/ui/app_palette.dart';
 import 'package:xensynth/ui/widgets/settings_panel.dart';
 
 void main() {
+  testWidgets('microphone input exposes piano, YIN, and FFT modes', (
+    tester,
+  ) async {
+    await tester.binding.setSurfaceSize(const Size(874, 402));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+
+    var settings = const XenSynthSettings();
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: AppPalette.theme(),
+        home: Scaffold(
+          body: Align(
+            alignment: Alignment.topRight,
+            child: SizedBox(
+              height: 330,
+              child: StatefulBuilder(
+                builder: (context, setState) => SettingsPanel(
+                  settings: settings,
+                  pitchRecognitionAvailable: true,
+                  onChanged: (value) => setState(() => settings = value),
+                  onReset: () {},
+                ),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+
+    final scrollable = find.byWidgetPredicate(
+      (widget) =>
+          widget is Scrollable && widget.axisDirection == AxisDirection.down,
+    );
+    await tester.scrollUntilVisible(
+      find.byKey(const ValueKey('pitch-recognition-mode')),
+      100,
+      scrollable: scrollable,
+    );
+    expect(find.text('MIC INPUT'), findsOneWidget);
+    expect(find.text('PIANO'), findsOneWidget);
+    expect(find.text('YIN'), findsOneWidget);
+    expect(find.text('FFT'), findsOneWidget);
+    await tester.scrollUntilVisible(
+      find.byKey(const ValueKey('microphone-sensitivity-slider')),
+      60,
+      scrollable: scrollable,
+    );
+    expect(find.text('Mic sensitivity'), findsOneWidget);
+    expect(find.text('100%'), findsOneWidget);
+
+    await tester.drag(scrollable, const Offset(0, -60));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('YIN'));
+    await tester.pump();
+
+    expect(settings.pitchRecognitionMode, PitchRecognitionMode.yin);
+
+    await tester.tap(find.text('FFT'));
+    await tester.pump();
+
+    expect(settings.pitchRecognitionMode, PitchRecognitionMode.fft);
+    expect(settings.layoutMode, KeyboardLayoutMode.linear);
+  });
+
+  testWidgets('touch vibration strength slider sits with surface settings', (
+    tester,
+  ) async {
+    await tester.binding.setSurfaceSize(const Size(874, 402));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+
+    var settings = const XenSynthSettings();
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: AppPalette.theme(),
+        home: Scaffold(
+          body: Align(
+            alignment: Alignment.topRight,
+            child: SizedBox(
+              height: 330,
+              child: StatefulBuilder(
+                builder: (context, setState) => SettingsPanel(
+                  settings: settings,
+                  onChanged: (value) => setState(() => settings = value),
+                  onReset: () {},
+                ),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+
+    final hapticSlider = find.byKey(const ValueKey('haptic-feedback-slider'));
+    expect(find.text('Touch vibration'), findsOneWidget);
+    expect(find.text('MED'), findsOneWidget);
+    expect(hapticSlider, findsOneWidget);
+    expect(
+      tester.getTopLeft(hapticSlider).dy,
+      lessThan(tester.getTopLeft(find.text('AUDIO')).dy),
+    );
+    expect(
+      settings.hapticFeedbackStrength,
+      XenSynthSettings.defaultHapticFeedbackStrength,
+    );
+
+    tester.widget<Slider>(hapticSlider).onChanged!(0);
+    await tester.pump();
+
+    expect(settings.hapticFeedbackStrength, 0);
+    expect(settings.hapticFeedbackEnabled, isFalse);
+    expect(find.text('OFF'), findsOneWidget);
+  });
+
   testWidgets('GM program accepts direct numeric input', (tester) async {
     await tester.binding.setSurfaceSize(const Size(874, 402));
     addTearDown(() => tester.binding.setSurfaceSize(null));

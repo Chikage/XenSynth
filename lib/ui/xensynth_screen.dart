@@ -47,6 +47,7 @@ class _XenSynthScreenState extends State<XenSynthScreen>
         state == AppLifecycleState.detached) {
       unawaited(_controller.pause());
       unawaited(_controller.releaseAllNotes());
+      unawaited(_controller.stopPitchRecognition());
     }
   }
 
@@ -63,6 +64,13 @@ class _XenSynthScreenState extends State<XenSynthScreen>
           builder: (context, _) {
             final settings = _controller.settings;
             final meter = _controller.currentMeter;
+            final hideScoreVisualization =
+                (_controller.pitchRecognizing &&
+                    _controller.hasMicrophoneTake) ||
+                _controller.activePitches.isNotEmpty;
+            final visualScore = hideScoreVisualization
+                ? null
+                : _controller.score;
             return Stack(
               children: [
                 Positioned.fill(
@@ -79,7 +87,7 @@ class _XenSynthScreenState extends State<XenSynthScreen>
                   top: ControlToolbar.height,
                   child: switch (settings.layoutMode) {
                     KeyboardLayoutMode.linear => WaterfallView(
-                      score: _controller.score,
+                      score: visualScore,
                       playhead: _controller.visualPlayhead,
                       edo: settings.edo,
                       // Android shifts score/ruler visuals by the displayed
@@ -89,45 +97,62 @@ class _XenSynthScreenState extends State<XenSynthScreen>
                       tuning: _controller.customTuningActive
                           ? _controller.tuning
                           : null,
-                      playing: _controller.waterfallAnimating,
+                      playing:
+                          _controller.waterfallAnimating &&
+                          !_controller.pitchRecognizing,
                       duration: _controller.duration,
                       volumeGain: settings.volumeGain,
                       activePitches: _controller.activePitches,
-                      onPitchDown: _controller.noteDown,
-                      onPitchMove: _controller.noteMove,
+                      onPitchDown: _handlePitchDown,
+                      onPitchMove: _handlePitchMove,
                       onPitchUp: _controller.noteUp,
                       onTogglePlayback: _controller.togglePlayback,
                       onSeekStart: _controller.beginSeekGesture,
                       onSeek: _controller.updateSeekGesture,
                       onSeekEnd: _controller.endSeekGesture,
                       onVolumeChanged: _controller.setVolumeGainFromGesture,
+                      spectrumFrames: _controller.showingFftSpectrum
+                          ? _controller.spectrumFrames
+                          : const [],
+                      pitchInputEvents: _controller.pitchInputEvents,
+                      visualizationGeneration:
+                          _controller.pitchVisualizationGeneration,
                     ),
                     KeyboardLayoutMode.hexagonal => Padding(
                       padding: const EdgeInsets.all(8),
                       child: HexKeyboardView(
-                        score: _controller.score,
+                        score: visualScore,
                         playhead: _controller.visualPlayhead,
                         settings: settings,
                         activePitches: _controller.activePitches,
+                        activePitchVelocities:
+                            _controller.activePitchVelocities,
                         viewportController: _hexKeyboardViewportController,
-                        onPitchDown: _controller.noteDown,
-                        onPitchMove: _controller.noteMove,
+                        onControlInteraction: _triggerHapticFeedback,
+                        onPitchDown: _handlePitchDown,
+                        onPitchMove: _handlePitchMove,
                         onPitchUp: _controller.noteUp,
                       ),
                     ),
                     KeyboardLayoutMode.spatial => Padding(
                       padding: const EdgeInsets.all(8),
                       child: SpatialWaterfallView(
-                        score: _controller.score,
+                        score: visualScore,
                         playhead: _controller.visualPlayhead,
                         settings: settings,
                         activePitches: _controller.activePitches,
-                        playing: _controller.waterfallAnimating,
+                        playing:
+                            _controller.waterfallAnimating &&
+                            !_controller.pitchRecognizing,
                         viewportController: _hexKeyboardViewportController,
-                        onPitchDown: _controller.noteDown,
-                        onPitchMove: _controller.noteMove,
+                        onControlInteraction: _triggerHapticFeedback,
+                        onPitchDown: _handlePitchDown,
+                        onPitchMove: _handlePitchMove,
                         onPitchUp: _controller.noteUp,
                         onTogglePlayback: _controller.togglePlayback,
+                        pitchInputEvents: _controller.pitchInputEvents,
+                        visualizationGeneration:
+                            _controller.pitchVisualizationGeneration,
                       ),
                     ),
                   },
@@ -154,7 +179,7 @@ class _XenSynthScreenState extends State<XenSynthScreen>
                     onOpen: _controller.openDocument,
                     onTogglePlayback: _controller.togglePlayback,
                     onReset: _controller.resetPlayback,
-                    onStop: _controller.stop,
+                    onStop: _handleStop,
                     onSpeedChanged: (value) => _controller.updateSettings(
                       settings.copyWith(playbackSpeed: value),
                     ),
@@ -168,10 +193,26 @@ class _XenSynthScreenState extends State<XenSynthScreen>
                     }),
                     onResetSettings: _resetSettings,
                     onSeek: _controller.seek,
+                    pitchRecognitionAvailable:
+                        _controller.pitchRecognitionAvailable,
+                    pitchRecognizing: _controller.pitchRecognizing,
+                    pitchRecognitionBusy: _controller.pitchRecognitionBusy,
+                    pitchRecognitionModelReady:
+                        _controller.pitchRecognitionModelReady,
+                    pitchRecognitionDownloadProgress:
+                        _controller.pitchRecognitionDownloadProgress,
+                    pitchRecognitionMode: settings.pitchRecognitionMode,
+                    onPitchRecognition: _togglePitchRecognition,
+                    microphoneTakeReadyForSave:
+                        _controller.microphoneTakeNeedsSaving,
+                    savingMicrophoneTake: _controller.savingMicrophoneTake,
+                    onSaveMicrophoneTake: _saveMicrophoneTake,
+                    transportLocked: _controller.recordingTransportLocked,
                     hexKeyboardGesturesEnabled:
                         settings.layoutMode.usesHexKeyboard,
                     onHexKeyboardPan: _hexKeyboardViewportController.panBy,
                     onHexKeyboardZoom: _hexKeyboardViewportController.zoomBy,
+                    onHexKeyboardInteraction: _triggerHapticFeedback,
                   ),
                 ),
                 if (!_controller.audioReady)
@@ -183,6 +224,21 @@ class _XenSynthScreenState extends State<XenSynthScreen>
                       label: _controller.initialized
                           ? 'VISUAL MODE'
                           : 'AUDIO STARTING',
+                    ),
+                  ),
+                if (_controller.pitchRecognitionBusy ||
+                    _controller.pitchRecognizing)
+                  Positioned(
+                    left: 10,
+                    bottom: _controller.audioReady ? 8 : 42,
+                    child: _StatusBadge(
+                      icon: _controller.pitchRecognizing
+                          ? Icons.mic_rounded
+                          : settings.pitchRecognitionMode ==
+                                PitchRecognitionMode.piano
+                          ? Icons.downloading_rounded
+                          : Icons.graphic_eq_rounded,
+                      label: _pitchRecognitionBadgeLabel,
                     ),
                   ),
                 if (_settingsOpen) ...[
@@ -202,6 +258,8 @@ class _XenSynthScreenState extends State<XenSynthScreen>
                     bottom: 8,
                     child: SettingsPanel(
                       settings: settings,
+                      pitchRecognitionAvailable:
+                          _controller.pitchRecognitionAvailable,
                       onChanged: _controller.updateSettings,
                       onReset: _resetSettings,
                     ),
@@ -256,6 +314,160 @@ class _XenSynthScreenState extends State<XenSynthScreen>
     );
   }
 
+  void _handlePitchDown(int pointer, double pitch, int velocity) {
+    _triggerHapticFeedback();
+    _controller.noteDown(pointer, pitch, velocity);
+  }
+
+  void _handlePitchMove(int pointer, double pitch, int velocity) {
+    _triggerHapticFeedback();
+    _controller.noteMove(pointer, pitch, velocity);
+  }
+
+  Future<void> _togglePitchRecognition() async {
+    if (_controller.pitchRecognitionBusy) return;
+    if (_controller.pitchRecognizing) {
+      await _controller.stopPitchRecognition();
+      return;
+    }
+
+    var downloadIfNeeded = false;
+    if (_controller.settings.pitchRecognitionMode ==
+            PitchRecognitionMode.piano &&
+        !_controller.pitchRecognitionModelReady) {
+      final confirmed = await showDialog<bool>(
+        context: context,
+        builder: (context) => AlertDialog(
+          title: const Text('Piano note recognition'),
+          content: const Text(
+            'The first use downloads the official Magenta Onsets and Frames '
+            'model (about 72.3 MB). After download, microphone audio is '
+            'processed locally on this device. Continue?',
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(context).pop(false),
+              child: const Text('Cancel'),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.of(context).pop(true),
+              child: const Text('Download'),
+            ),
+          ],
+        ),
+      );
+      if (confirmed != true || !mounted) return;
+      downloadIfNeeded = true;
+    }
+
+    final started = await _controller.startPitchRecognition(
+      downloadIfNeeded: downloadIfNeeded,
+    );
+    if (!started && mounted) {
+      final message = _controller.pitchRecognitionMessage.isEmpty
+          ? 'Microphone pitch recognition is unavailable.'
+          : _controller.pitchRecognitionMessage;
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text(message)));
+    }
+  }
+
+  Future<void> _handleStop() async {
+    final shouldOfferSave = _controller.microphoneTakeNeedsSaving;
+    await _controller.stop();
+    if (!shouldOfferSave || !mounted) return;
+    final choice = await showDialog<_MicrophoneTakeStopChoice>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Save microphone recording?'),
+        content: const Text(
+          'Save the recording and its recognized-pitch audio as two WAV files?',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () =>
+                Navigator.of(context).pop(_MicrophoneTakeStopChoice.cancel),
+            child: const Text('Cancel'),
+          ),
+          TextButton(
+            onPressed: () =>
+                Navigator.of(context).pop(_MicrophoneTakeStopChoice.discard),
+            child: const Text('Discard'),
+          ),
+          FilledButton.icon(
+            onPressed: () =>
+                Navigator.of(context).pop(_MicrophoneTakeStopChoice.save),
+            icon: const Icon(Icons.save_alt_rounded),
+            label: const Text('Save'),
+          ),
+        ],
+      ),
+    );
+    if (!mounted) return;
+    switch (choice ?? _MicrophoneTakeStopChoice.cancel) {
+      case _MicrophoneTakeStopChoice.save:
+        await _saveMicrophoneTake();
+      case _MicrophoneTakeStopChoice.discard:
+        await _controller.discardMicrophoneTake();
+      case _MicrophoneTakeStopChoice.cancel:
+        _controller.dismissMicrophoneTakeSave();
+    }
+  }
+
+  Future<void> _saveMicrophoneTake() async {
+    final saved = await _controller.saveMicrophoneTake();
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(
+          saved
+              ? 'Saved two WAV files to Music/XenSynth.'
+              : 'Could not save the microphone recording.',
+        ),
+      ),
+    );
+  }
+
+  String get _pitchRecognitionBadgeLabel {
+    if (_controller.pitchRecognizing) {
+      if (_controller.settings.pitchRecognitionMode ==
+          PitchRecognitionMode.fft) {
+        return 'FFT RECORDING';
+      }
+      if (_controller.settings.pitchRecognitionMode ==
+          PitchRecognitionMode.yin) {
+        final frequency = _controller.pitchRecognitionFrequencyHz;
+        return frequency == null
+            ? 'YIN LISTENING'
+            : 'YIN ${frequency.toStringAsFixed(1)} HZ';
+      }
+      return 'PIANO LISTENING';
+    }
+    if (_controller.pitchRecognitionPhase == 'downloading') {
+      final progress = (_controller.pitchRecognitionDownloadProgress * 100)
+          .clamp(0, 100)
+          .round();
+      return 'MODEL $progress%';
+    }
+    if (_controller.pitchRecognitionPhase == 'permission') {
+      return 'MIC PERMISSION';
+    }
+    return 'MIC STARTING';
+  }
+
+  void _triggerHapticFeedback() {
+    final strength = _controller.settings.hapticFeedbackStrength;
+    if (strength <= 0) return;
+    if (strength <= 1 / 3) {
+      unawaited(HapticFeedback.lightImpact());
+    } else if (strength <= 2 / 3) {
+      unawaited(HapticFeedback.mediumImpact());
+    } else {
+      unawaited(HapticFeedback.heavyImpact());
+    }
+  }
+
   void _resetSettings() {
     _hexKeyboardViewportController.reset();
     _controller.resetSettings();
@@ -269,6 +481,8 @@ class _XenSynthScreenState extends State<XenSynthScreen>
     super.dispose();
   }
 }
+
+enum _MicrophoneTakeStopChoice { save, discard, cancel }
 
 class _StatusBadge extends StatelessWidget {
   const _StatusBadge({required this.icon, required this.label});

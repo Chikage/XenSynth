@@ -633,6 +633,7 @@ void main() {
     addTearDown(() => tester.binding.setSurfaceSize(null));
     final controller = HexKeyboardViewportController();
     final playedPitches = <double>[];
+    var controlInteractions = 0;
     addTearDown(controller.dispose);
 
     await tester.pumpWidget(
@@ -646,6 +647,7 @@ void main() {
             ),
             activePitches: const {},
             viewportController: controller,
+            onControlInteraction: () => controlInteractions++,
             onPitchDown: (_, pitch, _) => playedPitches.add(pitch),
             onPitchMove: (_, pitch, _) => playedPitches.add(pitch),
             onPitchUp: (_) {},
@@ -671,13 +673,17 @@ void main() {
     await tester.tap(find.byKey(const ValueKey('spatial-pan-right')));
     await tester.pump();
     expect(controller.pan, const Offset(32, -32));
+    expect(controlInteractions, 2);
     expect(playedPitches, isEmpty);
 
     final sphereCenter = rotationRect.center;
     final xyGesture = await tester.startGesture(sphereCenter);
     await xyGesture.moveBy(const Offset(14, -12));
+    await tester.pump();
+    expect(controlInteractions, 3);
     await xyGesture.moveBy(const Offset(12, -10));
     await tester.pump();
+    expect(controlInteractions, 4);
     await xyGesture.up();
     await tester.pump();
     expect(controller.rotationXDegrees.abs(), greaterThan(1));
@@ -688,12 +694,22 @@ void main() {
       sphereCenter + Offset(0, -rotationRect.height * 0.43),
     );
     await outerGesture.moveTo(
+      sphereCenter +
+          Offset(
+            rotationRect.width * 0.43 * 0.707,
+            -rotationRect.height * 0.43 * 0.707,
+          ),
+    );
+    await tester.pump();
+    expect(controlInteractions, 5);
+    await outerGesture.moveTo(
       sphereCenter + Offset(rotationRect.width * 0.43, 0),
     );
     await tester.pump();
     await outerGesture.up();
     await tester.pump();
     expect(controller.rotationZDegrees.abs(), greaterThan(20));
+    expect(controlInteractions, 6);
     expect(playedPitches, isEmpty);
     expect(tester.takeException(), isNull);
   });

@@ -1,8 +1,10 @@
 import 'dart:io';
+import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:xensynth/core/midi_parser.dart';
+import 'package:xensynth/core/microphone_take.dart';
 import 'package:xensynth/ui/waterfall/waterfall_view.dart';
 
 void main() {
@@ -27,6 +29,42 @@ void main() {
             edo: 53,
             pitchOffsetCents: 0,
             activePitches: const {},
+            onPitchDown: (_, _, _) {},
+            onPitchMove: (_, _, _) {},
+            onPitchUp: (_) {},
+          ),
+        ),
+      ),
+    );
+
+    await tester.pump();
+    expect(find.byType(WaterfallView), findsOneWidget);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('draws FFT spectrum frames directly above the ruler', (
+    tester,
+  ) async {
+    await tester.binding.setSurfaceSize(const Size(874, 330));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: WaterfallView(
+            score: null,
+            playhead: 0.25,
+            edo: 12,
+            pitchOffsetCents: 0,
+            activePitches: const {},
+            spectrumFrames: [
+              SpectrumFrame(
+                time: 0.25,
+                magnitudes: Float32List.fromList(
+                  List<double>.generate(128, (index) => index / 127),
+                ),
+              ),
+            ],
             onPitchDown: (_, _, _) {},
             onPitchMove: (_, _, _) {},
             onPitchUp: (_) {},

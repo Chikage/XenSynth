@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:xensynth/app/xensynth_settings.dart';
 import 'package:xensynth/ui/app_palette.dart';
 import 'package:xensynth/ui/widgets/control_toolbar.dart';
 
@@ -252,6 +253,201 @@ void main() {
     await gesture.up();
     await tester.pump();
   });
+
+  testWidgets('recording locks file and transport controls', (tester) async {
+    await tester.binding.setSurfaceSize(const Size(874, 402));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+    var invocations = 0;
+
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: AppPalette.theme(),
+        home: Scaffold(
+          body: Align(
+            alignment: Alignment.topCenter,
+            child: _controlToolbar(
+              transportLocked: true,
+              onOpen: () => invocations++,
+              onTogglePlayback: () => invocations++,
+              onReset: () => invocations++,
+              onStop: () => invocations++,
+            ),
+          ),
+        ),
+      ),
+    );
+
+    for (final tooltip in <String>[
+      'Open score or tuning',
+      'Play',
+      'Back to start',
+      'Stop and release notes',
+    ]) {
+      await tester.tap(find.byTooltip(tooltip), warnIfMissed: false);
+    }
+    await tester.pump();
+
+    expect(invocations, 0);
+  });
+
+  testWidgets(
+    'microphone recognition control exposes download and active states',
+    (tester) async {
+      await tester.binding.setSurfaceSize(const Size(874, 402));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+      var taps = 0;
+
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: AppPalette.theme(),
+          home: Scaffold(
+            body: Align(
+              alignment: Alignment.topCenter,
+              child: _controlToolbar(
+                pitchRecognitionAvailable: true,
+                onPitchRecognition: () => taps++,
+              ),
+            ),
+          ),
+        ),
+      );
+
+      final button = find.byKey(
+        const ValueKey('toolbar-pitch-recognition-button'),
+      );
+      expect(button, findsOneWidget);
+      expect(
+        find.byTooltip('Download model and recognize piano notes'),
+        findsOneWidget,
+      );
+
+      await tester.tap(button);
+      expect(taps, 1);
+
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: AppPalette.theme(),
+          home: Scaffold(
+            body: Align(
+              alignment: Alignment.topCenter,
+              child: _controlToolbar(
+                pitchRecognitionAvailable: true,
+                pitchRecognizing: true,
+                pitchRecognitionModelReady: true,
+                onPitchRecognition: () => taps++,
+              ),
+            ),
+          ),
+        ),
+      );
+
+      expect(find.byTooltip('Stop piano note recognition'), findsOneWidget);
+      expect(find.byIcon(Icons.mic_rounded), findsOneWidget);
+
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: AppPalette.theme(),
+          home: Scaffold(
+            body: Align(
+              alignment: Alignment.topCenter,
+              child: _controlToolbar(
+                pitchRecognitionAvailable: true,
+                pitchRecognitionMode: PitchRecognitionMode.yin,
+                onPitchRecognition: () => taps++,
+              ),
+            ),
+          ),
+        ),
+      );
+      expect(
+        find.byTooltip('Detect continuous monophonic pitch with YIN'),
+        findsOneWidget,
+      );
+    },
+  );
+
+  testWidgets('recording playback replaces microphone control with save', (
+    tester,
+  ) async {
+    await tester.binding.setSurfaceSize(const Size(874, 402));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+    var saves = 0;
+    var recordings = 0;
+
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: AppPalette.theme(),
+        home: Scaffold(
+          body: Align(
+            alignment: Alignment.topCenter,
+            child: _controlToolbar(
+              pitchRecognitionAvailable: true,
+              microphoneTakeReadyForSave: true,
+              onPitchRecognition: () => recordings++,
+              onSaveMicrophoneTake: () => saves++,
+            ),
+          ),
+        ),
+      ),
+    );
+
+    expect(
+      find.byKey(const ValueKey('toolbar-pitch-recognition-button')),
+      findsNothing,
+    );
+    final saveButton = find.byKey(
+      const ValueKey('toolbar-save-microphone-take-button'),
+    );
+    expect(saveButton, findsOneWidget);
+    expect(
+      find.byTooltip('Save recording and recognized-pitch audio'),
+      findsOneWidget,
+    );
+    expect(find.byIcon(Icons.save_alt_rounded), findsOneWidget);
+
+    await tester.tap(saveButton);
+    expect(saves, 1);
+    expect(recordings, 0);
+  });
+
+  testWidgets('hex viewport toolbar gesture reports one interaction per drag', (
+    tester,
+  ) async {
+    await tester.binding.setSurfaceSize(const Size(874, 402));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+    var panUpdates = 0;
+    var interactions = 0;
+
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: AppPalette.theme(),
+        home: Scaffold(
+          body: Align(
+            alignment: Alignment.topCenter,
+            child: _controlToolbar(
+              hexKeyboardGesturesEnabled: true,
+              onHexKeyboardPan: (_) => panUpdates++,
+              onHexKeyboardZoom: (_) {},
+              onHexKeyboardInteraction: () => interactions++,
+            ),
+          ),
+        ),
+      ),
+    );
+
+    final gestureArea = find.byKey(
+      const ValueKey('toolbar-hex-viewport-gesture-area'),
+    );
+    await tester.drag(gestureArea, const Offset(-40, 12));
+    await tester.pump();
+
+    expect(panUpdates, greaterThan(0));
+    expect(interactions, 1);
+
+    await tester.drag(gestureArea, const Offset(32, -8));
+    await tester.pump();
+    expect(interactions, 2);
+  });
 }
 
 Widget _toolbar({EdgeInsets? safeInsets}) {
@@ -275,6 +471,22 @@ ControlToolbar _controlToolbar({
   ValueChanged<double>? onSpeedChanged,
   ValueChanged<int>? onEdoChanged,
   ValueChanged<double>? onOffsetChanged,
+  bool pitchRecognitionAvailable = false,
+  bool pitchRecognizing = false,
+  bool pitchRecognitionModelReady = false,
+  PitchRecognitionMode pitchRecognitionMode = PitchRecognitionMode.piano,
+  VoidCallback? onPitchRecognition,
+  bool microphoneTakeReadyForSave = false,
+  VoidCallback? onSaveMicrophoneTake,
+  bool transportLocked = false,
+  VoidCallback? onOpen,
+  VoidCallback? onTogglePlayback,
+  VoidCallback? onReset,
+  VoidCallback? onStop,
+  bool hexKeyboardGesturesEnabled = false,
+  ValueChanged<Offset>? onHexKeyboardPan,
+  ValueChanged<double>? onHexKeyboardZoom,
+  VoidCallback? onHexKeyboardInteraction,
 }) {
   return ControlToolbar(
     title: 'UwU Funk in 26edo',
@@ -291,16 +503,28 @@ ControlToolbar _controlToolbar({
     bpm: 126,
     meterNumerator: 4,
     meterDenominator: 4,
-    onOpen: () {},
-    onTogglePlayback: () {},
-    onReset: () {},
-    onStop: () {},
+    onOpen: onOpen ?? () {},
+    onTogglePlayback: onTogglePlayback ?? () {},
+    onReset: onReset ?? () {},
+    onStop: onStop ?? () {},
     onSpeedChanged: onSpeedChanged ?? (_) {},
     onEdoChanged: onEdoChanged ?? (_) {},
     onOffsetChanged: onOffsetChanged ?? (_) {},
     onSettings: () {},
     onResetSettings: () {},
     onSeek: (_) {},
+    pitchRecognitionAvailable: pitchRecognitionAvailable,
+    pitchRecognizing: pitchRecognizing,
+    pitchRecognitionModelReady: pitchRecognitionModelReady,
+    pitchRecognitionMode: pitchRecognitionMode,
+    onPitchRecognition: onPitchRecognition,
+    microphoneTakeReadyForSave: microphoneTakeReadyForSave,
+    onSaveMicrophoneTake: onSaveMicrophoneTake,
+    transportLocked: transportLocked,
+    hexKeyboardGesturesEnabled: hexKeyboardGesturesEnabled,
+    onHexKeyboardPan: onHexKeyboardPan,
+    onHexKeyboardZoom: onHexKeyboardZoom,
+    onHexKeyboardInteraction: onHexKeyboardInteraction,
   );
 }
 

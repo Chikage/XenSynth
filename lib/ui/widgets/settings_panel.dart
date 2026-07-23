@@ -9,12 +9,14 @@ class SettingsPanel extends StatelessWidget {
     required this.settings,
     required this.onChanged,
     required this.onReset,
+    this.pitchRecognitionAvailable = false,
     super.key,
   });
 
   final XenSynthSettings settings;
   final ValueChanged<XenSynthSettings> onChanged;
   final VoidCallback onReset;
+  final bool pitchRecognitionAvailable;
 
   static const double width = 300;
 
@@ -49,7 +51,7 @@ class SettingsPanel extends StatelessWidget {
                     const _SectionLabel('SURFACE'),
                     SegmentedButton<KeyboardLayoutMode>(
                       style: _compactButtonStyle,
-                      segments: const [
+                      segments: [
                         ButtonSegment(
                           value: KeyboardLayoutMode.linear,
                           label: Text('LINEAR'),
@@ -59,16 +61,36 @@ class SettingsPanel extends StatelessWidget {
                           value: KeyboardLayoutMode.hexagonal,
                           label: Text('HEX'),
                           icon: Icon(Icons.hive_outlined, size: 15),
+                          enabled:
+                              settings.pitchRecognitionMode !=
+                              PitchRecognitionMode.fft,
                         ),
                         ButtonSegment(
                           value: KeyboardLayoutMode.spatial,
                           label: Text('3D'),
                           icon: Icon(Icons.view_in_ar_outlined, size: 15),
+                          enabled:
+                              settings.pitchRecognitionMode !=
+                              PitchRecognitionMode.fft,
                         ),
                       ],
                       selected: {settings.layoutMode},
                       onSelectionChanged: (value) => onChanged(
                         settings.copyWith(layoutMode: value.single),
+                      ),
+                    ),
+                    _SliderRow(
+                      label: 'Touch vibration',
+                      value: settings.hapticFeedbackStrength * 100,
+                      min: 0,
+                      max: 100,
+                      divisions: 3,
+                      valueLabel: _hapticStrengthLabel(
+                        settings.hapticFeedbackStrength,
+                      ),
+                      controlKey: const ValueKey('haptic-feedback-slider'),
+                      onChanged: (value) => onChanged(
+                        settings.copyWith(hapticFeedbackStrength: value / 100),
                       ),
                     ),
                     const _SectionLabel('AUDIO'),
@@ -118,6 +140,62 @@ class SettingsPanel extends StatelessWidget {
                         settings.copyWith(externalMidiControlsProgram: value),
                       ),
                     ),
+                    if (pitchRecognitionAvailable) ...[
+                      const _SectionLabel('MIC INPUT'),
+                      SegmentedButton<PitchRecognitionMode>(
+                        key: const ValueKey('pitch-recognition-mode'),
+                        style: _compactButtonStyle,
+                        showSelectedIcon: false,
+                        segments: const [
+                          ButtonSegment(
+                            value: PitchRecognitionMode.piano,
+                            label: Text('PIANO'),
+                            icon: Icon(Icons.piano_rounded, size: 15),
+                            tooltip: 'Polyphonic piano note recognition',
+                          ),
+                          ButtonSegment(
+                            value: PitchRecognitionMode.yin,
+                            label: Text('YIN'),
+                            icon: Icon(Icons.graphic_eq_rounded, size: 15),
+                            tooltip: 'Continuous monophonic pitch detection',
+                          ),
+                          ButtonSegment(
+                            value: PitchRecognitionMode.fft,
+                            label: Text('FFT'),
+                            icon: Icon(Icons.multiline_chart_rounded, size: 15),
+                            tooltip:
+                                'Live frequency spectrum on the linear ruler',
+                          ),
+                        ],
+                        selected: {settings.pitchRecognitionMode},
+                        onSelectionChanged: (value) {
+                          final mode = value.single;
+                          onChanged(
+                            settings.copyWith(
+                              pitchRecognitionMode: mode,
+                              layoutMode: mode == PitchRecognitionMode.fft
+                                  ? KeyboardLayoutMode.linear
+                                  : settings.layoutMode,
+                            ),
+                          );
+                        },
+                      ),
+                      _SliderRow(
+                        label: 'Mic sensitivity',
+                        value: settings.microphoneSensitivity * 100,
+                        min: XenSynthSettings.microphoneSensitivityMin * 100,
+                        max: XenSynthSettings.microphoneSensitivityMax * 100,
+                        divisions: 30,
+                        valueLabel:
+                            '${(settings.microphoneSensitivity * 100).round()}%',
+                        controlKey: const ValueKey(
+                          'microphone-sensitivity-slider',
+                        ),
+                        onChanged: (value) => onChanged(
+                          settings.copyWith(microphoneSensitivity: value / 100),
+                        ),
+                      ),
+                    ],
                     if (settings.layoutMode == KeyboardLayoutMode.spatial) ...[
                       const _SectionLabel('3D WATERFALL'),
                       SegmentedButton<SpatialProjectionMode>(
@@ -306,6 +384,13 @@ class _SectionLabel extends StatelessWidget {
   }
 }
 
+String _hapticStrengthLabel(double strength) {
+  if (strength <= 0) return 'OFF';
+  if (strength <= 1 / 3) return 'LIGHT';
+  if (strength <= 2 / 3) return 'MED';
+  return 'STRONG';
+}
+
 class _SliderRow extends StatelessWidget {
   const _SliderRow({
     required this.label,
@@ -315,6 +400,7 @@ class _SliderRow extends StatelessWidget {
     required this.divisions,
     required this.valueLabel,
     required this.onChanged,
+    this.controlKey,
   });
 
   final String label;
@@ -324,6 +410,7 @@ class _SliderRow extends StatelessWidget {
   final int divisions;
   final String valueLabel;
   final ValueChanged<double> onChanged;
+  final Key? controlKey;
 
   @override
   Widget build(BuildContext context) {
@@ -352,6 +439,7 @@ class _SliderRow extends StatelessWidget {
               child: SizedBox(
                 height: 28,
                 child: Slider(
+                  key: controlKey,
                   value: value.clamp(min, max),
                   min: min,
                   max: max,

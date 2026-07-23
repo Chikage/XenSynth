@@ -139,10 +139,12 @@ class HexKeyboardView extends StatefulWidget {
     required this.playhead,
     required this.settings,
     required this.activePitches,
+    this.activePitchVelocities = const {},
     required this.onPitchDown,
     required this.onPitchMove,
     required this.onPitchUp,
     this.viewportController,
+    this.onControlInteraction,
     super.key,
   });
 
@@ -150,18 +152,24 @@ class HexKeyboardView extends StatefulWidget {
   final double playhead;
   final XenSynthSettings settings;
   final Map<int, double> activePitches;
+  final Map<int, int> activePitchVelocities;
   final HexPitchPointerCallback onPitchDown;
   final HexPitchPointerCallback onPitchMove;
   final ValueChanged<int> onPitchUp;
   final HexKeyboardViewportController? viewportController;
+  final VoidCallback? onControlInteraction;
 
   @override
   State<HexKeyboardView> createState() => _HexKeyboardViewState();
 }
 
 class _HexKeyboardViewState extends State<HexKeyboardView> {
+  static const double _controlMargin = 14;
+  static const double _rotationControlHapticStepPixels = 12;
+
   final Map<int, HexKey> _pointerCells = {};
   final Map<int, double> _pointerForces = {};
+  final Set<int> _controlPointers = {};
   late HexKeyboardConfiguration _configuration;
   late HexaKeyboardLayout _layout;
   late _HexPlaybackIndex _playbackIndex;
@@ -169,7 +177,13 @@ class _HexKeyboardViewState extends State<HexKeyboardView> {
   late bool _ownsViewportController;
   _HexRenderCache? _renderCache;
   Offset? _scheduledConstrainedPan;
-
+  _HexPanRotationControlMode? _panRotationControlMode;
+  Offset? _panRotationDragOrigin;
+  Offset _panRotationDragStartPan = Offset.zero;
+  double _panRotationDragStartDegrees = 0;
+  double _panRotationDragStartAngle = 0;
+  double _panRotationHapticTravel = 0;
+  bool _panRotationHasUpdated = false;
   @override
   void initState() {
     super.initState();
@@ -192,6 +206,8 @@ class _HexKeyboardViewState extends State<HexKeyboardView> {
     if (configurationChanged) {
       _pointerCells.clear();
       _pointerForces.clear();
+      _controlPointers.clear();
+      _endPanRotationControl();
       _configuration = next;
       _layout = HexaKeyboardLayoutEngine.build(next);
       _renderCache = null;
@@ -212,36 +228,72 @@ class _HexKeyboardViewState extends State<HexKeyboardView> {
           constraints.biggest,
           scaleMultiplier: _viewportController.scaleMultiplier,
           requestedPan: _viewportController.pan,
+          rotationDegrees: _viewportController.rotationDegrees,
         );
         _synchronizeConstrainedPan(transform.viewportPan);
         final devicePixelRatio = MediaQuery.devicePixelRatioOf(context);
         final renderCache = _renderCacheFor(transform, devicePixelRatio);
         final selectedCoordinates = _selectedCoordinates();
-        final activeForces = _activeForces(selectedCoordinates);
+        final activeForces = _activeForces();
+        final controlExtent = _controlExtentFor(constraints.biggest);
         return Semantics(
           container: true,
           label:
               'Hexagonal microtonal keyboard with ${_layout.cells.length} keys',
+          hint: '滚动左上角滚轮缩放，拖动右上角球体自由移动，拖动外环绕原点旋转',
           child: Listener(
             behavior: HitTestBehavior.opaque,
-            onPointerDown: (event) => _processPointer(event, transform, true),
-            onPointerMove: (event) => _processPointer(event, transform, false),
-            onPointerUp: (event) => _release(event.pointer),
-            onPointerCancel: (event) => _release(event.pointer),
+            onPointerDown: (event) =>
+                _handlePointerDown(event, transform, constraints.biggest),
+            onPointerMove: (event) => _handlePointerMove(event, transform),
+            onPointerUp: _handlePointerEnd,
+            onPointerCancel: _handlePointerEnd,
             child: RepaintBoundary(
-              child: CustomPaint(
-                painter: _HexKeyboardPainter(
-                  layout: _layout,
-                  transform: transform,
-                  renderCache: renderCache,
-                  playbackIndex: _playbackIndex,
-                  playhead: widget.playhead,
-                  previewSeconds: widget.settings.playbackPreviewSeconds,
-                  selectedCoordinates: selectedCoordinates,
-                  activeForces: activeForces,
-                  devicePixelRatio: devicePixelRatio,
-                ),
-                size: Size.infinite,
+              child: Stack(
+                fit: StackFit.expand,
+                children: [
+                  RepaintBoundary(
+                    child: CustomPaint(
+                      painter: _HexKeyboardPainter(
+                        layout: _layout,
+                        transform: transform,
+                        renderCache: renderCache,
+                        playbackIndex: _playbackIndex,
+                        playhead: widget.playhead,
+                        previewSeconds: widget.settings.playbackPreviewSeconds,
+                        selectedCoordinates: selectedCoordinates,
+                        activeForces: activeForces,
+                        devicePixelRatio: devicePixelRatio,
+                      ),
+                      size: Size.infinite,
+                    ),
+                  ),
+                  Positioned(
+                    left: _controlMargin,
+                    top: _controlMargin,
+                    width: controlExtent,
+                    height: controlExtent,
+                    child: _HexZoomControl(
+                      onZoom: _viewportController.zoomBy,
+                      onInteraction: widget.onControlInteraction,
+                    ),
+                  ),
+                  Positioned(
+                    right: _controlMargin,
+                    top: _controlMargin,
+                    width: controlExtent,
+                    height: controlExtent,
+                    child: _HexPanRotationControl(
+                      rotationDegrees: _viewportController.rotationDegrees,
+                      onPanStart: (details) =>
+                          _startPanRotationControl(details, controlExtent),
+                      onPanUpdate: (details) =>
+                          _updatePanRotationControl(details, controlExtent),
+                      onPanEnd: (_) => _endPanRotationControl(),
+                      onPanCancel: _endPanRotationControl,
+                    ),
+                  ),
+                ],
               ),
             ),
           ),
@@ -292,6 +344,7 @@ class _HexKeyboardViewState extends State<HexKeyboardView> {
         identical(cached.layout, _layout) &&
         cached.transform.scale == transform.scale &&
         cached.transform.offset == transform.offset &&
+        cached.transform.rotationDegrees == transform.rotationDegrees &&
         cached.devicePixelRatio == devicePixelRatio) {
       return cached;
     }
@@ -299,6 +352,116 @@ class _HexKeyboardViewState extends State<HexKeyboardView> {
       layout: _layout,
       transform: transform,
       devicePixelRatio: devicePixelRatio,
+    );
+  }
+
+  double _controlExtentFor(Size size) {
+    return (size.shortestSide * 0.19).clamp(84.0, 108.0).toDouble();
+  }
+
+  bool _isInsideCornerControl(Offset position, Size size) {
+    final extent = _controlExtentFor(size);
+    final leftControl = Rect.fromLTWH(
+      _controlMargin,
+      _controlMargin,
+      extent,
+      extent,
+    );
+    final rightControl = Rect.fromLTWH(
+      size.width - _controlMargin - extent,
+      _controlMargin,
+      extent,
+      extent,
+    );
+    return leftControl.contains(position) || rightControl.contains(position);
+  }
+
+  void _handlePointerDown(
+    PointerDownEvent event,
+    _HexTransform transform,
+    Size size,
+  ) {
+    if (_isInsideCornerControl(event.localPosition, size)) {
+      _controlPointers.add(event.pointer);
+      return;
+    }
+    _processPointer(event, transform, true);
+  }
+
+  void _handlePointerMove(PointerMoveEvent event, _HexTransform transform) {
+    if (_controlPointers.contains(event.pointer)) return;
+    _processPointer(event, transform, false);
+  }
+
+  void _handlePointerEnd(PointerEvent event) {
+    if (_controlPointers.remove(event.pointer)) return;
+    _release(event.pointer);
+  }
+
+  void _startPanRotationControl(DragStartDetails details, double extent) {
+    _panRotationHapticTravel = 0;
+    _panRotationHasUpdated = false;
+    widget.onControlInteraction?.call();
+    final center = Offset(extent / 2, extent / 2);
+    final radialOffset = details.localPosition - center;
+    _panRotationControlMode = radialOffset.distance >= extent * 0.36
+        ? _HexPanRotationControlMode.rotation
+        : _HexPanRotationControlMode.freePan;
+    _panRotationDragOrigin = details.localPosition;
+    _panRotationDragStartPan = _viewportController.pan;
+    _panRotationDragStartDegrees = _viewportController.rotationDegrees;
+    _panRotationDragStartAngle = math.atan2(radialOffset.dy, radialOffset.dx);
+  }
+
+  void _updatePanRotationControl(DragUpdateDetails details, double extent) {
+    final mode = _panRotationControlMode;
+    final origin = _panRotationDragOrigin;
+    if (mode == null || origin == null) return;
+    if (_panRotationHasUpdated) {
+      _advancePanRotationHapticScale(details.delta);
+    } else {
+      _panRotationHasUpdated = true;
+    }
+
+    var pan = _panRotationDragStartPan;
+    var rotationDegrees = _panRotationDragStartDegrees;
+    switch (mode) {
+      case _HexPanRotationControlMode.freePan:
+        pan += details.localPosition - origin;
+      case _HexPanRotationControlMode.rotation:
+        final center = Offset(extent / 2, extent / 2);
+        final radialOffset = details.localPosition - center;
+        var angleDelta =
+            math.atan2(radialOffset.dy, radialOffset.dx) -
+            _panRotationDragStartAngle;
+        if (angleDelta > math.pi) angleDelta -= math.pi * 2;
+        if (angleDelta < -math.pi) angleDelta += math.pi * 2;
+        rotationDegrees += angleDelta * 180 / math.pi;
+    }
+    _viewportController.setSpatialTransform(
+      scaleMultiplier: _viewportController.scaleMultiplier,
+      pan: pan,
+      rotationXDegrees: _viewportController.rotationXDegrees,
+      rotationYDegrees: _viewportController.rotationYDegrees,
+      rotationDegrees: rotationDegrees,
+    );
+  }
+
+  void _endPanRotationControl() {
+    _panRotationControlMode = null;
+    _panRotationDragOrigin = null;
+    _panRotationHapticTravel = 0;
+    _panRotationHasUpdated = false;
+  }
+
+  void _advancePanRotationHapticScale(Offset delta) {
+    final distance = delta.distance;
+    if (!distance.isFinite || distance <= 0) return;
+    _panRotationHapticTravel += distance;
+    if (_panRotationHapticTravel < _rotationControlHapticStepPixels) return;
+    widget.onControlInteraction?.call();
+    _panRotationHapticTravel = _panRotationHapticTravel.remainder(
+      _rotationControlHapticStepPixels,
     );
   }
 
@@ -368,12 +531,15 @@ class _HexKeyboardViewState extends State<HexKeyboardView> {
     return result;
   }
 
-  Map<AxialCoordinate, double> _activeForces(
-    Set<AxialCoordinate> selectedCoordinates,
-  ) {
-    final result = <AxialCoordinate, double>{
-      for (final coordinate in selectedCoordinates) coordinate: 0.76,
-    };
+  Map<AxialCoordinate, double> _activeForces() {
+    final result = <AxialCoordinate, double>{};
+    for (final entry in widget.activePitches.entries) {
+      final cell = _pointerCells[entry.key] ?? _layout.keyForPitch(entry.value);
+      if (cell == null) continue;
+      final velocity = widget.activePitchVelocities[entry.key] ?? 96;
+      final force = ((velocity.clamp(1, 127) - 1) / 126).toDouble();
+      result[cell.coordinate] = math.max(result[cell.coordinate] ?? 0, force);
+    }
     for (final entry in _pointerForces.entries) {
       final cell = _pointerCells[entry.key];
       if (cell == null) continue;
@@ -404,8 +570,396 @@ class _HexKeyboardViewState extends State<HexKeyboardView> {
 
   @override
   void dispose() {
+    _controlPointers.clear();
+    _endPanRotationControl();
     _detachViewportController();
     super.dispose();
+  }
+}
+
+enum _HexPanRotationControlMode { freePan, rotation }
+
+class _HexZoomControl extends StatefulWidget {
+  const _HexZoomControl({required this.onZoom, this.onInteraction});
+
+  final ValueChanged<double> onZoom;
+  final VoidCallback? onInteraction;
+
+  @override
+  State<_HexZoomControl> createState() => _HexZoomControlState();
+}
+
+class _HexZoomControlState extends State<_HexZoomControl> {
+  static const double _zoomExponentPerPixel = 0.012;
+  static const double _semanticZoomFactor = 1.12;
+  static const double _hapticStepPixels = 9;
+
+  double _wheelOffset = 0;
+  double _hapticTravel = 0;
+
+  void _handlePanUpdate(DragUpdateDetails details) {
+    final delta = details.delta.dy;
+    if (!delta.isFinite || delta == 0) return;
+    widget.onZoom(math.exp(-delta * _zoomExponentPerPixel));
+    _hapticTravel += delta;
+    if (_hapticTravel.abs() >= _hapticStepPixels) {
+      widget.onInteraction?.call();
+      _hapticTravel = _hapticTravel.remainder(_hapticStepPixels);
+    }
+    setState(() => _wheelOffset += delta);
+  }
+
+  void _resetHapticTravel() => _hapticTravel = 0;
+
+  void _increaseSemantically() {
+    widget.onInteraction?.call();
+    widget.onZoom(_semanticZoomFactor);
+  }
+
+  void _decreaseSemantically() {
+    widget.onInteraction?.call();
+    widget.onZoom(1 / _semanticZoomFactor);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Semantics(
+      key: const ValueKey('hex-zoom-control'),
+      container: true,
+      label: 'Hex键盘滚轮缩放控制器',
+      hint: '向上滚动放大，向下滚动缩小',
+      onIncrease: _increaseSemantically,
+      onDecrease: _decreaseSemantically,
+      child: GestureDetector(
+        behavior: HitTestBehavior.opaque,
+        excludeFromSemantics: true,
+        onPanUpdate: _handlePanUpdate,
+        onPanEnd: (_) => _resetHapticTravel(),
+        onPanCancel: _resetHapticTravel,
+        child: CustomPaint(
+          painter: _HexZoomControlPainter(wheelOffset: _wheelOffset),
+        ),
+      ),
+    );
+  }
+}
+
+class _HexPanRotationControl extends StatelessWidget {
+  const _HexPanRotationControl({
+    required this.rotationDegrees,
+    required this.onPanStart,
+    required this.onPanUpdate,
+    required this.onPanEnd,
+    required this.onPanCancel,
+  });
+
+  final double rotationDegrees;
+  final GestureDragStartCallback onPanStart;
+  final GestureDragUpdateCallback onPanUpdate;
+  final GestureDragEndCallback onPanEnd;
+  final VoidCallback onPanCancel;
+
+  @override
+  Widget build(BuildContext context) {
+    return Semantics(
+      key: const ValueKey('hex-pan-rotation-control'),
+      container: true,
+      label: 'Hex键盘自由平移和旋转控制器',
+      hint: '在球体内向任意方向拖动键盘，在外环拖动使键盘绕原点旋转',
+      child: GestureDetector(
+        behavior: HitTestBehavior.opaque,
+        excludeFromSemantics: true,
+        onPanStart: onPanStart,
+        onPanUpdate: onPanUpdate,
+        onPanEnd: onPanEnd,
+        onPanCancel: onPanCancel,
+        child: CustomPaint(
+          painter: _HexPanRotationControlPainter(
+            rotationDegrees: rotationDegrees,
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _HexZoomControlPainter extends CustomPainter {
+  const _HexZoomControlPainter({required this.wheelOffset});
+
+  final double wheelOffset;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final center = size.center(Offset.zero);
+    final wheelRect = Rect.fromCenter(
+      center: center,
+      width: size.width * 0.28,
+      height: size.height * 0.82,
+    );
+    final wheel = RRect.fromRectAndRadius(
+      wheelRect,
+      Radius.circular(wheelRect.width * 0.46),
+    );
+    canvas.drawRRect(
+      wheel,
+      Paint()
+        ..color = const Color(0xBB050A0B)
+        ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 5),
+    );
+    canvas.drawRRect(
+      wheel,
+      Paint()
+        ..shader = const LinearGradient(
+          begin: Alignment.centerLeft,
+          end: Alignment.centerRight,
+          colors: [Color(0xFF102329), Color(0xFF5DA9B1), Color(0xFF102329)],
+          stops: [0, 0.5, 1],
+        ).createShader(wheelRect),
+    );
+    canvas.drawRRect(
+      wheel,
+      Paint()
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = 1.3
+        ..color = AppPalette.primaryText.withValues(alpha: 0.52),
+    );
+
+    canvas.save();
+    canvas.clipRRect(wheel);
+    final grooveSpacing = math.max(7.0, size.height * 0.09);
+    final phase = wheelOffset % grooveSpacing;
+    for (
+      var y = wheelRect.top - grooveSpacing + phase;
+      y <= wheelRect.bottom + grooveSpacing;
+      y += grooveSpacing
+    ) {
+      final distanceRatio = ((y - center.dy).abs() / (wheelRect.height / 2))
+          .clamp(0.0, 1.0);
+      canvas.drawLine(
+        Offset(wheelRect.left, y),
+        Offset(wheelRect.right, y),
+        Paint()
+          ..strokeWidth = 1.2 + (1 - distanceRatio) * 0.8
+          ..color = AppPalette.primaryText.withValues(
+            alpha: 0.16 + (1 - distanceRatio) * 0.34,
+          ),
+      );
+    }
+    canvas.drawRect(
+      wheelRect,
+      Paint()
+        ..shader = const LinearGradient(
+          begin: Alignment.topCenter,
+          end: Alignment.bottomCenter,
+          colors: [Color(0xA6000000), Colors.transparent, Color(0xA6000000)],
+          stops: [0, 0.5, 1],
+        ).createShader(wheelRect),
+    );
+    canvas.restore();
+
+    final markerPaint = Paint()
+      ..style = PaintingStyle.stroke
+      ..strokeCap = StrokeCap.round
+      ..strokeWidth = 2
+      ..color = AppPalette.accent.withValues(alpha: 0.82);
+    canvas.drawLine(
+      Offset(wheelRect.left - size.width * 0.06, center.dy),
+      Offset(wheelRect.right + size.width * 0.06, center.dy),
+      markerPaint,
+    );
+
+    final arrowPaint = Paint()
+      ..style = PaintingStyle.fill
+      ..color = AppPalette.primaryText.withValues(alpha: 0.86);
+    _drawVerticalArrow(
+      canvas,
+      Offset(center.dx, size.height * 0.055),
+      upward: true,
+      size: size.shortestSide * 0.05,
+      paint: arrowPaint,
+    );
+    _drawVerticalArrow(
+      canvas,
+      Offset(center.dx, size.height * 0.945),
+      upward: false,
+      size: size.shortestSide * 0.05,
+      paint: arrowPaint,
+    );
+  }
+
+  void _drawVerticalArrow(
+    Canvas canvas,
+    Offset center, {
+    required bool upward,
+    required double size,
+    required Paint paint,
+  }) {
+    final direction = upward ? -1.0 : 1.0;
+    canvas.drawPath(
+      Path()
+        ..moveTo(center.dx, center.dy + direction * size)
+        ..lineTo(center.dx - size, center.dy - direction * size * 0.55)
+        ..lineTo(center.dx + size, center.dy - direction * size * 0.55)
+        ..close(),
+      paint,
+    );
+  }
+
+  @override
+  bool shouldRepaint(covariant _HexZoomControlPainter oldDelegate) {
+    return oldDelegate.wheelOffset != wheelOffset;
+  }
+}
+
+class _HexPanRotationControlPainter extends CustomPainter {
+  const _HexPanRotationControlPainter({required this.rotationDegrees});
+
+  final double rotationDegrees;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final center = size.center(Offset.zero);
+    final outerRadius = size.shortestSide * 0.46;
+    final sphereRadius = size.shortestSide * 0.34;
+    canvas.drawCircle(
+      center,
+      outerRadius,
+      Paint()
+        ..color = const Color(0x99070F12)
+        ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 10),
+    );
+    canvas.drawCircle(
+      center,
+      outerRadius,
+      Paint()..color = const Color(0xB9162224),
+    );
+    canvas.drawCircle(
+      center,
+      outerRadius,
+      Paint()
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = 2.2
+        ..color = AppPalette.outline.withValues(alpha: 0.68),
+    );
+    canvas.drawCircle(
+      center,
+      sphereRadius,
+      Paint()
+        ..shader = const RadialGradient(
+          center: Alignment(-0.35, -0.42),
+          radius: 1.08,
+          colors: [Color(0xFFE8FFFF), Color(0xFF348D98), Color(0xFF10282E)],
+          stops: [0, 0.34, 1],
+        ).createShader(Rect.fromCircle(center: center, radius: sphereRadius)),
+    );
+    canvas.drawCircle(
+      center,
+      sphereRadius,
+      Paint()
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = 1.2
+        ..color = AppPalette.primaryText.withValues(alpha: 0.58),
+    );
+
+    final axisPaint = Paint()
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 1.2
+      ..color = AppPalette.primaryText.withValues(alpha: 0.34);
+    canvas.drawLine(
+      center - Offset(sphereRadius * 0.72, 0),
+      center + Offset(sphereRadius * 0.72, 0),
+      axisPaint,
+    );
+    canvas.drawLine(
+      center - Offset(0, sphereRadius * 0.72),
+      center + Offset(0, sphereRadius * 0.72),
+      axisPaint,
+    );
+    final arrowPaint = Paint()
+      ..style = PaintingStyle.fill
+      ..color = AppPalette.primaryText.withValues(alpha: 0.88);
+    _drawArrow(
+      canvas,
+      center - Offset(sphereRadius * 0.58, 0),
+      math.pi,
+      sphereRadius,
+      arrowPaint,
+    );
+    _drawArrow(
+      canvas,
+      center - Offset(0, sphereRadius * 0.58),
+      -math.pi / 2,
+      sphereRadius,
+      arrowPaint,
+    );
+    _drawArrow(
+      canvas,
+      center + Offset(0, sphereRadius * 0.58),
+      math.pi / 2,
+      sphereRadius,
+      arrowPaint,
+    );
+    canvas.drawCircle(
+      center,
+      sphereRadius * 0.12,
+      Paint()..color = AppPalette.accent.withValues(alpha: 0.54),
+    );
+    _drawArrow(
+      canvas,
+      center + Offset(sphereRadius * 0.58, 0),
+      0,
+      sphereRadius,
+      arrowPaint,
+    );
+
+    final angle = rotationDegrees * math.pi / 180 - math.pi / 2;
+    final markerCenter =
+        center +
+        Offset(math.cos(angle), math.sin(angle)) * (outerRadius * 0.88);
+    canvas.drawCircle(
+      markerCenter,
+      math.max(3, size.shortestSide * 0.035),
+      Paint()..color = AppPalette.accent,
+    );
+    canvas.drawArc(
+      Rect.fromCircle(center: center, radius: outerRadius * 0.82),
+      angle - 0.62,
+      1.24,
+      false,
+      Paint()
+        ..style = PaintingStyle.stroke
+        ..strokeCap = StrokeCap.round
+        ..strokeWidth = 2
+        ..color = AppPalette.accent.withValues(alpha: 0.72),
+    );
+  }
+
+  void _drawArrow(
+    Canvas canvas,
+    Offset center,
+    double angle,
+    double radius,
+    Paint paint,
+  ) {
+    canvas.save();
+    canvas.translate(center.dx, center.dy);
+    canvas.rotate(angle);
+    final length = radius * 0.18;
+    final halfWidth = radius * 0.13;
+    canvas.drawPath(
+      Path()
+        ..moveTo(length, 0)
+        ..lineTo(-length, -halfWidth)
+        ..lineTo(-length, halfWidth)
+        ..close(),
+      paint,
+    );
+    canvas.restore();
+  }
+
+  @override
+  bool shouldRepaint(covariant _HexPanRotationControlPainter oldDelegate) {
+    return oldDelegate.rotationDegrees != rotationDegrees;
   }
 }
 
@@ -414,20 +968,33 @@ class _HexTransform {
     required this.scale,
     required this.offset,
     required this.viewportPan,
+    required this.rotationDegrees,
+    required this.cosine,
+    required this.sine,
   });
 
   final double scale;
   final Offset offset;
   final Offset viewportPan;
+  final double rotationDegrees;
+  final double cosine;
+  final double sine;
 
   Offset toScreen(HexPoint point) {
-    return Offset(point.x * scale + offset.dx, point.y * scale + offset.dy);
+    final scaledX = point.x * scale;
+    final scaledY = point.y * scale;
+    return offset +
+        Offset(
+          scaledX * cosine - scaledY * sine,
+          scaledX * sine + scaledY * cosine,
+        );
   }
 
   HexPoint toModel(Offset point) {
+    final translated = point - offset;
     return HexPoint(
-      (point.dx - offset.dx) / scale,
-      (point.dy - offset.dy) / scale,
+      (translated.dx * cosine + translated.dy * sine) / scale,
+      (-translated.dx * sine + translated.dy * cosine) / scale,
     );
   }
 
@@ -436,6 +1003,7 @@ class _HexTransform {
     Size size, {
     required double scaleMultiplier,
     required Offset requestedPan,
+    required double rotationDegrees,
   }) {
     final bounds = layout.modelBounds;
     final width = math.max(1, bounds.width);
@@ -451,8 +1019,14 @@ class _HexTransform {
         )
         .toDouble();
     final scale = math.max(0.0001, fittedScale * safeMultiplier);
-    final contentWidth = width * scale;
-    final contentHeight = height * scale;
+    final safeRotationDegrees = rotationDegrees.isFinite
+        ? rotationDegrees
+        : 0.0;
+    final rotationRadians = safeRotationDegrees * math.pi / 180;
+    final cosine = math.cos(rotationRadians);
+    final sine = math.sin(rotationRadians);
+    final contentWidth = (width * cosine.abs() + height * sine.abs()) * scale;
+    final contentHeight = (width * sine.abs() + height * cosine.abs()) * scale;
     final viewportPan = _constrainKeyboardPan(
       requested: requestedPan,
       contentSize: Size(contentWidth, contentHeight),
@@ -462,12 +1036,13 @@ class _HexTransform {
     return _HexTransform(
       scale: scale,
       offset: Offset(
-        (size.width - contentWidth) / 2 - bounds.minX * scale + viewportPan.dx,
-        (size.height - contentHeight) / 2 -
-            bounds.minY * scale +
-            viewportPan.dy,
+        size.width / 2 - bounds.center.x * scale + viewportPan.dx,
+        size.height / 2 - bounds.center.y * scale + viewportPan.dy,
       ),
       viewportPan: viewportPan,
+      rotationDegrees: safeRotationDegrees,
+      cosine: cosine,
+      sine: sine,
     );
   }
 
@@ -502,9 +1077,8 @@ class _HexTransform {
     if (!requested.isFinite || !content.isFinite || !viewport.isFinite) {
       return 0;
     }
-    if (content <= viewport + 0.5) return 0;
-    final overflowFromCenter = (content - viewport) / 2;
-    final limit = overflowFromCenter + math.max(0, edgeMargin);
+    final centeredSlack = (content - viewport).abs() / 2;
+    final limit = centeredSlack + math.max(0, edgeMargin);
     return requested.clamp(-limit, limit).toDouble();
   }
 }
@@ -529,7 +1103,8 @@ class _HexRenderCache {
       for (var pitchClass = 0; pitchClass < period; pitchClass++)
         _HexKeyboardPainter._cellColor(pitchClass, period),
     ];
-    final rotation = layout.configuration.rotationDegrees.toDouble();
+    final rotation =
+        layout.configuration.rotationDegrees + transform.rotationDegrees;
     return _HexRenderCache(
       layout: layout,
       transform: transform,
@@ -666,7 +1241,7 @@ class _HexKeyboardPainter extends CustomPainter {
 
       if (activeForce != null) {
         overlayPaint.color = AppPalette.selection.withValues(
-          alpha: 0.08 + activeForce.clamp(0.0, 1.0) * 0.20,
+          alpha: 0.04 + activeForce.clamp(0.0, 1.0) * 0.34,
         );
         canvas.drawPath(path, overlayPaint);
       }
@@ -800,21 +1375,26 @@ class _HexKeyboardPainter extends CustomPainter {
       final cell = layout.cellAt(coordinate);
       if (cell == null) continue;
       final force = activeForces[coordinate];
+      final intensity = (force ?? 0.76).clamp(0.0, 1.0);
       final strokeWidth = math.max(
-        2.4 * physicalPixel,
-        radius * (force == null ? 0.12 : 0.12 + force * 0.08),
+        1.4 * physicalPixel,
+        radius * (0.07 + intensity * 0.13),
       );
       final path = _hexPath(
         transform.toScreen(cell.center),
         radius,
-        layout.configuration.rotationDegrees.toDouble(),
+        layout.configuration.rotationDegrees + transform.rotationDegrees,
       );
       outerPaint
         ..strokeWidth = strokeWidth + 2 * physicalPixel
-        ..color = AppPalette.selection.withValues(alpha: 0.32);
+        ..color = AppPalette.selection.withValues(
+          alpha: 0.08 + intensity * 0.34,
+        );
       innerPaint
         ..strokeWidth = strokeWidth
-        ..color = AppPalette.selection;
+        ..color = AppPalette.selection.withValues(
+          alpha: 0.20 + intensity * 0.80,
+        );
       canvas.drawPath(path, outerPaint);
       canvas.drawPath(path, innerPaint);
     }
@@ -866,7 +1446,7 @@ class _HexKeyboardPainter extends CustomPainter {
       final path = _hexPath(
         center,
         layerRadius,
-        layout.configuration.rotationDegrees.toDouble(),
+        layout.configuration.rotationDegrees + transform.rotationDegrees,
       );
       final color = _trackColor(track);
       canvas.drawPath(
@@ -1137,6 +1717,7 @@ class _HexKeyboardPainter extends CustomPainter {
     return oldDelegate.layout != layout ||
         oldDelegate.transform.scale != transform.scale ||
         oldDelegate.transform.offset != transform.offset ||
+        oldDelegate.transform.rotationDegrees != transform.rotationDegrees ||
         oldDelegate.renderCache != renderCache ||
         oldDelegate.playbackIndex != playbackIndex ||
         oldDelegate.playhead != playhead ||

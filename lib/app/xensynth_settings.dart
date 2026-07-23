@@ -6,6 +6,8 @@ enum KeyboardLayoutMode { linear, hexagonal, spatial }
 
 enum SpatialProjectionMode { cabinet, obliquePerspective }
 
+enum PitchRecognitionMode { piano, yin, fft }
+
 extension KeyboardLayoutModeSemantics on KeyboardLayoutMode {
   bool get usesHexKeyboard => this != KeyboardLayoutMode.linear;
 }
@@ -21,6 +23,9 @@ class XenSynthSettings {
     this.audioLatencyMs = 0,
     this.program = 0,
     this.externalMidiControlsProgram = false,
+    this.pitchRecognitionMode = PitchRecognitionMode.yin,
+    this.microphoneSensitivity = 1,
+    this.hapticFeedbackStrength = defaultHapticFeedbackStrength,
     this.hexColumns = 35,
     this.hexRows = 8,
     int? hexPeriod,
@@ -40,6 +45,9 @@ class XenSynthSettings {
   static const double touchSensitivityPercentMax = 150;
   static const double playbackPreviewSecondsMin = 0;
   static const double playbackPreviewSecondsMax = 3;
+  static const double microphoneSensitivityMin = 0.5;
+  static const double microphoneSensitivityMax = 2.0;
+  static const double defaultHapticFeedbackStrength = 2 / 3;
 
   final KeyboardLayoutMode layoutMode;
   final double playbackSpeed;
@@ -50,6 +58,9 @@ class XenSynthSettings {
   final double audioLatencyMs;
   final int program;
   final bool externalMidiControlsProgram;
+  final PitchRecognitionMode pitchRecognitionMode;
+  final double microphoneSensitivity;
+  final double hapticFeedbackStrength;
   final int hexColumns;
   final int hexRows;
   final int _hexStepQ;
@@ -82,6 +93,7 @@ class XenSynthSettings {
       ).normalized();
   bool get shouldSnapPlaybackPitch =>
       layoutMode.usesHexKeyboard && pitchSnapEnabled;
+  bool get hapticFeedbackEnabled => hapticFeedbackStrength > 0;
   double get appliedPitchOffsetCents => -pitchOffsetCents;
   double get touchSensitivityPercent =>
       touchSensitivityPercentMin +
@@ -101,15 +113,26 @@ class XenSynthSettings {
     final edoSource = map.containsKey('edo') ? map['edo'] : map['hexPeriod'];
     final edo = _int(edoSource, defaults.edo).clamp(0, 72);
     final hexStepMaximum = hexStepMaximumForEdo(edo);
+    final pitchRecognitionMode = switch (map['pitchRecognitionMode']
+        ?.toString()
+        .toLowerCase()) {
+      'fft' => PitchRecognitionMode.fft,
+      'yin' => PitchRecognitionMode.yin,
+      'piano' => PitchRecognitionMode.piano,
+      _ => defaults.pitchRecognitionMode,
+    };
+    final requestedLayoutMode = switch (map['keyboardLayoutMode']?.toString()) {
+      'hexagonal' || 'hex' => KeyboardLayoutMode.hexagonal,
+      'spatial' ||
+      'spatialWaterfall' ||
+      'waterfall3d' => KeyboardLayoutMode.spatial,
+      'linear' => KeyboardLayoutMode.linear,
+      _ => defaults.layoutMode,
+    };
     return XenSynthSettings(
-      layoutMode: switch (map['keyboardLayoutMode']?.toString()) {
-        'hexagonal' || 'hex' => KeyboardLayoutMode.hexagonal,
-        'spatial' ||
-        'spatialWaterfall' ||
-        'waterfall3d' => KeyboardLayoutMode.spatial,
-        'linear' => KeyboardLayoutMode.linear,
-        _ => defaults.layoutMode,
-      },
+      layoutMode: pitchRecognitionMode == PitchRecognitionMode.fft
+          ? KeyboardLayoutMode.linear
+          : requestedLayoutMode,
       playbackSpeed: _double(
         map['playbackSpeed'],
         defaults.playbackSpeed,
@@ -129,6 +152,15 @@ class XenSynthSettings {
       externalMidiControlsProgram: _bool(
         map['externalMidiControlsProgram'],
         defaults.externalMidiControlsProgram,
+      ),
+      pitchRecognitionMode: pitchRecognitionMode,
+      microphoneSensitivity: _double(
+        map['microphoneSensitivity'],
+        defaults.microphoneSensitivity,
+      ).clamp(microphoneSensitivityMin, microphoneSensitivityMax),
+      hapticFeedbackStrength: _hapticFeedbackStrength(
+        map,
+        defaults.hapticFeedbackStrength,
       ),
       hexColumns: _int(map['hexColumns'], defaults.hexColumns).clamp(4, 64),
       hexRows: _int(map['hexRows'], defaults.hexRows).clamp(3, 32),
@@ -186,6 +218,14 @@ class XenSynthSettings {
     'audioLatencyMs': audioLatencyMs,
     'program': program,
     'externalMidiControlsProgram': externalMidiControlsProgram,
+    'pitchRecognitionMode': pitchRecognitionMode.name,
+    'microphoneSensitivity': microphoneSensitivity.clamp(
+      microphoneSensitivityMin,
+      microphoneSensitivityMax,
+    ),
+    'hapticFeedbackStrength': hapticFeedbackStrength.clamp(0.0, 1.0),
+    // Keep writing the old switch for builds that predate strength levels.
+    'hapticFeedbackEnabled': hapticFeedbackEnabled,
     'hexColumns': hexColumns,
     'hexRows': hexRows,
     // Keep writing the legacy key for older native builds and stored maps.
@@ -216,6 +256,9 @@ class XenSynthSettings {
     double? audioLatencyMs,
     int? program,
     bool? externalMidiControlsProgram,
+    PitchRecognitionMode? pitchRecognitionMode,
+    double? microphoneSensitivity,
+    double? hapticFeedbackStrength,
     int? hexColumns,
     int? hexRows,
     int? hexPeriod,
@@ -231,8 +274,13 @@ class XenSynthSettings {
   }) {
     final nextEdo = (edo ?? this.edo).clamp(0, 72);
     final nextHexStepMaximum = hexStepMaximumForEdo(nextEdo);
+    final nextPitchRecognitionMode =
+        pitchRecognitionMode ?? this.pitchRecognitionMode;
+    final requestedLayoutMode = layoutMode ?? this.layoutMode;
     return XenSynthSettings(
-      layoutMode: layoutMode ?? this.layoutMode,
+      layoutMode: nextPitchRecognitionMode == PitchRecognitionMode.fft
+          ? KeyboardLayoutMode.linear
+          : requestedLayoutMode,
       playbackSpeed: playbackSpeed ?? this.playbackSpeed,
       edo: nextEdo,
       pitchOffsetCents: pitchOffsetCents ?? this.pitchOffsetCents,
@@ -242,6 +290,17 @@ class XenSynthSettings {
       program: program ?? this.program,
       externalMidiControlsProgram:
           externalMidiControlsProgram ?? this.externalMidiControlsProgram,
+      pitchRecognitionMode: nextPitchRecognitionMode,
+      microphoneSensitivity:
+          (microphoneSensitivity ?? this.microphoneSensitivity).clamp(
+            microphoneSensitivityMin,
+            microphoneSensitivityMax,
+          ),
+      hapticFeedbackStrength:
+          (hapticFeedbackStrength ?? this.hapticFeedbackStrength).clamp(
+            0.0,
+            1.0,
+          ),
       hexColumns: hexColumns ?? this.hexColumns,
       hexRows: hexRows ?? this.hexRows,
       hexStepQ: (hexStepQ ?? this.hexStepQ).clamp(1, nextHexStepMaximum),
@@ -278,6 +337,19 @@ class XenSynthSettings {
     final parsed = _double(value, fallback);
     if (parsed > 1) return touchSensitivityFromPercent(parsed);
     return parsed.clamp(0.0, 1.0);
+  }
+
+  static double _hapticFeedbackStrength(
+    Map<String, Object?> map,
+    double fallback,
+  ) {
+    if (map.containsKey('hapticFeedbackStrength')) {
+      return _double(map['hapticFeedbackStrength'], fallback).clamp(0.0, 1.0);
+    }
+    if (map.containsKey('hapticFeedbackEnabled')) {
+      return _bool(map['hapticFeedbackEnabled'], true) ? fallback : 0;
+    }
+    return fallback;
   }
 
   static bool _bool(Object? value, bool fallback) {

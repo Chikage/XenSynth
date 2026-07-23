@@ -183,6 +183,25 @@ final class XenSynthPlatformBridge: NSObject, FlutterStreamHandler, UIDocumentPi
         playbackController.allNotesOff()
         result(true)
 
+      case "setPitchRecognitionSensitivity":
+        result(true)
+
+      case "getPitchRecognitionState", "startPitchRecognition", "stopPitchRecognition":
+        let requestedMode = (arguments["mode"] as? String) ?? "piano"
+        result([
+          "type": "pitchRecognitionState",
+          "source": "microphone",
+          "mode": requestedMode,
+          "supported": false,
+          "phase": "unavailable",
+          "modelReady": false,
+          "recognizing": false,
+          "downloading": false,
+          "busy": false,
+          "progress": 0.0,
+          "message": "Microphone pitch recognition is currently available on Android",
+        ])
+
       case "convertMuseScore":
         guard let name = arguments["name"] as? String, !name.isEmpty else {
           throw BridgeError.invalidArguments("convertMuseScore requires name")

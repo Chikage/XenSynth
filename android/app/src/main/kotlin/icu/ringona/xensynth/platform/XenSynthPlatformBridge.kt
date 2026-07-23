@@ -1,19 +1,26 @@
 package icu.ringona.xensynth.platform
 
+import android.Manifest
 import android.app.Activity
 import android.content.ActivityNotFoundException
 import android.content.Intent
 import android.content.SharedPreferences
+import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Handler
 import android.os.Looper
 import android.provider.OpenableColumns
+import androidx.core.app.ActivityCompat
+import androidx.core.content.ContextCompat
 import icu.ringona.xensynth.MsczToMidx
 import icu.ringona.xensynth.audio.NativeAudio
 import icu.ringona.xensynth.audio.NativeAudioEngine
 import icu.ringona.xensynth.midi.MidiDeviceInputManager
 import icu.ringona.xensynth.midi.MidiInputDevice
 import icu.ringona.xensynth.midi.MidiInputEvent
+import icu.ringona.xensynth.pitch.PitchRecognitionManager
+import icu.ringona.xensynth.pitch.PitchRecognitionMode
+import icu.ringona.xensynth.pitch.PitchRecordingStore
 import io.flutter.plugin.common.EventChannel
 import io.flutter.plugin.common.MethodCall
 import io.flutter.plugin.common.MethodChannel
@@ -39,6 +46,70 @@ internal class XenSynthPlatformBridge(
     private val scheduler = NativeScoreScheduler(nativeAudio)
     private val preferences = activity.getSharedPreferences(PREFERENCES_NAME, Activity.MODE_PRIVATE)
     private val midiInputManager = MidiDeviceInputManager(activity, this)
+    private val pitchRecognitionManager = PitchRecognitionManager(
+        activity.applicationContext,
+        object : PitchRecognitionManager.Listener {
+            override fun onPitchRecognitionState(state: Map<String, Any>) {
+                midiEventSink?.success(state)
+            }
+
+            override fun onPitchNote(
+                pitch: Int,
+                velocity: Int,
+                down: Boolean,
+                timeSeconds: Double,
+            ) {
+                midiEventSink?.success(
+                    mapOf(
+                        "type" to if (down) "noteOn" else "noteOff",
+                        "source" to "microphone",
+                        "channel" to 0,
+                        "pitch" to pitch,
+                        "note" to pitch,
+                        "noteNumber" to pitch,
+                        "velocity" to if (down) velocity else 0,
+                        "time" to timeSeconds,
+                    ),
+                )
+            }
+
+            override fun onContinuousPitch(
+                voiced: Boolean,
+                frequencyHz: Double,
+                midiPitch: Double,
+                confidence: Double,
+                velocity: Int,
+                timeSeconds: Double,
+            ) {
+                midiEventSink?.success(
+                    mapOf(
+                        "type" to "pitch",
+                        "source" to "microphone",
+                        "mode" to PitchRecognitionMode.YIN.wireName,
+                        "voiced" to voiced,
+                        "frequencyHz" to frequencyHz,
+                        "pitch" to midiPitch,
+                        "confidence" to confidence,
+                        "velocity" to velocity,
+                        "time" to timeSeconds,
+                    ),
+                )
+            }
+
+            override fun onSpectrum(timeSeconds: Double, magnitudes: FloatArray) {
+                midiEventSink?.success(
+                    mapOf(
+                        "type" to "spectrum",
+                        "source" to "microphone",
+                        "mode" to PitchRecognitionMode.FFT.wireName,
+                        "time" to timeSeconds,
+                        "magnitudes" to magnitudes,
+                    ),
+                )
+            }
+        },
+    )
+    private val pitchRecordingStore = PitchRecordingStore(activity.applicationContext)
     private val initializeWaiters = mutableListOf<MethodChannel.Result>()
 
     private var methodChannel: MethodChannel? = null
@@ -52,6 +123,9 @@ internal class XenSynthPlatformBridge(
     private var gain = DEFAULT_GAIN
     private var reverb = DEFAULT_REVERB
     private var latencyMilliseconds = 0.0
+    private var pendingPitchRecognitionStart = false
+    private var pendingPitchRecognitionDownload = false
+    private var pendingPitchRecognitionMode = PitchRecognitionMode.PIANO
 
     fun attachMethodChannel(channel: MethodChannel) {
         methodChannel = channel
@@ -121,6 +195,38 @@ internal class XenSynthPlatformBridge(
                     scheduler.allNotesOff()
                     result.success(true)
                 }
+                "getPitchRecognitionState" -> result.success(pitchRecognitionManager.state())
+                "setPitchRecognitionSensitivity" -> {
+                    pitchRecognitionManager.setSensitivity(
+                        number(arguments, "sensitivity") ?: 1.0,
+                    )
+                    result.success(true)
+                }
+                "startPitchRecognition" -> startPitchRecognition(
+                    mode = PitchRecognitionMode.fromWireName(arguments["mode"]?.toString()),
+                    downloadIfNeeded = boolean(arguments, "downloadIfNeeded"),
+                    result = result,
+                )
+                "stopPitchRecognition" -> {
+                    pendingPitchRecognitionStart = false
+                    pendingPitchRecognitionDownload = false
+                    pendingPitchRecognitionMode = PitchRecognitionMode.PIANO
+                    result.success(pitchRecognitionManager.stop())
+                }
+                "playPitchRecording" -> result.success(
+                    pitchRecognitionManager.playRecording(
+                        fromSeconds = number(arguments, "from") ?: 0.0,
+                    ),
+                )
+                "pausePitchRecording" -> {
+                    pitchRecognitionManager.pauseRecordingPlayback()
+                    result.success(true)
+                }
+                "stopPitchRecording" -> {
+                    pitchRecognitionManager.stopRecordingPlayback()
+                    result.success(true)
+                }
+                "savePitchRecording" -> savePitchRecording(arguments, result)
                 "pickDocument" -> pickDocument(result)
                 "saveSettings" -> result.success(saveSettings(arguments))
                 "loadSettings", "load" -> result.success(loadSettings(arguments))
@@ -162,6 +268,43 @@ internal class XenSynthPlatformBridge(
         }
     }
 
+    private fun savePitchRecording(
+        arguments: Map<*, *>,
+        result: MethodChannel.Result,
+    ) {
+        val noteMaps = (arguments["notes"] as? List<*>)
+            ?.mapNotNull { it as? Map<*, *> }
+            .orEmpty()
+        val duration = number(arguments, "duration") ?: 0.0
+        val suggestedName = arguments["suggestedName"]?.toString().orEmpty()
+        worker.execute {
+            val outcome = runCatching {
+                val snapshot = requireNotNull(pitchRecognitionManager.recordingSnapshot()) {
+                    "Microphone recording is unavailable"
+                }
+                pitchRecordingStore.save(
+                    snapshot = snapshot,
+                    noteMaps = noteMaps,
+                    durationSeconds = duration,
+                    suggestedName = suggestedName,
+                )
+            }
+            mainHandler.post {
+                if (closed) return@post
+                outcome.fold(
+                    onSuccess = result::success,
+                    onFailure = { error ->
+                        result.error(
+                            "recording_save_failed",
+                            error.message ?: error.javaClass.simpleName,
+                            null,
+                        )
+                    },
+                )
+            }
+        }
+    }
+
     private fun noteOn(arguments: Map<*, *>, result: MethodChannel.Result) {
         val pitch = number(arguments, "pitch", "audioPitch")
             ?: number(arguments, "midiPitch")?.let { midiPitch ->
@@ -190,6 +333,29 @@ internal class XenSynthPlatformBridge(
         } else {
             result.success(token)
         }
+    }
+
+    private fun startPitchRecognition(
+        mode: PitchRecognitionMode,
+        downloadIfNeeded: Boolean,
+        result: MethodChannel.Result,
+    ) {
+        if (ContextCompat.checkSelfPermission(activity, Manifest.permission.RECORD_AUDIO) ==
+            PackageManager.PERMISSION_GRANTED
+        ) {
+            result.success(pitchRecognitionManager.start(mode, downloadIfNeeded))
+            return
+        }
+        pendingPitchRecognitionStart = true
+        pendingPitchRecognitionDownload = downloadIfNeeded
+        pendingPitchRecognitionMode = mode
+        val state = pitchRecognitionManager.waitingForPermission(mode)
+        ActivityCompat.requestPermissions(
+            activity,
+            arrayOf(Manifest.permission.RECORD_AUDIO),
+            MICROPHONE_PERMISSION_REQUEST_CODE,
+        )
+        result.success(state)
     }
 
     private fun convertMuseScore(arguments: Map<*, *>, result: MethodChannel.Result) {
@@ -261,6 +427,28 @@ internal class XenSynthPlatformBridge(
         }
         retainReadPermission(uri, data.flags)
         readDocumentForResult(uri, result)
+        return true
+    }
+
+    fun onRequestPermissionsResult(
+        requestCode: Int,
+        permissions: Array<out String>,
+        grantResults: IntArray,
+    ): Boolean {
+        if (requestCode != MICROPHONE_PERMISSION_REQUEST_CODE) return false
+        val requestedMicrophone = permissions.any { it == Manifest.permission.RECORD_AUDIO }
+        val granted = requestedMicrophone && grantResults.any { it == PackageManager.PERMISSION_GRANTED }
+        val shouldStart = pendingPitchRecognitionStart
+        val downloadIfNeeded = pendingPitchRecognitionDownload
+        val mode = pendingPitchRecognitionMode
+        pendingPitchRecognitionStart = false
+        pendingPitchRecognitionDownload = false
+        pendingPitchRecognitionMode = PitchRecognitionMode.PIANO
+        if (granted && shouldStart) {
+            pitchRecognitionManager.start(mode, downloadIfNeeded)
+        } else {
+            pitchRecognitionManager.permissionDenied()
+        }
         return true
     }
 
@@ -424,6 +612,7 @@ internal class XenSynthPlatformBridge(
     override fun onListen(arguments: Any?, events: EventChannel.EventSink) {
         midiEventSink = events
         deliverPendingViewDocument()
+        pitchRecognitionManager.emitCurrentState()
         if (hostResumed && midiInputManager.isSupported) midiInputManager.start()
     }
 
@@ -486,6 +675,10 @@ internal class XenSynthPlatformBridge(
     fun onHostPause() {
         hostResumed = false
         midiInputManager.stop()
+        pendingPitchRecognitionStart = false
+        pendingPitchRecognitionDownload = false
+        pendingPitchRecognitionMode = PitchRecognitionMode.PIANO
+        pitchRecognitionManager.stop()
         scheduler.pause()
     }
 
@@ -496,6 +689,7 @@ internal class XenSynthPlatformBridge(
         pendingDocumentResult = null
         midiEventSink = null
         midiInputManager.close()
+        pitchRecognitionManager.close()
         scheduler.dispose()
         nativeAudio.allSoundOff()
         nativeAudio.teardown()
@@ -506,6 +700,7 @@ internal class XenSynthPlatformBridge(
     private companion object {
         const val PREFERENCES_NAME = "xensynth_flutter_settings"
         const val DOCUMENT_REQUEST_CODE = 0x5845
+        const val MICROPHONE_PERMISSION_REQUEST_CODE = 0x5846
         const val DOCUMENT_CACHE_DIRECTORY = "xensynth-documents"
         const val SAMPLE_SCHEDULER_MILLIS = 8
         const val DEFAULT_GAIN = 2.05f
@@ -543,6 +738,19 @@ internal class XenSynthPlatformBridge(
             return when (val value = map[key]) {
                 is Number -> value.toInt()
                 is String -> value.toIntOrNull() ?: defaultValue
+                else -> defaultValue
+            }
+        }
+
+        fun boolean(map: Map<*, *>, key: String, defaultValue: Boolean = false): Boolean {
+            return when (val value = map[key]) {
+                is Boolean -> value
+                is Number -> value.toInt() != 0
+                is String -> when (value.lowercase()) {
+                    "true", "yes", "1" -> true
+                    "false", "no", "0" -> false
+                    else -> defaultValue
+                }
                 else -> defaultValue
             }
         }

@@ -54,6 +54,19 @@ class MainActivity : FlutterActivity() {
         super.onActivityResult(requestCode, resultCode, data)
     }
 
+    override fun onRequestPermissionsResult(
+        requestCode: Int,
+        permissions: Array<out String>,
+        grantResults: IntArray,
+    ) {
+        if (::platformBridge.isInitialized &&
+            platformBridge.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        ) {
+            return
+        }
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+    }
+
     override fun onDestroy() {
         if (::platformBridge.isInitialized) platformBridge.close()
         super.onDestroy()

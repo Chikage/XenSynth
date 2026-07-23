@@ -84,3 +84,9 @@ kotlin {
 flutter {
     source = "../.."
 }
+
+dependencies {
+    implementation("com.github.wendykierp:JTransforms:3.1")
+    implementation("org.tensorflow:tensorflow-lite:2.17.0")
+    testImplementation("junit:junit:4.13.2")
+}

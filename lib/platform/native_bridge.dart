@@ -180,6 +180,57 @@ class XenSynthNativeBridge {
 
   Future<void> allNotesOff() => _invokeVoid('allNotesOff');
 
+  Future<Map<String, Object?>> getPitchRecognitionState() async {
+    return _stringKeyedMap(await _invoke('getPitchRecognitionState'));
+  }
+
+  Future<Map<String, Object?>> startPitchRecognition({
+    required String mode,
+    bool downloadIfNeeded = false,
+  }) async {
+    return _stringKeyedMap(
+      await _invoke('startPitchRecognition', <String, Object?>{
+        'mode': mode,
+        'downloadIfNeeded': downloadIfNeeded,
+      }),
+    );
+  }
+
+  Future<Map<String, Object?>> stopPitchRecognition() async {
+    return _stringKeyedMap(await _invoke('stopPitchRecognition'));
+  }
+
+  Future<void> setPitchRecognitionSensitivity(double sensitivity) {
+    return _invokeVoid('setPitchRecognitionSensitivity', <String, Object?>{
+      'sensitivity': sensitivity,
+    });
+  }
+
+  Future<bool> playPitchRecording({double from = 0}) async {
+    return _boolResult(
+      await _invoke('playPitchRecording', <String, Object?>{'from': from}),
+      fallback: false,
+    );
+  }
+
+  Future<void> pausePitchRecording() => _invokeVoid('pausePitchRecording');
+
+  Future<void> stopPitchRecording() => _invokeVoid('stopPitchRecording');
+
+  Future<Map<String, Object?>> savePitchRecording({
+    required String suggestedName,
+    required double duration,
+    required List<Map<String, Object?>> notes,
+  }) async {
+    return _stringKeyedMap(
+      await _invoke('savePitchRecording', <String, Object?>{
+        'suggestedName': suggestedName,
+        'duration': duration,
+        'notes': notes,
+      }),
+    );
+  }
+
   Future<void> setGain(double gain) {
     return _invokeVoid('setGain', <String, Object?>{'gain': gain});
   }
@@ -239,5 +290,10 @@ class XenSynthNativeBridge {
       'false' || 'no' || '0' => false,
       _ => fallback,
     };
+  }
+
+  static Map<String, Object?> _stringKeyedMap(Object? value) {
+    if (value is! Map) return const {};
+    return value.map((key, value) => MapEntry(key.toString(), value));
   }
 }

@@ -7,6 +7,7 @@ import 'package:flutter/scheduler.dart';
 import '../../app/xensynth_settings.dart';
 import '../../core/hex_keyboard.dart';
 import '../../core/midi_parser.dart';
+import '../../core/microphone_take.dart';
 import '../../core/score.dart';
 import '../app_palette.dart';
 import '../hex/hex_keyboard_view.dart';
@@ -77,6 +78,9 @@ class SpatialWaterfallView extends StatefulWidget {
     this.playing = false,
     this.viewportController,
     this.onTogglePlayback,
+    this.onControlInteraction,
+    this.pitchInputEvents = const [],
+    this.visualizationGeneration = 0,
     super.key,
   });
 
@@ -90,6 +94,9 @@ class SpatialWaterfallView extends StatefulWidget {
   final ValueChanged<int> onPitchUp;
   final HexKeyboardViewportController? viewportController;
   final VoidCallback? onTogglePlayback;
+  final VoidCallback? onControlInteraction;
+  final List<PitchInputEvent> pitchInputEvents;
+  final int visualizationGeneration;
 
   @visibleForTesting
   static Offset? debugLandingCenterForPitch({
@@ -341,6 +348,7 @@ class _SpatialWaterfallViewState extends State<SpatialWaterfallView>
   static const _controlMargin = 14.0;
   static const _panStep = 32.0;
   static const _rotationDegreesPerPixel = 0.42;
+  static const _rotationControlHapticStepPixels = 12.0;
 
   final Map<int, HexKey> _pointerCells = {};
   final Map<int, double> _pointerForces = {};
@@ -370,7 +378,10 @@ class _SpatialWaterfallViewState extends State<SpatialWaterfallView>
   double _rotationDragStartYDegrees = 0;
   double _rotationDragStartZDegrees = 0;
   double _rotationDragStartAngle = 0;
+  double _rotationControlHapticTravel = 0;
+  bool _rotationControlHasUpdated = false;
   int _particleCursor = 0;
+  int _lastPitchInputSequence = 0;
 
   @override
   void initState() {
@@ -380,6 +391,9 @@ class _SpatialWaterfallViewState extends State<SpatialWaterfallView>
     _playbackIndex = _SpatialPlaybackIndex.build(widget.score, _layout);
     _attachViewportController(widget.viewportController);
     _particleCursor = _findParticleCursor(widget.playhead);
+    _lastPitchInputSequence = widget.pitchInputEvents.isEmpty
+        ? 0
+        : widget.pitchInputEvents.last.sequence;
     _particleTicker = createTicker(_advanceParticles);
   }
 
@@ -401,14 +415,21 @@ class _SpatialWaterfallViewState extends State<SpatialWaterfallView>
       _sceneCache = null;
     }
 
-    if (!identical(oldWidget.score, widget.score)) {
-      _playbackIndex = _SpatialPlaybackIndex.build(widget.score, _layout);
+    final scoreChanged = !identical(oldWidget.score, widget.score);
+    if (widget.visualizationGeneration != oldWidget.visualizationGeneration) {
       _particleSystem.clear();
       _repaintParticles();
       _particleCursor = _findParticleCursor(widget.playhead);
       _stopParticleTickerIfIdle();
-      return;
+    } else if (scoreChanged) {
+      _playbackIndex = _SpatialPlaybackIndex.build(widget.score, _layout);
+      _particleSystem.clearTimedEffects();
+      _repaintParticles();
+      _particleCursor = _findParticleCursor(widget.playhead);
+      _stopParticleTickerIfIdle();
     }
+    _consumePitchInputEvents();
+    if (scoreChanged) return;
 
     final delta = widget.playhead - oldWidget.playhead;
     if (widget.playing && delta >= 0 && delta <= _maximumEmissionStepSeconds) {
@@ -416,6 +437,36 @@ class _SpatialWaterfallViewState extends State<SpatialWaterfallView>
     } else if (delta.abs() > _particleCursorEpsilon || !widget.playing) {
       _particleCursor = _findParticleCursor(widget.playhead);
     }
+  }
+
+  void _consumePitchInputEvents() {
+    final scene = _latestScene;
+    var changed = false;
+    for (final event in widget.pitchInputEvents) {
+      if (event.sequence <= _lastPitchInputSequence) continue;
+      _lastPitchInputSequence = event.sequence;
+      final cell = _layout.keyForPitch(event.pitch);
+      final spatialCell = cell == null || scene == null
+          ? null
+          : scene.cellsByCoordinate[cell.coordinate];
+      if (event.down) {
+        _particleSystem.beginInput(
+          pointer: event.pointer,
+          pitch: event.pitch,
+          velocity: event.velocity,
+          x: spatialCell?.center.dx,
+          y: spatialCell?.center.dy,
+          noteWidth: spatialCell?.projectedRadius,
+          pixelScale: scene?.physicalPixel ?? 1,
+        );
+      } else {
+        _particleSystem.endInput(event.pointer);
+      }
+      changed = true;
+    }
+    if (!changed) return;
+    _repaintParticles();
+    _startParticleTicker();
   }
 
   @override
@@ -501,6 +552,17 @@ class _SpatialWaterfallViewState extends State<SpatialWaterfallView>
                         scene: scene,
                         impacts: _particleSystem.impacts,
                         simplified: _transformConsumed,
+                        repaint: _particleRepaint,
+                      ),
+                      size: Size.infinite,
+                    ),
+                  ),
+                  RepaintBoundary(
+                    key: const ValueKey('spatial-input-traces-layer'),
+                    child: CustomPaint(
+                      painter: _SpatialInputTracePainter(
+                        scene: scene,
+                        traces: _particleSystem.inputTraces,
                         repaint: _particleRepaint,
                       ),
                       size: Size.infinite,
@@ -640,10 +702,14 @@ class _SpatialWaterfallViewState extends State<SpatialWaterfallView>
   }
 
   void _panBy(Offset delta) {
+    widget.onControlInteraction?.call();
     _viewportController.panBy(delta);
   }
 
   void _startRotationControl(DragStartDetails details, double extent) {
+    _rotationControlHapticTravel = 0;
+    _rotationControlHasUpdated = false;
+    widget.onControlInteraction?.call();
     final center = Offset(extent / 2, extent / 2);
     final radialOffset = details.localPosition - center;
     _rotationControlMode = radialOffset.distance >= extent * 0.36
@@ -660,6 +726,11 @@ class _SpatialWaterfallViewState extends State<SpatialWaterfallView>
     final mode = _rotationControlMode;
     final origin = _rotationDragOrigin;
     if (mode == null || origin == null) return;
+    if (_rotationControlHasUpdated) {
+      _advanceRotationControlHapticScale(details.delta);
+    } else {
+      _rotationControlHasUpdated = true;
+    }
 
     var rotationXDegrees = _rotationDragStartXDegrees;
     var rotationYDegrees = _rotationDragStartYDegrees;
@@ -691,6 +762,19 @@ class _SpatialWaterfallViewState extends State<SpatialWaterfallView>
   void _endRotationControl() {
     _rotationControlMode = null;
     _rotationDragOrigin = null;
+    _rotationControlHapticTravel = 0;
+    _rotationControlHasUpdated = false;
+  }
+
+  void _advanceRotationControlHapticScale(Offset delta) {
+    final distance = delta.distance;
+    if (!distance.isFinite || distance <= 0) return;
+    _rotationControlHapticTravel += distance;
+    if (_rotationControlHapticTravel < _rotationControlHapticStepPixels) return;
+    widget.onControlInteraction?.call();
+    _rotationControlHapticTravel = _rotationControlHapticTravel.remainder(
+      _rotationControlHapticStepPixels,
+    );
   }
 
   void _handlePointerDown(PointerDownEvent event, _SpatialScene scene) {
@@ -861,7 +945,6 @@ class _SpatialWaterfallViewState extends State<SpatialWaterfallView>
     final velocity = widget.settings.pseudoPressureEnabled
         ? (24 + force * 103).round().clamp(1, 127)
         : 104;
-    _spawnHitParticles(next, velocity: velocity, track: 0, scene: scene);
     final pitch = next.audioPitch.midiPitch;
     if (isDown || previous == null) {
       widget.onPitchDown(event.pointer, pitch, velocity);
@@ -2444,6 +2527,67 @@ class _SpatialMeasurePainter extends CustomPainter {
         oldDelegate.previewSeconds != previewSeconds ||
         oldDelegate.scene != scene ||
         oldDelegate.showLabels != showLabels;
+  }
+}
+
+class _SpatialInputTracePainter extends CustomPainter {
+  _SpatialInputTracePainter({
+    required this.scene,
+    required this.traces,
+    required Listenable repaint,
+  }) : super(repaint: repaint);
+
+  final _SpatialScene scene;
+  final List<WaterfallInputTrace> traces;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    if (traces.isEmpty) return;
+    for (final trace in traces) {
+      final key = scene.layout.keyForPitch(trace.pitch);
+      if (key == null) continue;
+      final cell = scene.cellsByCoordinate[key.coordinate];
+      if (cell == null) continue;
+      final bottom = scene.project(
+        key.center,
+        scene.zForSeconds(trace.releaseAge),
+      );
+      final top = scene.project(key.center, scene.zForSeconds(trace.age));
+      final velocity = trace.velocityRatio.clamp(0.0, 1.0);
+      final width = math.max(
+        scene.physicalPixel,
+        cell.projectedRadius * (0.045 + velocity * 0.085),
+      );
+      final color = HSVColor.fromAHSV(
+        0.68 + velocity * 0.28,
+        trace.hue,
+        0.76,
+        1,
+      ).toColor();
+      canvas.drawLine(
+        bottom,
+        top,
+        Paint()
+          ..strokeCap = StrokeCap.square
+          ..strokeWidth = width * 2.2
+          ..blendMode = BlendMode.plus
+          ..color = color.withValues(alpha: 0.18 + velocity * 0.14),
+      );
+      canvas.drawLine(
+        bottom,
+        top,
+        Paint()
+          ..strokeCap = StrokeCap.square
+          ..strokeWidth = width
+          ..blendMode = BlendMode.plus
+          ..color = color,
+      );
+    }
+  }
+
+  @override
+  bool shouldRepaint(covariant _SpatialInputTracePainter oldDelegate) {
+    return oldDelegate.scene != scene || oldDelegate.traces != traces;
   }
 }
 

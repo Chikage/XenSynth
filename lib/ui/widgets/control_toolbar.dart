@@ -3,6 +3,7 @@ import 'dart:math' as math;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
+import '../../app/xensynth_settings.dart';
 import '../app_palette.dart';
 
 class ControlToolbar extends StatelessWidget {
@@ -28,9 +29,21 @@ class ControlToolbar extends StatelessWidget {
     required this.onSettings,
     required this.onResetSettings,
     required this.onSeek,
+    this.pitchRecognitionAvailable = false,
+    this.pitchRecognizing = false,
+    this.pitchRecognitionBusy = false,
+    this.pitchRecognitionModelReady = false,
+    this.pitchRecognitionDownloadProgress = 0,
+    this.pitchRecognitionMode = PitchRecognitionMode.yin,
+    this.onPitchRecognition,
+    this.microphoneTakeReadyForSave = false,
+    this.savingMicrophoneTake = false,
+    this.onSaveMicrophoneTake,
+    this.transportLocked = false,
     this.hexKeyboardGesturesEnabled = false,
     this.onHexKeyboardPan,
     this.onHexKeyboardZoom,
+    this.onHexKeyboardInteraction,
     this.bpm = 120,
     this.meterNumerator = 4,
     this.meterDenominator = 4,
@@ -63,9 +76,21 @@ class ControlToolbar extends StatelessWidget {
   final VoidCallback onSettings;
   final VoidCallback onResetSettings;
   final ValueChanged<double> onSeek;
+  final bool pitchRecognitionAvailable;
+  final bool pitchRecognizing;
+  final bool pitchRecognitionBusy;
+  final bool pitchRecognitionModelReady;
+  final double pitchRecognitionDownloadProgress;
+  final PitchRecognitionMode pitchRecognitionMode;
+  final VoidCallback? onPitchRecognition;
+  final bool microphoneTakeReadyForSave;
+  final bool savingMicrophoneTake;
+  final VoidCallback? onSaveMicrophoneTake;
+  final bool transportLocked;
   final bool hexKeyboardGesturesEnabled;
   final ValueChanged<Offset>? onHexKeyboardPan;
   final ValueChanged<double>? onHexKeyboardZoom;
+  final VoidCallback? onHexKeyboardInteraction;
 
   @override
   Widget build(BuildContext context) {
@@ -75,6 +100,37 @@ class ControlToolbar extends StatelessWidget {
     final sliderSpeed = speed.clamp(0.2, 4.0).toDouble();
     final sliderEdo = edo.clamp(0, 72);
     final sliderOffset = offsetCents.clamp(-128.0, 128.0).toDouble();
+    final downloadPercent = (pitchRecognitionDownloadProgress * 100)
+        .clamp(0, 100)
+        .round();
+    final pitchRecognitionTooltip = switch (pitchRecognitionMode) {
+      PitchRecognitionMode.fft => switch ((
+        pitchRecognitionBusy,
+        pitchRecognizing,
+      )) {
+        (true, _) => 'Starting FFT spectrum recording',
+        (_, true) => 'Stop FFT spectrum recording',
+        _ => 'Record and display the microphone FFT spectrum',
+      },
+      PitchRecognitionMode.yin => switch ((
+        pitchRecognitionBusy,
+        pitchRecognizing,
+      )) {
+        (true, _) => 'Starting continuous YIN pitch detection',
+        (_, true) => 'Stop continuous YIN pitch detection',
+        _ => 'Detect continuous monophonic pitch with YIN',
+      },
+      PitchRecognitionMode.piano => switch ((
+        pitchRecognitionBusy,
+        pitchRecognizing,
+        pitchRecognitionModelReady,
+      )) {
+        (true, _, _) => 'Preparing piano recognition · $downloadPercent%',
+        (_, true, _) => 'Stop piano note recognition',
+        (_, _, false) => 'Download model and recognize piano notes',
+        _ => 'Recognize piano notes from microphone',
+      },
+    };
     return LayoutBuilder(
       builder: (context, constraints) {
         final compact = constraints.maxWidth < 1000;
@@ -125,7 +181,7 @@ class ControlToolbar extends StatelessWidget {
                             size: controlSize,
                             tooltip: 'Open score or tuning',
                             icon: Icons.folder_open_rounded,
-                            onPressed: onOpen,
+                            onPressed: transportLocked ? null : onOpen,
                           ),
                           _ToolbarDivider(
                             compact: compact,
@@ -140,22 +196,69 @@ class ControlToolbar extends StatelessWidget {
                                 ? Icons.pause_rounded
                                 : Icons.play_arrow_rounded,
                             active: playing || loading,
-                            onPressed: onTogglePlayback,
+                            onPressed: transportLocked
+                                ? null
+                                : onTogglePlayback,
                           ),
                           SizedBox(width: gap),
                           _IconToolButton(
                             size: controlSize,
                             tooltip: 'Back to start',
                             icon: Icons.restart_alt_rounded,
-                            onPressed: onReset,
+                            onPressed: transportLocked ? null : onReset,
                           ),
                           SizedBox(width: gap),
                           _IconToolButton(
                             size: controlSize,
                             tooltip: 'Stop and release notes',
                             icon: Icons.stop_rounded,
-                            onPressed: onStop,
+                            onPressed: transportLocked ? null : onStop,
                           ),
+                          if (pitchRecognitionAvailable &&
+                              (onPitchRecognition != null ||
+                                  (microphoneTakeReadyForSave &&
+                                      onSaveMicrophoneTake != null))) ...[
+                            SizedBox(width: gap),
+                            if (microphoneTakeReadyForSave &&
+                                onSaveMicrophoneTake != null)
+                              _IconToolButton(
+                                key: const ValueKey(
+                                  'toolbar-save-microphone-take-button',
+                                ),
+                                size: controlSize,
+                                tooltip: savingMicrophoneTake
+                                    ? 'Saving microphone recording'
+                                    : 'Save recording and recognized-pitch audio',
+                                icon: savingMicrophoneTake
+                                    ? Icons.hourglass_top_rounded
+                                    : Icons.save_alt_rounded,
+                                active: savingMicrophoneTake,
+                                onPressed: savingMicrophoneTake
+                                    ? null
+                                    : onSaveMicrophoneTake,
+                              )
+                            else
+                              _IconToolButton(
+                                key: const ValueKey(
+                                  'toolbar-pitch-recognition-button',
+                                ),
+                                size: controlSize,
+                                tooltip: pitchRecognitionTooltip,
+                                icon: pitchRecognitionBusy
+                                    ? pitchRecognitionMode ==
+                                              PitchRecognitionMode.piano
+                                          ? Icons.downloading_rounded
+                                          : Icons.graphic_eq_rounded
+                                    : pitchRecognizing
+                                    ? Icons.mic_rounded
+                                    : Icons.mic_none_rounded,
+                                active:
+                                    pitchRecognizing || pitchRecognitionBusy,
+                                onPressed: pitchRecognitionBusy
+                                    ? null
+                                    : onPitchRecognition,
+                              ),
+                          ],
                           _ToolbarDivider(
                             compact: compact,
                             controlHeight: controlSize,
@@ -196,6 +299,7 @@ class ControlToolbar extends StatelessWidget {
                               enabled: hexKeyboardGesturesEnabled,
                               onPan: onHexKeyboardPan,
                               onZoom: onHexKeyboardZoom,
+                              onInteraction: onHexKeyboardInteraction,
                               child: _ScoreSummary(
                                 title: title,
                                 status: status,
@@ -218,6 +322,7 @@ class ControlToolbar extends StatelessWidget {
                     position: position,
                     duration: duration,
                     onSeek: onSeek,
+                    enabled: !transportLocked,
                   ),
                 ],
               ),
@@ -245,12 +350,14 @@ class _HexKeyboardViewportGestureArea extends StatefulWidget {
     required this.enabled,
     required this.onPan,
     required this.onZoom,
+    required this.onInteraction,
     required this.child,
   });
 
   final bool enabled;
   final ValueChanged<Offset>? onPan;
   final ValueChanged<double>? onZoom;
+  final VoidCallback? onInteraction;
   final Widget child;
 
   @override
@@ -261,6 +368,7 @@ class _HexKeyboardViewportGestureArea extends StatefulWidget {
 class _HexKeyboardViewportGestureAreaState
     extends State<_HexKeyboardViewportGestureArea> {
   double _previousScale = 1;
+  bool _interactionHapticSent = false;
 
   @override
   Widget build(BuildContext context) {
@@ -273,24 +381,37 @@ class _HexKeyboardViewportGestureAreaState
         child: GestureDetector(
           key: const ValueKey('toolbar-hex-viewport-gesture-area'),
           behavior: HitTestBehavior.opaque,
-          onScaleStart: enabled ? (_) => _previousScale = 1 : null,
+          onScaleStart: enabled ? _handleScaleStart : null,
           onScaleUpdate: enabled ? _handleScaleUpdate : null,
-          onScaleEnd: enabled ? (_) => _previousScale = 1 : null,
+          onScaleEnd: enabled ? (_) => _resetScaleGesture() : null,
           child: widget.child,
         ),
       ),
     );
   }
 
+  void _handleScaleStart(ScaleStartDetails details) {
+    _previousScale = 1;
+    _interactionHapticSent = false;
+  }
+
   void _handleScaleUpdate(ScaleUpdateDetails details) {
     final pan = Offset(details.focalPointDelta.dx, -details.focalPointDelta.dy);
+    final factor = details.scale / _previousScale;
+    final hasZoom = factor.isFinite && factor > 0 && factor != 1;
+    if (!_interactionHapticSent && (pan != Offset.zero || hasZoom)) {
+      widget.onInteraction?.call();
+      _interactionHapticSent = true;
+    }
     if (pan != Offset.zero) widget.onPan!(pan);
 
-    final factor = details.scale / _previousScale;
     _previousScale = details.scale;
-    if (factor.isFinite && factor > 0 && factor != 1) {
-      widget.onZoom!(factor);
-    }
+    if (hasZoom) widget.onZoom!(factor);
+  }
+
+  void _resetScaleGesture() {
+    _previousScale = 1;
+    _interactionHapticSent = false;
   }
 }
 
@@ -386,12 +507,13 @@ class _IconToolButton extends StatelessWidget {
     required this.icon,
     required this.onPressed,
     this.active = false,
+    super.key,
   });
 
   final double size;
   final String tooltip;
   final IconData icon;
-  final VoidCallback onPressed;
+  final VoidCallback? onPressed;
   final bool active;
 
   @override
@@ -433,7 +555,11 @@ class _IconToolButton extends StatelessWidget {
             child: Icon(
               icon,
               size: size * 0.56,
-              color: active ? AppPalette.primaryText : const Color(0xFFF3F5F4),
+              color: onPressed == null
+                  ? AppPalette.secondaryText
+                  : active
+                  ? AppPalette.primaryText
+                  : const Color(0xFFF3F5F4),
             ),
           ),
         ),
@@ -551,11 +677,17 @@ class _MetricEditorGroupState extends State<_MetricEditorGroup> {
           child: Row(
             mainAxisSize: MainAxisSize.min,
             children: [
-              _buildControl(_MetricKind.speed, widget.compact ? 86 : 104),
+              _buildControl(
+                _MetricKind.speed,
+                _controlWidth(_MetricKind.speed),
+              ),
               SizedBox(width: widget.gap),
-              _buildControl(_MetricKind.edo, widget.compact ? 78 : 92),
+              _buildControl(_MetricKind.edo, _controlWidth(_MetricKind.edo)),
               SizedBox(width: widget.gap),
-              _buildControl(_MetricKind.offset, widget.compact ? 92 : 110),
+              _buildControl(
+                _MetricKind.offset,
+                _controlWidth(_MetricKind.offset),
+              ),
             ],
           ),
         ),
@@ -650,9 +782,9 @@ class _MetricEditorGroupState extends State<_MetricEditorGroup> {
       widget.compact ? 220.0 : 240.0,
       math.max(120.0, layout.overlaySize.width - safePadding.horizontal - 16),
     );
-    final speedWidth = widget.compact ? 86.0 : 104.0;
-    final edoWidth = widget.compact ? 78.0 : 92.0;
-    final offsetWidth = widget.compact ? 92.0 : 110.0;
+    final speedWidth = _controlWidth(_MetricKind.speed);
+    final edoWidth = _controlWidth(_MetricKind.edo);
+    final offsetWidth = _controlWidth(_MetricKind.offset);
     final targetLeft = switch (kind) {
       _MetricKind.speed => 0.0,
       _MetricKind.edo => speedWidth + widget.gap,
@@ -870,6 +1002,12 @@ class _MetricEditorGroupState extends State<_MetricEditorGroup> {
     _MetricKind.offset => 'Pitch offset',
   };
 
+  double _controlWidth(_MetricKind kind) => switch (kind) {
+    _MetricKind.speed => widget.compact ? 82 : 100,
+    _MetricKind.edo => widget.compact ? 74 : 88,
+    _MetricKind.offset => widget.compact ? 88 : 106,
+  };
+
   double _minimum(_MetricKind kind) => switch (kind) {
     _MetricKind.speed => 0.2,
     _MetricKind.edo => 0,
@@ -991,16 +1129,18 @@ class _SeekBar extends StatelessWidget {
     required this.position,
     required this.duration,
     required this.onSeek,
+    this.enabled = true,
   });
 
   final double progress;
   final double position;
   final double duration;
   final ValueChanged<double> onSeek;
+  final bool enabled;
 
   @override
   Widget build(BuildContext context) {
-    final enabled = duration > 0;
+    final enabled = this.enabled && duration > 0;
     return Semantics(
       label: 'Playback position',
       value:
