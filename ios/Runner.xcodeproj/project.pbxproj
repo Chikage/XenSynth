@@ -25,6 +25,10 @@
 		A1B2C3D40000000000000007 /* FluidSynth.xcframework in Frameworks */ = {isa = PBXBuildFile; fileRef = A1B2C3D40000000000000107 /* FluidSynth.xcframework */; };
 		A1B2C3D40000000000000008 /* FluidSynth.xcframework in Embed Frameworks */ = {isa = PBXBuildFile; fileRef = A1B2C3D40000000000000107 /* FluidSynth.xcframework */; settings = {ATTRIBUTES = (CodeSignOnCopy, RemoveHeadersOnCopy, ); }; };
 		A1B2C3D40000000000000009 /* MsczToMidx.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D40000000000000108 /* MsczToMidx.swift */; };
+		A1B2C3D4000000000000000A /* XenAudioSession.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D40000000000000109 /* XenAudioSession.swift */; };
+		A1B2C3D4000000000000000B /* PitchAnalysis.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D4000000000000010A /* PitchAnalysis.swift */; };
+		A1B2C3D4000000000000000C /* PitchRecording.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D4000000000000010B /* PitchRecording.swift */; };
+		A1B2C3D4000000000000000D /* PitchRecognitionManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D4000000000000010C /* PitchRecognitionManager.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -77,6 +81,10 @@
 		A1B2C3D40000000000000106 /* DefaultSoundFont.sf2 */ = {isa = PBXFileReference; lastKnownFileType = file; path = DefaultSoundFont.sf2; sourceTree = "<group>"; };
 		A1B2C3D40000000000000107 /* FluidSynth.xcframework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.xcframework; path = FluidSynth.xcframework; sourceTree = "<group>"; };
 		A1B2C3D40000000000000108 /* MsczToMidx.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MsczToMidx.swift; sourceTree = "<group>"; };
+		A1B2C3D40000000000000109 /* XenAudioSession.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = XenAudioSession.swift; sourceTree = "<group>"; };
+		A1B2C3D4000000000000010A /* PitchAnalysis.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PitchAnalysis.swift; sourceTree = "<group>"; };
+		A1B2C3D4000000000000010B /* PitchRecording.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PitchRecording.swift; sourceTree = "<group>"; };
+		A1B2C3D4000000000000010C /* PitchRecognitionManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PitchRecognitionManager.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -159,6 +167,10 @@
 				A1B2C3D40000000000000104 /* MIDIKeyboardController.swift */,
 				A1B2C3D40000000000000105 /* XenSynthPlatformBridge.swift */,
 				A1B2C3D40000000000000108 /* MsczToMidx.swift */,
+				A1B2C3D40000000000000109 /* XenAudioSession.swift */,
+				A1B2C3D4000000000000010A /* PitchAnalysis.swift */,
+				A1B2C3D4000000000000010B /* PitchRecording.swift */,
+				A1B2C3D4000000000000010C /* PitchRecognitionManager.swift */,
 			);
 			path = Platform;
 			sourceTree = "<group>";
@@ -339,6 +351,10 @@
 				A1B2C3D40000000000000004 /* MIDIKeyboardController.swift in Sources */,
 				A1B2C3D40000000000000005 /* XenSynthPlatformBridge.swift in Sources */,
 				A1B2C3D40000000000000009 /* MsczToMidx.swift in Sources */,
+				A1B2C3D4000000000000000A /* XenAudioSession.swift in Sources */,
+				A1B2C3D4000000000000000B /* PitchAnalysis.swift in Sources */,
+				A1B2C3D4000000000000000C /* PitchRecording.swift in Sources */,
+				A1B2C3D4000000000000000D /* PitchRecognitionManager.swift in Sources */,
 				74858FAF1ED2DC5600515810 /* AppDelegate.swift in Sources */,
 				1498D2341E8E89220040F4C2 /* GeneratedPluginRegistrant.m in Sources */,
 				7884E8682EC3CC0700C636F2 /* SceneDelegate.swift in Sources */,

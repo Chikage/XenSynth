@@ -218,6 +218,7 @@ final class ScorePlaybackController {
   }
 
   private func prepareAudio() throws {
+    try XenAudioSession.shared.activateForPlayback()
     synth.setGain(Self.fluidGain(for: volumeGain))
     synth.setReverbMixIntensity(reverbMixIntensity)
     try synth.loadDefaultSoundFontIfNeeded()

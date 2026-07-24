@@ -8,6 +8,7 @@ final class XenSynthPlatformBridge: NSObject, FlutterStreamHandler, UIDocumentPi
 
   private let playbackController = ScorePlaybackController()
   private let midiController = MIDIKeyboardController()
+  private lazy var pitchRecognitionManager = PitchRecognitionManager(listener: self)
   private let audioInitializationQueue = DispatchQueue(
     label: "icu.ringona.xensynth.audio-initialization",
     qos: .userInitiated
@@ -184,23 +185,64 @@ final class XenSynthPlatformBridge: NSObject, FlutterStreamHandler, UIDocumentPi
         result(true)
 
       case "setPitchRecognitionSensitivity":
+        pitchRecognitionManager.setSensitivity(
+          arguments.double(forAnyKey: ["sensitivity", "value"]) ?? 1
+        )
         result(true)
 
-      case "getPitchRecognitionState", "startPitchRecognition", "stopPitchRecognition":
-        let requestedMode = (arguments["mode"] as? String) ?? "piano"
-        result([
-          "type": "pitchRecognitionState",
-          "source": "microphone",
-          "mode": requestedMode,
-          "supported": false,
-          "phase": "unavailable",
-          "modelReady": false,
-          "recognizing": false,
-          "downloading": false,
-          "busy": false,
-          "progress": 0.0,
-          "message": "Microphone pitch recognition is currently available on Android",
-        ])
+      case "getPitchRecognitionState":
+        result(pitchRecognitionManager.state())
+
+      case "startPitchRecognition":
+        result(pitchRecognitionManager.start(
+          mode: PitchRecognitionMode(wireName: arguments["mode"] as? String)
+        ))
+
+      case "stopPitchRecognition":
+        result(pitchRecognitionManager.stop())
+
+      case "playPitchRecording":
+        result(try pitchRecognitionManager.playRecording(
+          fromSeconds: arguments.double(forAnyKey: ["from", "position"]) ?? 0
+        ))
+
+      case "pausePitchRecording", "stopPitchRecording":
+        pitchRecognitionManager.stopRecordingPlayback()
+        result(true)
+
+      case "savePitchRecording":
+        let noteMaps = noteMaps(from: arguments["notes"]) ?? []
+        let duration = arguments.double(forAnyKey: ["duration"]) ?? 0
+        let suggestedName = arguments["suggestedName"] as? String ?? ""
+        guard let snapshot = pitchRecognitionManager.recordingSnapshot() else {
+          result(FlutterError(
+            code: "recording_save_failed",
+            message: "Microphone recording is unavailable.",
+            details: nil
+          ))
+          return
+        }
+        audioInitializationQueue.async {
+          do {
+            let payload = try PitchRecordingAudio.save(
+              snapshot: snapshot,
+              noteMaps: noteMaps,
+              durationSeconds: duration,
+              suggestedName: suggestedName
+            )
+            DispatchQueue.main.async { result(payload) }
+          } catch {
+            DispatchQueue.main.async {
+              result(FlutterError(
+                code: "recording_save_failed",
+                message: (error as? LocalizedError)?.errorDescription
+                  ?? error.localizedDescription,
+                details: nil
+              ))
+            }
+          }
+        }
+        return
 
       case "convertMuseScore":
         guard let name = arguments["name"] as? String, !name.isEmpty else {
@@ -554,6 +596,7 @@ final class XenSynthPlatformBridge: NSObject, FlutterStreamHandler, UIDocumentPi
     midiEventSink = events
     do {
       try midiController.start()
+      pitchRecognitionManager.emitCurrentState()
       return nil
     } catch {
       midiEventSink = nil
@@ -571,6 +614,7 @@ final class XenSynthPlatformBridge: NSObject, FlutterStreamHandler, UIDocumentPi
     pendingDocumentResult?(nil)
     pendingDocumentResult = nil
     midiController.stop()
+    pitchRecognitionManager.close()
     playbackController.stop()
   }
 
@@ -598,6 +642,70 @@ final class XenSynthPlatformBridge: NSObject, FlutterStreamHandler, UIDocumentPi
     "playbackPreviewSeconds": 1.8,
     "pitchSnapEnabled": false,
   ]
+}
+
+extension XenSynthPlatformBridge: PitchRecognitionManagerListener {
+  func pitchRecognitionManager(
+    _ manager: PitchRecognitionManager,
+    didUpdateState state: [String: Any]
+  ) {
+    midiEventSink?(state)
+  }
+
+  func pitchRecognitionManager(
+    _ manager: PitchRecognitionManager,
+    didRecognizeNote pitch: Int,
+    velocity: Int,
+    down: Bool,
+    timeSeconds: Double
+  ) {
+    midiEventSink?([
+      "type": down ? "noteOn" : "noteOff",
+      "source": "microphone",
+      "channel": 0,
+      "pitch": pitch,
+      "note": pitch,
+      "noteNumber": pitch,
+      "velocity": down ? velocity : 0,
+      "time": timeSeconds,
+    ])
+  }
+
+  func pitchRecognitionManager(
+    _ manager: PitchRecognitionManager,
+    didRecognizePitch voiced: Bool,
+    frequencyHz: Double,
+    midiPitch: Double,
+    confidence: Double,
+    velocity: Int,
+    timeSeconds: Double
+  ) {
+    midiEventSink?([
+      "type": "pitch",
+      "source": "microphone",
+      "mode": PitchRecognitionMode.yin.rawValue,
+      "voiced": voiced,
+      "frequencyHz": frequencyHz,
+      "pitch": midiPitch,
+      "confidence": confidence,
+      "velocity": velocity,
+      "time": timeSeconds,
+    ])
+  }
+
+  func pitchRecognitionManager(
+    _ manager: PitchRecognitionManager,
+    didAnalyzeSpectrum magnitudes: [Float],
+    timeSeconds: Double
+  ) {
+    midiEventSink?([
+      "type": "spectrum",
+      "source": "microphone",
+      "mode": PitchRecognitionMode.fft.rawValue,
+      "time": timeSeconds,
+      "magnitudes": magnitudes,
+    ])
+  }
 }
 
 private enum BridgeError: LocalizedError {
