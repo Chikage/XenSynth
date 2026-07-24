@@ -180,6 +180,226 @@ void main() {
     },
   );
 
+  testWidgets(
+    'basis editor snaps Q and R to non-parallel neighbors with haptics',
+    (tester) async {
+      await tester.binding.setSurfaceSize(const Size(1000, 640));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+      var settings = const XenSynthSettings(
+        layoutMode: KeyboardLayoutMode.hexagonal,
+      );
+      final playedPitches = <double>[];
+      var hapticInteractions = 0;
+
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: StatefulBuilder(
+              builder: (context, setState) => HexKeyboardView(
+                score: null,
+                playhead: 0,
+                settings: settings,
+                activePitches: const {},
+                basisEditorVisible: true,
+                onBasisDirectionsChanged: (qDirection, rDirection) {
+                  setState(() {
+                    settings = settings.copyWith(
+                      hexQDirection: qDirection,
+                      hexRDirection: rDirection,
+                    );
+                  });
+                },
+                onControlInteraction: () => hapticInteractions++,
+                onPitchDown: (_, pitch, _) => playedPitches.add(pitch),
+                onPitchMove: (_, pitch, _) => playedPitches.add(pitch),
+                onPitchUp: (_) {},
+              ),
+            ),
+          ),
+        ),
+      );
+
+      expect(
+        find.byKey(const ValueKey('hex-basis-vector-editor')),
+        findsOneWidget,
+      );
+      expect(find.byKey(const ValueKey('hex-zoom-control')), findsNothing);
+      expect(
+        find.byKey(const ValueKey('hex-pan-rotation-control')),
+        findsNothing,
+      );
+
+      dynamic geometry() {
+        final paint = tester
+            .widgetList<CustomPaint>(find.byType(CustomPaint))
+            .singleWhere(
+              (item) =>
+                  item.painter.runtimeType.toString() ==
+                  '_HexBasisVectorPainter',
+            );
+        return (paint.painter as dynamic).geometry;
+      }
+
+      final viewOrigin = tester.getTopLeft(find.byType(HexKeyboardView));
+      final initial = geometry();
+      final origin = initial.origin as Offset;
+      final qEnd = initial.qEnd as Offset;
+      final qUnit = (qEnd - origin) / (qEnd - origin).distance;
+      final cosine = math.cos(math.pi / 3);
+      final sine = math.sin(math.pi / 3);
+      final positiveQUnit = Offset(
+        qUnit.dx * cosine - qUnit.dy * sine,
+        qUnit.dx * sine + qUnit.dy * cosine,
+      );
+      final qGesture = await tester.startGesture(viewOrigin + qEnd);
+      await qGesture.moveTo(
+        viewOrigin + origin + positiveQUnit * (qEnd - origin).distance,
+      );
+      await tester.pump();
+      await qGesture.up();
+      await tester.pump();
+
+      expect(settings.hexQDirection, HexNeighborDirection.positiveQ);
+      expect(
+        settings.hexQDirection.isParallelTo(settings.hexRDirection),
+        isFalse,
+      );
+
+      final updated = geometry();
+      final invalidGesture = await tester.startGesture(
+        viewOrigin + (updated.qEnd as Offset),
+      );
+      await invalidGesture.moveTo(viewOrigin + (updated.rEnd as Offset));
+      await tester.pump();
+      await invalidGesture.up();
+      await tester.pump();
+
+      expect(
+        settings.hexQDirection.isParallelTo(settings.hexRDirection),
+        isFalse,
+      );
+      expect(hapticInteractions, greaterThanOrEqualTo(4));
+      expect(playedPitches, isEmpty);
+      expect(tester.takeException(), isNull);
+    },
+  );
+
+  testWidgets('Q-R dashed vector preserves subtraction direction', (
+    tester,
+  ) async {
+    await tester.binding.setSurfaceSize(const Size(1000, 640));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+    var settings = const XenSynthSettings(
+      layoutMode: KeyboardLayoutMode.hexagonal,
+    );
+    late StateSetter rebuild;
+
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: StatefulBuilder(
+            builder: (context, setState) {
+              rebuild = setState;
+              return HexKeyboardView(
+                score: null,
+                playhead: 0,
+                settings: settings,
+                activePitches: const {},
+                basisEditorVisible: true,
+                onPitchDown: (_, _, _) {},
+                onPitchMove: (_, _, _) {},
+                onPitchUp: (_) {},
+              );
+            },
+          ),
+        ),
+      ),
+    );
+
+    dynamic geometry() {
+      final paint = tester
+          .widgetList<CustomPaint>(find.byType(CustomPaint))
+          .singleWhere(
+            (item) =>
+                item.painter.runtimeType.toString() == '_HexBasisVectorPainter',
+          );
+      return (paint.painter as dynamic).geometry;
+    }
+
+    final initial = geometry();
+    final initialDifference =
+        (initial.differenceEnd as Offset) - (initial.origin as Offset);
+    rebuild(() {
+      settings = settings.copyWith(
+        hexQDirection: HexNeighborDirection.negativeR,
+        hexRDirection: HexNeighborDirection.positiveQNegativeR,
+      );
+    });
+    await tester.pump();
+
+    final reversed = geometry();
+    final reversedDifference =
+        (reversed.differenceEnd as Offset) - (reversed.origin as Offset);
+    final dot =
+        initialDifference.dx * reversedDifference.dx +
+        initialDifference.dy * reversedDifference.dy;
+    expect(
+      dot / (initialDifference.distance * reversedDifference.distance),
+      closeTo(-1, 0.000001),
+    );
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('negative Q-R becomes a reversed R-Q dashed vector', (
+    tester,
+  ) async {
+    await tester.binding.setSurfaceSize(const Size(1000, 640));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: HexKeyboardView(
+            score: null,
+            playhead: 0,
+            settings: const XenSynthSettings(
+              layoutMode: KeyboardLayoutMode.hexagonal,
+              hexStepQ: 4,
+              hexStepR: 9,
+            ),
+            activePitches: const {},
+            basisEditorVisible: true,
+            onPitchDown: (_, _, _) {},
+            onPitchMove: (_, _, _) {},
+            onPitchUp: (_) {},
+          ),
+        ),
+      ),
+    );
+
+    final paint = tester
+        .widgetList<CustomPaint>(find.byType(CustomPaint))
+        .singleWhere(
+          (item) =>
+              item.painter.runtimeType.toString() == '_HexBasisVectorPainter',
+        );
+    final painter = paint.painter as dynamic;
+    final geometry = painter.geometry as dynamic;
+    final expectedEnd =
+        (geometry.origin as Offset) +
+        ((geometry.rUnit as Offset) - (geometry.qUnit as Offset)) *
+            (geometry.vectorLength as double);
+
+    expect(painter.reversesDifference, isTrue);
+    expect(painter.differenceLabel, 'R-Q +5');
+    expect(painter.displayedDifferenceEnd as Offset, expectedEnd);
+    expect(
+      painter.displayedDifferenceEnd as Offset,
+      isNot(geometry.differenceEnd as Offset),
+    );
+    expect(tester.takeException(), isNull);
+  });
+
   testWidgets('2D Hex maps input velocity to key brightness without trails', (
     tester,
   ) async {

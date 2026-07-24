@@ -31,6 +31,9 @@ class XenSynthSettings {
     int? hexPeriod,
     int hexStepQ = 9,
     int hexStepR = 4,
+    HexNeighborDirection hexQDirection =
+        HexNeighborDirection.positiveQNegativeR,
+    HexNeighborDirection hexRDirection = HexNeighborDirection.negativeR,
     this.hexGroupByOctave = false,
     this.hexRotationDegrees = 12,
     this.touchSensitivity = 0.4,
@@ -39,7 +42,9 @@ class XenSynthSettings {
     this.pitchSnapEnabled = false,
     this.spatialProjection = SpatialProjectionMode.obliquePerspective,
   }) : _hexStepQ = hexStepQ,
-       _hexStepR = hexStepR;
+       _hexStepR = hexStepR,
+       _hexQDirection = hexQDirection,
+       _hexRDirection = hexRDirection;
 
   static const double touchSensitivityPercentMin = 100;
   static const double touchSensitivityPercentMax = 150;
@@ -65,6 +70,8 @@ class XenSynthSettings {
   final int hexRows;
   final int _hexStepQ;
   final int _hexStepR;
+  final HexNeighborDirection _hexQDirection;
+  final HexNeighborDirection _hexRDirection;
   final bool hexGroupByOctave;
   final int hexRotationDegrees;
   final double touchSensitivity;
@@ -77,20 +84,31 @@ class XenSynthSettings {
   int get hexStepMaximum => hexStepMaximumForEdo(edo);
   int get hexStepQ => _normalizeHexStep(_hexStepQ, hexStepMaximum);
   int get hexStepR => _normalizeHexStep(_hexStepR, hexStepMaximum);
-  HexKeyboardConfiguration get hexKeyboardConfiguration =>
-      HexKeyboardConfiguration(
-        columns: hexColumns,
-        rows: hexRows,
-        period: hexPeriod,
-        // The UI Q axis is 60° counterclockwise from native +q, while the
-        // UI R axis points opposite native +r.
-        stepQ: hexStepQ - hexStepR,
-        stepR: -hexStepR,
-        groupByOctave: hexGroupByOctave,
-        radius: 24,
-        rotationDegrees: hexRotationDegrees,
-        frameAcuteAngleDegrees: 72,
-      ).normalized();
+  HexNeighborDirection get hexQDirection => _hexQDirection;
+  HexNeighborDirection get hexRDirection =>
+      _hexQDirection.isParallelTo(_hexRDirection)
+      ? HexNeighborDirection.firstNonParallelTo(_hexQDirection)
+      : _hexRDirection;
+  HexKeyboardConfiguration get hexKeyboardConfiguration {
+    final mapping = HexBasisStepMapping.resolve(
+      qDirection: hexQDirection,
+      rDirection: hexRDirection,
+      qStep: hexStepQ,
+      rStep: hexStepR,
+    );
+    return HexKeyboardConfiguration(
+      columns: hexColumns,
+      rows: hexRows,
+      period: hexPeriod,
+      stepQ: mapping.nativeStepQ,
+      stepR: mapping.nativeStepR,
+      groupByOctave: hexGroupByOctave,
+      radius: 24,
+      rotationDegrees: hexRotationDegrees,
+      frameAcuteAngleDegrees: 72,
+    ).normalized();
+  }
+
   bool get shouldSnapPlaybackPitch =>
       layoutMode.usesHexKeyboard && pitchSnapEnabled;
   bool get hapticFeedbackEnabled => hapticFeedbackStrength > 0;
@@ -172,6 +190,14 @@ class XenSynthSettings {
         _int(map['hexStepR'], defaults.hexStepR),
         hexStepMaximum,
       ),
+      hexQDirection: _hexDirection(
+        map['hexQDirection'],
+        defaults.hexQDirection,
+      ),
+      hexRDirection: _hexDirection(
+        map['hexRDirection'],
+        defaults.hexRDirection,
+      ),
       hexGroupByOctave: _bool(
         map['hexGroupByOctave'],
         defaults.hexGroupByOctave,
@@ -232,6 +258,8 @@ class XenSynthSettings {
     'hexPeriod': hexPeriod,
     'hexStepQ': hexStepQ,
     'hexStepR': hexStepR,
+    'hexQDirection': hexQDirection.index,
+    'hexRDirection': hexRDirection.index,
     'hexGroupByOctave': hexGroupByOctave,
     'hexRotationDegrees': hexRotationDegrees,
     'touchSensitivity': touchSensitivity.clamp(0.0, 1.0),
@@ -264,6 +292,8 @@ class XenSynthSettings {
     int? hexPeriod,
     int? hexStepQ,
     int? hexStepR,
+    HexNeighborDirection? hexQDirection,
+    HexNeighborDirection? hexRDirection,
     bool? hexGroupByOctave,
     int? hexRotationDegrees,
     double? touchSensitivity,
@@ -311,6 +341,8 @@ class XenSynthSettings {
         hexStepR ?? this.hexStepR,
         nextHexStepMaximum,
       ),
+      hexQDirection: hexQDirection ?? this.hexQDirection,
+      hexRDirection: hexRDirection ?? this.hexRDirection,
       hexGroupByOctave: hexGroupByOctave ?? this.hexGroupByOctave,
       hexRotationDegrees: hexRotationDegrees ?? this.hexRotationDegrees,
       touchSensitivity: (touchSensitivity ?? this.touchSensitivity).clamp(
@@ -334,15 +366,23 @@ class XenSynthSettings {
   }
 
   static int _normalizeHexStep(int value, int maximum) {
-    if (value == 0) return 1;
-    final magnitude = value.abs().clamp(1, maximum).toInt();
-    return value < 0 ? -magnitude : magnitude;
+    return value.clamp(-maximum, maximum).toInt();
   }
 
   static double _double(Object? value, double fallback) {
     return value is num
         ? value.toDouble()
         : double.tryParse('$value') ?? fallback;
+  }
+
+  static HexNeighborDirection _hexDirection(
+    Object? value,
+    HexNeighborDirection fallback,
+  ) {
+    final index = value is num ? value.toInt() : int.tryParse('$value');
+    return index == null
+        ? fallback
+        : HexNeighborDirection.fromIndex(index, fallback: fallback);
   }
 
   static double _normalizedTouchSensitivity(Object? value, double fallback) {

@@ -23,6 +23,96 @@ class AxialCoordinate {
   int get hashCode => Object.hash(q, r);
 }
 
+class HexNeighborDirection {
+  const HexNeighborDirection._(this.index, this.coordinate);
+
+  static const positiveQ = HexNeighborDirection._(
+    0,
+    AxialCoordinate(q: 1, r: 0),
+  );
+  static const positiveR = HexNeighborDirection._(
+    1,
+    AxialCoordinate(q: 0, r: 1),
+  );
+  static const negativeQPositiveR = HexNeighborDirection._(
+    2,
+    AxialCoordinate(q: -1, r: 1),
+  );
+  static const negativeQ = HexNeighborDirection._(
+    3,
+    AxialCoordinate(q: -1, r: 0),
+  );
+  static const negativeR = HexNeighborDirection._(
+    4,
+    AxialCoordinate(q: 0, r: -1),
+  );
+  static const positiveQNegativeR = HexNeighborDirection._(
+    5,
+    AxialCoordinate(q: 1, r: -1),
+  );
+
+  static const values = <HexNeighborDirection>[
+    positiveQ,
+    positiveR,
+    negativeQPositiveR,
+    negativeQ,
+    negativeR,
+    positiveQNegativeR,
+  ];
+
+  final int index;
+  final AxialCoordinate coordinate;
+
+  HexNeighborDirection get opposite => values[(index + 3) % values.length];
+
+  bool isParallelTo(HexNeighborDirection other) {
+    return this == other || opposite == other;
+  }
+
+  static HexNeighborDirection fromIndex(
+    int index, {
+    HexNeighborDirection fallback = positiveQ,
+  }) {
+    return index >= 0 && index < values.length ? values[index] : fallback;
+  }
+
+  static HexNeighborDirection firstNonParallelTo(
+    HexNeighborDirection direction, {
+    HexNeighborDirection preferred = negativeR,
+  }) {
+    if (!direction.isParallelTo(preferred)) return preferred;
+    return values.firstWhere((candidate) => !direction.isParallelTo(candidate));
+  }
+}
+
+class HexBasisStepMapping {
+  const HexBasisStepMapping({
+    required this.nativeStepQ,
+    required this.nativeStepR,
+  });
+
+  factory HexBasisStepMapping.resolve({
+    required HexNeighborDirection qDirection,
+    required HexNeighborDirection rDirection,
+    required int qStep,
+    required int rStep,
+  }) {
+    final q = qDirection.coordinate;
+    final r = rDirection.coordinate;
+    final determinant = q.q * r.r - q.r * r.q;
+    if (determinant == 0) {
+      throw ArgumentError('Hex basis directions must not be parallel');
+    }
+    return HexBasisStepMapping(
+      nativeStepQ: (qStep * r.r - q.r * rStep) ~/ determinant,
+      nativeStepR: (q.q * rStep - qStep * r.q) ~/ determinant,
+    );
+  }
+
+  final int nativeStepQ;
+  final int nativeStepR;
+}
+
 class HexPoint {
   const HexPoint(this.x, this.y);
 

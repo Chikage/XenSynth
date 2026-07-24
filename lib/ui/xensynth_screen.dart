@@ -67,7 +67,7 @@ class _XenSynthScreenState extends State<XenSynthScreen>
             final hideScoreVisualization =
                 (_controller.pitchRecognizing &&
                     _controller.hasMicrophoneTake) ||
-                _controller.activePitches.isNotEmpty;
+                _controller.scoreVisualizationSuppressed;
             final visualScore = hideScoreVisualization
                 ? null
                 : _controller.score;
@@ -129,6 +129,20 @@ class _XenSynthScreenState extends State<XenSynthScreen>
                             _controller.activePitchVelocities,
                         viewportController: _hexKeyboardViewportController,
                         onControlInteraction: _triggerHapticFeedback,
+                        basisEditorVisible: _settingsOpen,
+                        onBasisDirectionsChanged: (qDirection, rDirection) {
+                          unawaited(
+                            _controller.updateSettings(
+                              settings.copyWith(
+                                hexQDirection: qDirection,
+                                hexRDirection: rDirection,
+                              ),
+                            ),
+                          );
+                        },
+                        onBasisEditorDismissed: () => setState(() {
+                          _settingsOpen = false;
+                        }),
                         onPitchDown: _handlePitchDown,
                         onPitchMove: _handlePitchMove,
                         onPitchUp: _controller.noteUp,
@@ -244,11 +258,19 @@ class _XenSynthScreenState extends State<XenSynthScreen>
                 if (_settingsOpen) ...[
                   Positioned.fill(
                     top: ControlToolbar.height,
-                    child: GestureDetector(
-                      behavior: HitTestBehavior.opaque,
-                      onTap: () => setState(() => _settingsOpen = false),
-                      child: ColoredBox(
-                        color: Colors.black.withValues(alpha: 0.22),
+                    child: IgnorePointer(
+                      ignoring:
+                          settings.layoutMode == KeyboardLayoutMode.hexagonal,
+                      child: GestureDetector(
+                        behavior: HitTestBehavior.opaque,
+                        onTap: () => setState(() => _settingsOpen = false),
+                        child: ColoredBox(
+                          color:
+                              settings.layoutMode ==
+                                  KeyboardLayoutMode.hexagonal
+                              ? Colors.transparent
+                              : Colors.black.withValues(alpha: 0.22),
+                        ),
                       ),
                     ),
                   ),

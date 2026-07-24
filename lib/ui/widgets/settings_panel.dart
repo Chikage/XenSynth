@@ -49,34 +49,36 @@ class SettingsPanel extends StatelessWidget {
                   padding: const EdgeInsets.fromLTRB(10, 6, 10, 12),
                   children: [
                     const _SectionLabel('SURFACE'),
-                    SegmentedButton<KeyboardLayoutMode>(
-                      style: _compactButtonStyle,
-                      segments: [
-                        ButtonSegment(
-                          value: KeyboardLayoutMode.linear,
-                          label: Text('LINEAR'),
-                          icon: Icon(Icons.waterfall_chart_rounded, size: 15),
+                    _SpacedControl(
+                      child: SegmentedButton<KeyboardLayoutMode>(
+                        style: _compactButtonStyle,
+                        segments: [
+                          ButtonSegment(
+                            value: KeyboardLayoutMode.linear,
+                            label: Text('LINEAR'),
+                            icon: Icon(Icons.waterfall_chart_rounded, size: 15),
+                          ),
+                          ButtonSegment(
+                            value: KeyboardLayoutMode.hexagonal,
+                            label: Text('HEX'),
+                            icon: Icon(Icons.hive_outlined, size: 15),
+                            enabled:
+                                settings.pitchRecognitionMode !=
+                                PitchRecognitionMode.fft,
+                          ),
+                          ButtonSegment(
+                            value: KeyboardLayoutMode.spatial,
+                            label: Text('3D'),
+                            icon: Icon(Icons.view_in_ar_outlined, size: 15),
+                            enabled:
+                                settings.pitchRecognitionMode !=
+                                PitchRecognitionMode.fft,
+                          ),
+                        ],
+                        selected: {settings.layoutMode},
+                        onSelectionChanged: (value) => onChanged(
+                          settings.copyWith(layoutMode: value.single),
                         ),
-                        ButtonSegment(
-                          value: KeyboardLayoutMode.hexagonal,
-                          label: Text('HEX'),
-                          icon: Icon(Icons.hive_outlined, size: 15),
-                          enabled:
-                              settings.pitchRecognitionMode !=
-                              PitchRecognitionMode.fft,
-                        ),
-                        ButtonSegment(
-                          value: KeyboardLayoutMode.spatial,
-                          label: Text('3D'),
-                          icon: Icon(Icons.view_in_ar_outlined, size: 15),
-                          enabled:
-                              settings.pitchRecognitionMode !=
-                              PitchRecognitionMode.fft,
-                        ),
-                      ],
-                      selected: {settings.layoutMode},
-                      onSelectionChanged: (value) => onChanged(
-                        settings.copyWith(layoutMode: value.single),
                       ),
                     ),
                     _SliderRow(
@@ -94,14 +96,16 @@ class SettingsPanel extends StatelessWidget {
                       ),
                     ),
                     const _SectionLabel('AUDIO'),
-                    _IntegerInputRow(
+                    _SliderRow(
                       label: 'GM program',
-                      value: settings.program,
+                      value: settings.program.toDouble(),
                       min: 0,
                       max: 127,
-                      fieldKey: const ValueKey('gm-program-input'),
+                      divisions: 127,
+                      valueLabel: '${settings.program}',
+                      controlKey: const ValueKey('gm-program-slider'),
                       onChanged: (value) =>
-                          onChanged(settings.copyWith(program: value)),
+                          onChanged(settings.copyWith(program: value.round())),
                     ),
                     _SliderRow(
                       label: 'Volume',
@@ -142,43 +146,48 @@ class SettingsPanel extends StatelessWidget {
                     ),
                     if (pitchRecognitionAvailable) ...[
                       const _SectionLabel('MIC INPUT'),
-                      SegmentedButton<PitchRecognitionMode>(
-                        key: const ValueKey('pitch-recognition-mode'),
-                        style: _compactButtonStyle,
-                        showSelectedIcon: false,
-                        segments: const [
-                          ButtonSegment(
-                            value: PitchRecognitionMode.piano,
-                            label: Text('PIANO'),
-                            icon: Icon(Icons.piano_rounded, size: 15),
-                            tooltip: 'Polyphonic piano note recognition',
-                          ),
-                          ButtonSegment(
-                            value: PitchRecognitionMode.yin,
-                            label: Text('YIN'),
-                            icon: Icon(Icons.graphic_eq_rounded, size: 15),
-                            tooltip: 'Continuous monophonic pitch detection',
-                          ),
-                          ButtonSegment(
-                            value: PitchRecognitionMode.fft,
-                            label: Text('FFT'),
-                            icon: Icon(Icons.multiline_chart_rounded, size: 15),
-                            tooltip:
-                                'Live frequency spectrum on the linear ruler',
-                          ),
-                        ],
-                        selected: {settings.pitchRecognitionMode},
-                        onSelectionChanged: (value) {
-                          final mode = value.single;
-                          onChanged(
-                            settings.copyWith(
-                              pitchRecognitionMode: mode,
-                              layoutMode: mode == PitchRecognitionMode.fft
-                                  ? KeyboardLayoutMode.linear
-                                  : settings.layoutMode,
+                      _SpacedControl(
+                        child: SegmentedButton<PitchRecognitionMode>(
+                          key: const ValueKey('pitch-recognition-mode'),
+                          style: _compactButtonStyle,
+                          showSelectedIcon: false,
+                          segments: const [
+                            ButtonSegment(
+                              value: PitchRecognitionMode.piano,
+                              label: Text('PIANO'),
+                              icon: Icon(Icons.piano_rounded, size: 15),
+                              tooltip: 'Polyphonic piano note recognition',
                             ),
-                          );
-                        },
+                            ButtonSegment(
+                              value: PitchRecognitionMode.yin,
+                              label: Text('YIN'),
+                              icon: Icon(Icons.graphic_eq_rounded, size: 15),
+                              tooltip: 'Continuous monophonic pitch detection',
+                            ),
+                            ButtonSegment(
+                              value: PitchRecognitionMode.fft,
+                              label: Text('FFT'),
+                              icon: Icon(
+                                Icons.multiline_chart_rounded,
+                                size: 15,
+                              ),
+                              tooltip:
+                                  'Live frequency spectrum on the linear ruler',
+                            ),
+                          ],
+                          selected: {settings.pitchRecognitionMode},
+                          onSelectionChanged: (value) {
+                            final mode = value.single;
+                            onChanged(
+                              settings.copyWith(
+                                pitchRecognitionMode: mode,
+                                layoutMode: mode == PitchRecognitionMode.fft
+                                    ? KeyboardLayoutMode.linear
+                                    : settings.layoutMode,
+                              ),
+                            );
+                          },
+                        ),
                       ),
                       _SliderRow(
                         label: 'Mic sensitivity',
@@ -198,35 +207,37 @@ class SettingsPanel extends StatelessWidget {
                     ],
                     if (settings.layoutMode == KeyboardLayoutMode.spatial) ...[
                       const _SectionLabel('3D WATERFALL'),
-                      SegmentedButton<SpatialProjectionMode>(
-                        style: _compactButtonStyle.copyWith(
-                          minimumSize: const WidgetStatePropertyAll(
-                            Size(0, 42),
-                          ),
-                        ),
-                        showSelectedIcon: false,
-                        segments: const [
-                          ButtonSegment(
-                            value: SpatialProjectionMode.cabinet,
-                            label: Text(
-                              'CABINET\nPROJECTION',
-                              textAlign: TextAlign.center,
+                      _SpacedControl(
+                        child: SegmentedButton<SpatialProjectionMode>(
+                          style: _compactButtonStyle.copyWith(
+                            minimumSize: const WidgetStatePropertyAll(
+                              Size(0, 42),
                             ),
-                            tooltip:
-                                'Cabinet projection (1:2 oblique dimetric)',
                           ),
-                          ButtonSegment(
-                            value: SpatialProjectionMode.obliquePerspective,
-                            label: Text(
-                              'OBLIQUE\nPERSPECTIVE',
-                              textAlign: TextAlign.center,
+                          showSelectedIcon: false,
+                          segments: const [
+                            ButtonSegment(
+                              value: SpatialProjectionMode.cabinet,
+                              label: Text(
+                                'CABINET\nPROJECTION',
+                                textAlign: TextAlign.center,
+                              ),
+                              tooltip:
+                                  'Cabinet projection (1:2 oblique dimetric)',
                             ),
-                            tooltip: 'Oblique perspective projection',
+                            ButtonSegment(
+                              value: SpatialProjectionMode.obliquePerspective,
+                              label: Text(
+                                'OBLIQUE\nPERSPECTIVE',
+                                textAlign: TextAlign.center,
+                              ),
+                              tooltip: 'Oblique perspective projection',
+                            ),
+                          ],
+                          selected: {settings.spatialProjection},
+                          onSelectionChanged: (value) => onChanged(
+                            settings.copyWith(spatialProjection: value.single),
                           ),
-                        ],
-                        selected: {settings.spatialProjection},
-                        onSelectionChanged: (value) => onChanged(
-                          settings.copyWith(spatialProjection: value.single),
                         ),
                       ),
                     ],
@@ -237,6 +248,7 @@ class SettingsPanel extends StatelessWidget {
                           Expanded(
                             child: _IntegerInputRow(
                               label: 'Columns',
+                              labelAbove: true,
                               value: settings.hexColumns,
                               min: 4,
                               max: 64,
@@ -250,6 +262,7 @@ class SettingsPanel extends StatelessWidget {
                           Expanded(
                             child: _IntegerInputRow(
                               label: 'Rows',
+                              labelAbove: true,
                               value: settings.hexRows,
                               min: 3,
                               max: 32,
@@ -265,11 +278,11 @@ class SettingsPanel extends StatelessWidget {
                           Expanded(
                             child: _IntegerInputRow(
                               label: 'Q step',
+                              labelAbove: true,
                               value: settings.hexStepQ,
                               min: -hexStepMaximum,
                               max: hexStepMaximum,
                               fieldKey: const ValueKey('hex-q-step-input'),
-                              isValueAllowed: (value) => value != 0,
                               onChanged: (value) =>
                                   onChanged(settings.copyWith(hexStepQ: value)),
                             ),
@@ -278,11 +291,11 @@ class SettingsPanel extends StatelessWidget {
                           Expanded(
                             child: _IntegerInputRow(
                               label: 'R step',
+                              labelAbove: true,
                               value: settings.hexStepR,
                               min: -hexStepMaximum,
                               max: hexStepMaximum,
                               fieldKey: const ValueKey('hex-r-step-input'),
-                              isValueAllowed: (value) => value != 0,
                               onChanged: (value) =>
                                   onChanged(settings.copyWith(hexStepR: value)),
                             ),
@@ -376,7 +389,7 @@ class _SectionLabel extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Padding(
-      padding: const EdgeInsets.only(top: 9, bottom: 5),
+      padding: const EdgeInsets.only(top: 9, bottom: 4),
       child: Text(
         label,
         style: const TextStyle(
@@ -386,6 +399,20 @@ class _SectionLabel extends StatelessWidget {
           letterSpacing: 1,
         ),
       ),
+    );
+  }
+}
+
+class _SpacedControl extends StatelessWidget {
+  const _SpacedControl({required this.child});
+
+  final Widget child;
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 2),
+      child: child,
     );
   }
 }
@@ -421,53 +448,102 @@ class _SliderRow extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final sliderTheme = SliderTheme.of(context);
-    return SizedBox(
-      height: 32,
-      child: Row(
-        children: [
-          SizedBox(
-            width: 88,
-            child: Text(
-              label,
-              style: const TextStyle(
-                color: AppPalette.secondaryText,
-                fontSize: 9,
+    final currentValue = value.clamp(min, max).toDouble();
+    final step = (max - min) / divisions;
+
+    double steppedValue(int direction) {
+      return (currentValue + step * direction).clamp(min, max).toDouble();
+    }
+
+    return _SpacedControl(
+      child: SizedBox(
+        height: 36,
+        child: Column(
+          children: [
+            SizedBox(
+              height: 10,
+              child: Row(
+                children: [
+                  Expanded(
+                    child: Text(
+                      label,
+                      maxLines: 1,
+                      overflow: TextOverflow.fade,
+                      softWrap: false,
+                      style: const TextStyle(
+                        color: AppPalette.secondaryText,
+                        fontSize: 9,
+                        height: 1,
+                      ),
+                    ),
+                  ),
+                  SizedBox(
+                    width: 46,
+                    child: Text(
+                      valueLabel,
+                      textAlign: TextAlign.right,
+                      style: const TextStyle(
+                        color: AppPalette.primaryText,
+                        fontSize: 9,
+                        height: 1,
+                      ),
+                    ),
+                  ),
+                ],
               ),
             ),
-          ),
-          Expanded(
-            child: SliderTheme(
-              data: sliderTheme.copyWith(
-                trackHeight: 2,
-                thumbShape: const RoundSliderThumbShape(enabledThumbRadius: 5),
-                overlayShape: const RoundSliderOverlayShape(overlayRadius: 12),
-              ),
-              child: SizedBox(
-                height: 28,
-                child: Slider(
-                  key: controlKey,
-                  value: value.clamp(min, max),
-                  min: min,
-                  max: max,
-                  divisions: divisions,
-                  label: valueLabel,
-                  onChanged: onChanged,
-                ),
+            SizedBox(
+              height: 26,
+              child: Row(
+                children: [
+                  _CompactIconButton(
+                    buttonKey: ValueKey('settings-$label-slider-decrease'),
+                    tooltip: 'Decrease $label',
+                    onPressed: currentValue <= min
+                        ? null
+                        : () => onChanged(steppedValue(-1)),
+                    icon: Icons.remove_rounded,
+                    dimension: 26,
+                  ),
+                  Expanded(
+                    child: SliderTheme(
+                      data: sliderTheme.copyWith(
+                        trackHeight: 2,
+                        thumbShape: const RoundSliderThumbShape(
+                          enabledThumbRadius: 5,
+                        ),
+                        overlayShape: const RoundSliderOverlayShape(
+                          overlayRadius: 12,
+                        ),
+                      ),
+                      child: SizedBox(
+                        height: 26,
+                        child: Slider(
+                          key: controlKey,
+                          value: currentValue,
+                          min: min,
+                          max: max,
+                          divisions: divisions,
+                          label: valueLabel,
+                          onChanged: onChanged,
+                        ),
+                      ),
+                    ),
+                  ),
+                  _CompactIconButton(
+                    buttonKey: ValueKey('settings-$label-slider-increase'),
+                    tooltip: 'Increase $label',
+                    onPressed: currentValue >= max
+                        ? null
+                        : () => onChanged(steppedValue(1)),
+                    icon: Icons.add_rounded,
+                    dimension: 26,
+                  ),
+                ],
               ),
             ),
-          ),
-          SizedBox(
-            width: 46,
-            child: Text(
-              valueLabel,
-              textAlign: TextAlign.right,
-              style: const TextStyle(
-                color: AppPalette.primaryText,
-                fontSize: 9,
-              ),
-            ),
-          ),
-        ],
+          ],
+        ),
       ),
     );
   }
@@ -486,32 +562,34 @@ class _SwitchRow extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return SizedBox(
-      height: 32,
-      child: Row(
-        children: [
-          Expanded(
-            child: Text(
-              label,
-              style: const TextStyle(
-                color: AppPalette.secondaryText,
-                fontSize: 9,
+    return _SpacedControl(
+      child: SizedBox(
+        height: 32,
+        child: Row(
+          children: [
+            Expanded(
+              child: Text(
+                label,
+                style: const TextStyle(
+                  color: AppPalette.secondaryText,
+                  fontSize: 9,
+                ),
               ),
             ),
-          ),
-          SizedBox(
-            width: 40,
-            height: 24,
-            child: FittedBox(
-              fit: BoxFit.contain,
-              child: Switch.adaptive(
-                value: value,
-                onChanged: onChanged,
-                materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+            SizedBox(
+              width: 40,
+              height: 24,
+              child: FittedBox(
+                fit: BoxFit.contain,
+                child: Switch.adaptive(
+                  value: value,
+                  onChanged: onChanged,
+                  materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                ),
               ),
             ),
-          ),
-        ],
+          ],
+        ),
       ),
     );
   }
@@ -525,7 +603,7 @@ class _IntegerInputRow extends StatefulWidget {
     required this.max,
     required this.onChanged,
     this.fieldKey,
-    this.isValueAllowed,
+    this.labelAbove = false,
   });
 
   final String label;
@@ -534,7 +612,7 @@ class _IntegerInputRow extends StatefulWidget {
   final int max;
   final ValueChanged<int> onChanged;
   final Key? fieldKey;
-  final bool Function(int value)? isValueAllowed;
+  final bool labelAbove;
 
   @override
   State<_IntegerInputRow> createState() => _IntegerInputRowState();
@@ -572,9 +650,7 @@ class _IntegerInputRowState extends State<_IntegerInputRow> {
   void _step(int delta) {
     final parsed = int.tryParse(_controller.text);
     final current = _normalizedValue(parsed ?? widget.value);
-    var value = current + delta;
-    if (!_isValueAllowed(value) && value == 0) value += delta;
-    value = _normalizedValue(value);
+    final value = _normalizedValue(current + delta);
     _setText(value);
     if (value != widget.value) widget.onChanged(value);
   }
@@ -587,24 +663,17 @@ class _IntegerInputRowState extends State<_IntegerInputRow> {
   }
 
   bool _isValueAllowed(int value) {
-    return value >= widget.min &&
-        value <= widget.max &&
-        (widget.isValueAllowed?.call(value) ?? true);
+    return value >= widget.min && value <= widget.max;
   }
 
   int _normalizedValue(int value) {
     if (_isValueAllowed(value)) return value;
-    if (value == 0 && widget.isValueAllowed?.call(0) == false) {
-      return widget.value < 0 ? -1 : 1;
-    }
     return value.clamp(widget.min, widget.max).toInt();
   }
 
   int _stepValue(int delta) {
     final current = _normalizedValue(widget.value);
-    var value = current + delta;
-    if (!_isValueAllowed(value) && value == 0) value += delta;
-    return _normalizedValue(value);
+    return _normalizedValue(current + delta);
   }
 
   int get _maxInputLength {
@@ -633,87 +702,117 @@ class _IntegerInputRowState extends State<_IntegerInputRow> {
 
   @override
   Widget build(BuildContext context) {
-    return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 2),
-      child: ToolSurface(
-        color: AppPalette.raisedSurface,
-        child: SizedBox(
-          height: 32,
-          child: Row(
-            children: [
-              Expanded(
-                child: Padding(
-                  padding: const EdgeInsets.only(left: 7),
-                  child: Text(
-                    widget.label,
-                    maxLines: 1,
-                    overflow: TextOverflow.fade,
-                    softWrap: false,
-                    style: const TextStyle(
-                      color: AppPalette.secondaryText,
-                      fontSize: 9,
+    return _SpacedControl(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          if (widget.labelAbove)
+            Padding(
+              padding: const EdgeInsets.only(left: 7, bottom: 2),
+              child: _buildLabel(),
+            ),
+          ToolSurface(
+            key: ValueKey('settings-${widget.label}-input-frame'),
+            color: AppPalette.raisedSurface,
+            child: SizedBox(
+              height: 32,
+              child: Row(
+                mainAxisAlignment: widget.labelAbove
+                    ? MainAxisAlignment.center
+                    : MainAxisAlignment.start,
+                children: [
+                  if (!widget.labelAbove)
+                    Expanded(
+                      child: Padding(
+                        padding: const EdgeInsets.only(left: 7),
+                        child: _buildLabel(),
+                      ),
+                    ),
+                  _buildStepButton(
+                    delta: -1,
+                    icon: Icons.remove_rounded,
+                    tooltip: 'Decrease ${widget.label}',
+                  ),
+                  SizedBox(
+                    width: 46,
+                    height: 26,
+                    child: TextField(
+                      key: widget.fieldKey,
+                      controller: _controller,
+                      focusNode: _focusNode,
+                      keyboardType: TextInputType.numberWithOptions(
+                        signed: widget.min < 0,
+                      ),
+                      textInputAction: TextInputAction.done,
+                      textAlign: TextAlign.center,
+                      selectAllOnFocus: true,
+                      maxLength: _maxInputLength,
+                      inputFormatters: [_integerInputFormatter],
+                      cursorColor: AppPalette.accent,
+                      style: const TextStyle(
+                        color: AppPalette.primaryText,
+                        fontSize: 10,
+                        fontWeight: FontWeight.w700,
+                      ),
+                      decoration: const InputDecoration(
+                        counterText: '',
+                        isDense: true,
+                        contentPadding: EdgeInsets.symmetric(
+                          horizontal: 6,
+                          vertical: 6,
+                        ),
+                        enabledBorder: OutlineInputBorder(
+                          borderSide: BorderSide(color: AppPalette.line),
+                          borderRadius: BorderRadius.all(Radius.circular(5)),
+                        ),
+                        focusedBorder: OutlineInputBorder(
+                          borderSide: BorderSide(color: AppPalette.accent),
+                          borderRadius: BorderRadius.all(Radius.circular(5)),
+                        ),
+                      ),
+                      onChanged: _handleChanged,
+                      onSubmitted: (_) => _commit(),
                     ),
                   ),
-                ),
-              ),
-              _CompactIconButton(
-                onPressed: _stepValue(-1) == widget.value
-                    ? null
-                    : () => _step(-1),
-                icon: Icons.remove_rounded,
-              ),
-              SizedBox(
-                width: 46,
-                height: 26,
-                child: TextField(
-                  key: widget.fieldKey,
-                  controller: _controller,
-                  focusNode: _focusNode,
-                  keyboardType: TextInputType.numberWithOptions(
-                    signed: widget.min < 0,
+                  _buildStepButton(
+                    delta: 1,
+                    icon: Icons.add_rounded,
+                    tooltip: 'Increase ${widget.label}',
                   ),
-                  textInputAction: TextInputAction.done,
-                  textAlign: TextAlign.center,
-                  selectAllOnFocus: true,
-                  maxLength: _maxInputLength,
-                  inputFormatters: [_integerInputFormatter],
-                  cursorColor: AppPalette.accent,
-                  style: const TextStyle(
-                    color: AppPalette.primaryText,
-                    fontSize: 10,
-                    fontWeight: FontWeight.w700,
-                  ),
-                  decoration: const InputDecoration(
-                    counterText: '',
-                    isDense: true,
-                    contentPadding: EdgeInsets.symmetric(
-                      horizontal: 6,
-                      vertical: 6,
-                    ),
-                    enabledBorder: OutlineInputBorder(
-                      borderSide: BorderSide(color: AppPalette.line),
-                      borderRadius: BorderRadius.all(Radius.circular(5)),
-                    ),
-                    focusedBorder: OutlineInputBorder(
-                      borderSide: BorderSide(color: AppPalette.accent),
-                      borderRadius: BorderRadius.all(Radius.circular(5)),
-                    ),
-                  ),
-                  onChanged: _handleChanged,
-                  onSubmitted: (_) => _commit(),
-                ),
+                ],
               ),
-              _CompactIconButton(
-                onPressed: _stepValue(1) == widget.value
-                    ? null
-                    : () => _step(1),
-                icon: Icons.add_rounded,
-              ),
-            ],
+            ),
           ),
-        ),
+        ],
       ),
     );
+  }
+
+  Widget _buildLabel() {
+    return Text(
+      widget.label,
+      maxLines: 1,
+      overflow: TextOverflow.fade,
+      softWrap: false,
+      style: const TextStyle(color: AppPalette.secondaryText, fontSize: 9),
+    );
+  }
+
+  Widget _buildStepButton({
+    required int delta,
+    required IconData icon,
+    required String tooltip,
+  }) {
+    final button = _CompactIconButton(
+      buttonKey: ValueKey(
+        'settings-${widget.label}-input-${delta < 0 ? 'decrease' : 'increase'}',
+      ),
+      tooltip: tooltip,
+      onPressed: _stepValue(delta) == widget.value ? null : () => _step(delta),
+      icon: icon,
+    );
+    if (!widget.labelAbove) return button;
+    return Expanded(child: Center(child: button));
   }
 
   @override
@@ -727,18 +826,30 @@ class _IntegerInputRowState extends State<_IntegerInputRow> {
 }
 
 class _CompactIconButton extends StatelessWidget {
-  const _CompactIconButton({required this.onPressed, required this.icon});
+  const _CompactIconButton({
+    required this.onPressed,
+    required this.icon,
+    this.buttonKey,
+    this.tooltip,
+    this.dimension = 28,
+  });
 
   final VoidCallback? onPressed;
   final IconData icon;
+  final Key? buttonKey;
+  final String? tooltip;
+  final double dimension;
 
   @override
   Widget build(BuildContext context) {
     return IconButton(
+      key: buttonKey,
+      tooltip: tooltip,
       onPressed: onPressed,
       padding: EdgeInsets.zero,
-      constraints: const BoxConstraints.tightFor(width: 28, height: 28),
+      constraints: BoxConstraints.tightFor(width: dimension, height: dimension),
       visualDensity: VisualDensity.compact,
+      style: const ButtonStyle(tapTargetSize: MaterialTapTargetSize.shrinkWrap),
       icon: Icon(icon, size: 14),
     );
   }

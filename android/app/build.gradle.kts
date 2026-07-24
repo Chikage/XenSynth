@@ -55,6 +55,13 @@ android {
     }
 
     buildTypes {
+        getByName("release") {
+            proguardFiles(
+                getDefaultProguardFile("proguard-android-optimize.txt"),
+                "proguard-rules.pro",
+            )
+        }
+
         configureEach {
             signingConfigs.findByName("shared")?.let {
                 signingConfig = it

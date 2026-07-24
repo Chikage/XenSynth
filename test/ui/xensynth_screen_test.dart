@@ -362,8 +362,46 @@ void main() {
     controller.noteUp(8);
   });
 
+  testWidgets('opening settings in Hex mode exposes the basis editor', (
+    tester,
+  ) async {
+    await tester.binding.setSurfaceSize(const Size(1000, 640));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+    final controller = XenSynthController()
+      ..settings = const XenSynthSettings(
+        layoutMode: KeyboardLayoutMode.hexagonal,
+      )
+      ..initialized = true;
+    addTearDown(controller.dispose);
+
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: AppPalette.theme(),
+        home: XenSynthScreen(controller: controller),
+      ),
+    );
+    await tester.tap(find.byTooltip('Settings · hold to reset'));
+    await tester.pump();
+
+    expect(
+      find.byKey(const ValueKey('hex-basis-vector-editor')),
+      findsOneWidget,
+    );
+    expect(
+      tester
+          .widget<HexKeyboardView>(find.byType(HexKeyboardView))
+          .basisEditorVisible,
+      isTrue,
+    );
+
+    final keyboardRect = tester.getRect(find.byType(HexKeyboardView));
+    await tester.tapAt(Offset(keyboardRect.left + 18, keyboardRect.center.dy));
+    await tester.pump();
+    expect(find.byKey(const ValueKey('hex-basis-vector-editor')), findsNothing);
+  });
+
   testWidgets(
-    'live notes temporarily hide loaded score visuals in every layout',
+    'live notes hide score visuals in every layout until a new score loads',
     (tester) async {
       const nativeChannel = MethodChannel('icu.ringona.xensynth/platform');
       final messenger =
@@ -401,11 +439,13 @@ void main() {
         );
         await tester.pump();
         expect(displayedScore(), same(_loadedScore), reason: mode.name);
+        expect(controller.scoreVisualizationSuppressed, isFalse);
 
         controller.noteDown(100, 60, 96);
         controller.noteDown(101, 64, 88);
         await tester.pump();
         expect(displayedScore(), isNull, reason: mode.name);
+        expect(controller.scoreVisualizationSuppressed, isTrue);
 
         controller.noteUp(100);
         await tester.pump();
@@ -413,7 +453,23 @@ void main() {
 
         controller.noteUp(101);
         await tester.pump();
-        expect(displayedScore(), same(_loadedScore), reason: mode.name);
+        expect(displayedScore(), isNull, reason: mode.name);
+        expect(controller.scoreVisualizationSuppressed, isTrue);
+
+        final replacement = await rootBundle.load(
+          'assets/scores/demo_26edo.midx',
+        );
+        await controller.loadScoreBytes(
+          replacement.buffer.asUint8List(
+            replacement.offsetInBytes,
+            replacement.lengthInBytes,
+          ),
+          'replacement.midx',
+        );
+        await tester.pump();
+        expect(displayedScore(), isNotNull, reason: mode.name);
+        expect(displayedScore(), isNot(same(_loadedScore)), reason: mode.name);
+        expect(controller.scoreVisualizationSuppressed, isFalse);
 
         await tester.pumpWidget(const SizedBox());
         controller.dispose();

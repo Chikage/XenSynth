@@ -2,6 +2,38 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:xensynth/core/hex_keyboard.dart';
 
 void main() {
+  group('Hex basis directions', () {
+    test('contains exactly the six computable neighboring cells', () {
+      expect(
+        HexNeighborDirection.values.map((item) => item.coordinate).toSet(),
+        <AxialCoordinate>{
+          const AxialCoordinate(q: 1, r: 0),
+          const AxialCoordinate(q: 0, r: 1),
+          const AxialCoordinate(q: -1, r: 1),
+          const AxialCoordinate(q: -1, r: 0),
+          const AxialCoordinate(q: 0, r: -1),
+          const AxialCoordinate(q: 1, r: -1),
+        },
+      );
+      for (final direction in HexNeighborDirection.values) {
+        expect(HexGeometry.distance(direction.coordinate), 1);
+        expect(direction.isParallelTo(direction.opposite), isTrue);
+      }
+    });
+
+    test('rejects parallel bases', () {
+      expect(
+        () => HexBasisStepMapping.resolve(
+          qDirection: HexNeighborDirection.positiveQ,
+          rDirection: HexNeighborDirection.negativeQ,
+          qStep: 9,
+          rStep: 4,
+        ),
+        throwsArgumentError,
+      );
+    });
+  });
+
   group('HexaKeyboardLayoutEngine', () {
     test('builds the normalized default window', () {
       final layout = HexaKeyboardLayoutEngine.build();

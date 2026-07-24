@@ -118,7 +118,106 @@ void main() {
     expect(find.text('OFF'), findsOneWidget);
   });
 
-  testWidgets('GM program accepts direct numeric input', (tester) async {
+  testWidgets('settings controls keep clear vertical separation', (
+    tester,
+  ) async {
+    await tester.binding.setSurfaceSize(const Size(874, 600));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: AppPalette.theme(),
+        home: Scaffold(
+          body: Align(
+            alignment: Alignment.topRight,
+            child: SizedBox(
+              height: 540,
+              child: SettingsPanel(
+                settings: const XenSynthSettings(),
+                onChanged: (_) {},
+                onReset: () {},
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+
+    final layoutSelector = find.byType(SegmentedButton<KeyboardLayoutMode>);
+    expect(
+      tester.getTopLeft(find.text('Touch vibration')).dy -
+          tester.getBottomLeft(layoutSelector).dy,
+      greaterThanOrEqualTo(4),
+    );
+    expect(
+      tester.getTopLeft(find.text('Reverb')).dy -
+          tester.getBottomLeft(find.byTooltip('Increase Volume')).dy,
+      greaterThanOrEqualTo(4),
+    );
+    expect(
+      tester.getTopLeft(find.text('AUDIO')).dy -
+          tester.getBottomLeft(find.byTooltip('Increase Touch vibration')).dy,
+      greaterThanOrEqualTo(10),
+    );
+  });
+
+  testWidgets('slider step buttons nudge one division and stop at limits', (
+    tester,
+  ) async {
+    await tester.binding.setSurfaceSize(const Size(874, 402));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+
+    var settings = const XenSynthSettings(volumeGain: 0.5);
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: AppPalette.theme(),
+        home: Scaffold(
+          body: Align(
+            alignment: Alignment.topRight,
+            child: SizedBox(
+              height: 330,
+              child: StatefulBuilder(
+                builder: (context, setState) => SettingsPanel(
+                  settings: settings,
+                  onChanged: (value) => setState(() => settings = value),
+                  onReset: () {},
+                ),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+
+    final volumeSlider = find.byType(Slider).at(1);
+    expect(tester.getSize(volumeSlider).width, greaterThan(200));
+    expect(
+      tester.getRect(find.byTooltip('Decrease Volume')).right,
+      lessThanOrEqualTo(tester.getRect(volumeSlider).left),
+    );
+    expect(
+      tester.getRect(find.byTooltip('Increase Volume')).left,
+      greaterThanOrEqualTo(tester.getRect(volumeSlider).right),
+    );
+
+    await tester.tap(find.byTooltip('Decrease Volume'));
+    await tester.pump();
+    expect(settings.volumeGain, closeTo(0.49, 0.000001));
+
+    await tester.tap(find.byTooltip('Increase Volume'));
+    await tester.pump();
+    expect(settings.volumeGain, closeTo(0.5, 0.000001));
+
+    await tester.tap(find.byTooltip('Increase Touch vibration'));
+    await tester.pump();
+    expect(settings.hapticFeedbackStrength, 1);
+    final upperLimitButton = tester.widget<IconButton>(
+      find.byKey(const ValueKey('settings-Touch vibration-slider-increase')),
+    );
+    expect(upperLimitButton.onPressed, isNull);
+  });
+
+  testWidgets('GM program uses a slider with step buttons', (tester) async {
     await tester.binding.setSurfaceSize(const Size(874, 402));
     addTearDown(() => tester.binding.setSurfaceSize(null));
 
@@ -144,28 +243,31 @@ void main() {
       ),
     );
 
-    final input = find.byKey(const ValueKey('gm-program-input'));
-    expect(input, findsOneWidget);
+    final slider = find.byKey(const ValueKey('gm-program-slider'));
+    expect(slider, findsOneWidget);
     expect(find.text('SETTINGS'), findsNothing);
     expect(find.byTooltip('Close settings'), findsNothing);
 
-    await tester.enterText(input, '42');
+    tester.widget<Slider>(slider).onChanged!(42);
     await tester.pump();
     expect(settings.program, 42);
 
-    await tester.tap(find.byIcon(Icons.add_rounded));
+    await tester.tap(find.byTooltip('Increase GM program'));
     await tester.pump();
     expect(settings.program, 43);
 
-    await tester.tap(find.byIcon(Icons.remove_rounded));
+    await tester.tap(find.byTooltip('Decrease GM program'));
     await tester.pump();
     expect(settings.program, 42);
 
-    await tester.enterText(input, '999');
-    await tester.testTextInput.receiveAction(TextInputAction.done);
+    tester.widget<Slider>(slider).onChanged!(127);
     await tester.pump();
     expect(settings.program, 127);
     expect(find.text('127'), findsOneWidget);
+    final increaseButton = tester.widget<IconButton>(
+      find.byKey(const ValueKey('settings-GM program-slider-increase')),
+    );
+    expect(increaseButton.onPressed, isNull);
   });
 
   testWidgets('hex settings follow EDO and show Android touch semantics', (
@@ -253,6 +355,11 @@ void main() {
       (widget) =>
           widget is Scrollable && widget.axisDirection == AxisDirection.down,
     );
+    await tester.scrollUntilVisible(
+      find.text('CABINET\nPROJECTION'),
+      40,
+      scrollable: settingsScrollable,
+    );
     expect(find.text('3D WATERFALL'), findsOneWidget);
     expect(find.text('CABINET\nPROJECTION'), findsOneWidget);
     expect(find.text('OBLIQUE\nPERSPECTIVE'), findsOneWidget);
@@ -261,11 +368,16 @@ void main() {
       findsOneWidget,
     );
     await tester.scrollUntilVisible(
-      find.text('Q step'),
-      120,
+      find.text('HEX KEYBOARD'),
+      40,
       scrollable: settingsScrollable,
     );
     expect(find.text('HEX KEYBOARD'), findsOneWidget);
+    await tester.scrollUntilVisible(
+      find.text('Q step'),
+      40,
+      scrollable: settingsScrollable,
+    );
     expect(find.text('Q step'), findsOneWidget);
     expect(find.text('R step'), findsOneWidget);
     expect(tester.takeException(), isNull);
@@ -315,20 +427,44 @@ void main() {
     expect(find.byKey(const ValueKey('hex-columns-input')), findsOneWidget);
     expect(find.byKey(const ValueKey('hex-rows-input')), findsOneWidget);
     expect(find.byKey(const ValueKey('hex-r-step-input')), findsOneWidget);
+    for (final entry in <String, Key>{
+      'Columns': const ValueKey('hex-columns-input'),
+      'Rows': const ValueKey('hex-rows-input'),
+      'Q step': const ValueKey('hex-q-step-input'),
+      'R step': const ValueKey('hex-r-step-input'),
+    }.entries) {
+      expect(
+        tester.getBottomLeft(find.text(entry.key)).dy,
+        lessThanOrEqualTo(tester.getTopLeft(find.byKey(entry.value)).dy),
+      );
 
-    await tester.enterText(
-      find.byKey(const ValueKey('hex-columns-input')),
-      '42',
-    );
-    await tester.enterText(find.byKey(const ValueKey('hex-rows-input')), '12');
-    await tester.enterText(
-      find.byKey(const ValueKey('hex-q-step-input')),
-      '-5',
-    );
-    await tester.enterText(
-      find.byKey(const ValueKey('hex-r-step-input')),
-      '-99',
-    );
+      final frame = tester.getRect(
+        find.byKey(ValueKey('settings-${entry.key}-input-frame')),
+      );
+      final field = tester.getRect(find.byKey(entry.value));
+      final decrease = tester.getRect(
+        find.byKey(ValueKey('settings-${entry.key}-input-decrease')),
+      );
+      final increase = tester.getRect(
+        find.byKey(ValueKey('settings-${entry.key}-input-increase')),
+      );
+      expect(decrease.center.dx, closeTo((frame.left + field.left) / 2, 0.5));
+      expect(increase.center.dx, closeTo((field.right + frame.right) / 2, 0.5));
+    }
+
+    for (final entry in <Key, String>{
+      const ValueKey('hex-columns-input'): '42',
+      const ValueKey('hex-rows-input'): '12',
+      const ValueKey('hex-q-step-input'): '-5',
+      const ValueKey('hex-r-step-input'): '-99',
+    }.entries) {
+      await tester.scrollUntilVisible(
+        find.byKey(entry.key),
+        80,
+        scrollable: scrollable,
+      );
+      await tester.enterText(find.byKey(entry.key), entry.value);
+    }
     await tester.testTextInput.receiveAction(TextInputAction.done);
     await tester.pump();
 
@@ -337,10 +473,40 @@ void main() {
     expect(settings.hexStepQ, -5);
     expect(settings.hexStepR, -6);
 
+    await tester.enterText(find.byKey(const ValueKey('hex-q-step-input')), '0');
     await tester.enterText(find.byKey(const ValueKey('hex-r-step-input')), '0');
     await tester.testTextInput.receiveAction(TextInputAction.done);
     await tester.pump();
-    expect(settings.hexStepR, -1);
-    expect(find.text('-1'), findsOneWidget);
+    expect(settings.hexStepQ, 0);
+    expect(settings.hexStepR, 0);
+    expect(
+      tester
+          .widget<TextField>(find.byKey(const ValueKey('hex-q-step-input')))
+          .controller
+          ?.text,
+      '0',
+    );
+    expect(
+      tester
+          .widget<TextField>(find.byKey(const ValueKey('hex-r-step-input')))
+          .controller
+          ?.text,
+      '0',
+    );
+
+    final decreaseQ = find.byKey(
+      const ValueKey('settings-Q step-input-decrease'),
+    );
+    final increaseQ = find.byKey(
+      const ValueKey('settings-Q step-input-increase'),
+    );
+    await tester.ensureVisible(decreaseQ);
+    await tester.pumpAndSettle();
+    await tester.tap(decreaseQ);
+    await tester.pump();
+    expect(settings.hexStepQ, -1);
+    await tester.tap(increaseQ);
+    await tester.pump();
+    expect(settings.hexStepQ, 0);
   });
 }

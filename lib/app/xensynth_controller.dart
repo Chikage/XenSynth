@@ -43,6 +43,7 @@ class XenSynthController extends ChangeNotifier {
   bool _microphoneTakeSaveDismissed = false;
   double _microphoneTakeDuration = 0;
   int _pitchInputSequence = 0;
+  bool _scoreVisualizationSuppressed = false;
 
   XenSynthSettings settings = const XenSynthSettings();
   TuningDefinition tuning = TuningDefinition.standard;
@@ -80,6 +81,7 @@ class XenSynthController extends ChangeNotifier {
 
   double get duration =>
       _microphoneTake ? _microphoneTakeDuration : score?.duration ?? 0;
+  bool get scoreVisualizationSuppressed => _scoreVisualizationSuppressed;
   bool get recordingTransportLocked =>
       pitchRecognitionBusy || pitchRecognizing || savingMicrophoneTake;
   bool get hasMicrophoneTake => _microphoneTake && duration > 0;
@@ -224,6 +226,7 @@ class XenSynthController extends ChangeNotifier {
       playhead = _initialPlayhead(parsed);
       visualPlayhead = playhead;
       await _native.loadScore(_nativeScoreMap(parsed, settings));
+      _scoreVisualizationSuppressed = false;
       status = '${parsed.format} · ${parsed.notes.length} NOTES';
     } catch (error, stackTrace) {
       debugPrint('Score parse failed: $error\n$stackTrace');
@@ -769,6 +772,7 @@ class XenSynthController extends ChangeNotifier {
     double playbackPitch,
     int velocity,
   ) {
+    _scoreVisualizationSuppressed = true;
     final targetPitch = playbackPitch + settings.appliedPitchOffsetCents / 100;
     final nextActive = Map<int, double>.from(activePitches)
       ..[pointer] = playbackPitch;

@@ -49,6 +49,59 @@ void main() {
       );
     });
 
+    test(
+      'maps arbitrary non-parallel neighbor directions to integer steps',
+      () {
+        const settings = XenSynthSettings(
+          hexStepQ: 9,
+          hexStepR: 4,
+          hexQDirection: HexNeighborDirection.negativeQPositiveR,
+          hexRDirection: HexNeighborDirection.negativeQ,
+        );
+        final configuration = settings.hexKeyboardConfiguration;
+
+        expect(configuration.stepQ, -4);
+        expect(configuration.stepR, 5);
+        expect(
+          PitchMapper.step(
+            settings.hexQDirection.coordinate,
+            stepQ: configuration.stepQ,
+            stepR: configuration.stepR,
+          ),
+          9,
+        );
+        expect(
+          PitchMapper.step(
+            settings.hexRDirection.coordinate,
+            stepQ: configuration.stepQ,
+            stepR: configuration.stepR,
+          ),
+          4,
+        );
+      },
+    );
+
+    test('round-trips directions and repairs parallel stored values', () {
+      const settings = XenSynthSettings(
+        hexQDirection: HexNeighborDirection.positiveR,
+        hexRDirection: HexNeighborDirection.negativeQPositiveR,
+      );
+      final restored = XenSynthSettings.fromMap(settings.toMap());
+
+      expect(restored.hexQDirection, HexNeighborDirection.positiveR);
+      expect(restored.hexRDirection, HexNeighborDirection.negativeQPositiveR);
+
+      final repaired = XenSynthSettings.fromMap(<String, Object?>{
+        'hexQDirection': HexNeighborDirection.positiveQ.index,
+        'hexRDirection': HexNeighborDirection.negativeQ.index,
+      });
+      expect(
+        repaired.hexQDirection.isParallelTo(repaired.hexRDirection),
+        isFalse,
+      );
+      expect(repaired.toMap()['hexRDirection'], repaired.hexRDirection.index);
+    });
+
     test('changing EDO synchronizes period and clamps both steps', () {
       const settings = XenSynthSettings(
         edo: 53,
@@ -89,27 +142,26 @@ void main() {
       expect(settings.toMap()['hexPeriod'], 19);
     });
 
-    test(
-      'preserves signed steps while rejecting zero and limiting magnitude',
-      () {
-        final settings = XenSynthSettings.fromMap(<String, Object?>{
-          'edo': 7,
-          'hexStepQ': -99,
-          'hexStepR': 0,
-        });
+    test('preserves signed and zero steps while limiting magnitude', () {
+      final settings = XenSynthSettings.fromMap(<String, Object?>{
+        'edo': 7,
+        'hexStepQ': -99,
+        'hexStepR': 0,
+      });
 
-        expect(settings.hexStepQ, -6);
-        expect(settings.hexStepR, 1);
-        expect(const XenSynthSettings(edo: 7, hexStepQ: -99).hexStepQ, -6);
-        expect(
-          const XenSynthSettings(
-            edo: 7,
-            hexStepR: -99,
-          ).copyWith(hexStepR: -99).hexStepR,
-          -6,
-        );
-      },
-    );
+      expect(settings.hexStepQ, -6);
+      expect(settings.hexStepR, 0);
+      expect(settings.toMap()['hexStepR'], 0);
+      expect(const XenSynthSettings(edo: 7, hexStepQ: -99).hexStepQ, -6);
+      expect(const XenSynthSettings(edo: 7, hexStepQ: 0).hexStepQ, 0);
+      expect(
+        const XenSynthSettings(
+          edo: 7,
+          hexStepR: -99,
+        ).copyWith(hexStepR: -99).hexStepR,
+        -6,
+      );
+    });
 
     test('accepts legacy percentage-form sensitivity values', () {
       final settings = XenSynthSettings.fromMap(<String, Object?>{

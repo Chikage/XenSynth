@@ -779,7 +779,7 @@ class _MetricEditorGroupState extends State<_MetricEditorGroup> {
     if (kind == null) return const SizedBox.shrink();
     final safePadding = MediaQuery.paddingOf(context);
     final popupWidth = math.min(
-      widget.compact ? 220.0 : 240.0,
+      widget.compact ? 280.0 : 300.0,
       math.max(120.0, layout.overlaySize.width - safePadding.horizontal - 16),
     );
     final speedWidth = _controlWidth(_MetricKind.speed);
@@ -842,21 +842,50 @@ class _MetricEditorGroupState extends State<_MetricEditorGroup> {
                   ),
                   tickMarkShape: SliderTickMarkShape.noTickMark,
                 ),
-                child: Slider(
-                  key: _sliderKey(kind),
-                  value: _values[kind]!,
-                  min: _minimum(kind),
-                  max: _maximum(kind),
-                  divisions: _divisions(kind),
-                  label: _displayText(kind),
-                  semanticFormatterCallback: (_) => _displayText(kind),
-                  onChangeStart: (_) => _unfocusAll(),
-                  onChanged: (value) => _handleSliderChanged(kind, value),
+                child: Row(
+                  children: [
+                    _buildStepButton(kind, -1),
+                    Expanded(
+                      child: Slider(
+                        key: _sliderKey(kind),
+                        value: _values[kind]!,
+                        min: _minimum(kind),
+                        max: _maximum(kind),
+                        divisions: _divisions(kind),
+                        label: _displayText(kind),
+                        semanticFormatterCallback: (_) => _displayText(kind),
+                        onChangeStart: (_) => _unfocusAll(),
+                        onChanged: (value) => _handleSliderChanged(kind, value),
+                      ),
+                    ),
+                    _buildStepButton(kind, 1),
+                  ],
                 ),
               ),
             ),
           ),
         ),
+      ),
+    );
+  }
+
+  Widget _buildStepButton(_MetricKind kind, int direction) {
+    final current = _values[kind]!;
+    final next = _normalize(kind, current + _step(kind) * direction);
+    final verb = direction < 0 ? 'Decrease' : 'Increase';
+    return IconButton(
+      key: _stepButtonKey(kind, direction),
+      tooltip: '$verb ${_semanticLabel(kind)}',
+      onPressed: next == current
+          ? null
+          : () => _handleSliderChanged(kind, next),
+      padding: EdgeInsets.zero,
+      constraints: const BoxConstraints.tightFor(width: 28, height: 28),
+      visualDensity: VisualDensity.compact,
+      style: const ButtonStyle(tapTargetSize: MaterialTapTargetSize.shrinkWrap),
+      icon: Icon(
+        direction < 0 ? Icons.remove_rounded : Icons.add_rounded,
+        size: 15,
       ),
     );
   }
@@ -1026,6 +1055,12 @@ class _MetricEditorGroupState extends State<_MetricEditorGroup> {
     _MetricKind.offset => null,
   };
 
+  double _step(_MetricKind kind) => switch (kind) {
+    _MetricKind.speed => 0.05,
+    _MetricKind.edo => 1,
+    _MetricKind.offset => 1,
+  };
+
   TextInputType _keyboardType(_MetricKind kind) => switch (kind) {
     _MetricKind.speed => const TextInputType.numberWithOptions(decimal: true),
     _MetricKind.edo => TextInputType.number,
@@ -1088,6 +1123,9 @@ class _MetricEditorGroupState extends State<_MetricEditorGroup> {
   Key _triggerKey(_MetricKind kind) => ValueKey('toolbar-${kind.name}-trigger');
   Key _inputKey(_MetricKind kind) => ValueKey('toolbar-${kind.name}-input');
   Key _sliderKey(_MetricKind kind) => ValueKey('toolbar-${kind.name}-slider');
+  Key _stepButtonKey(_MetricKind kind, int direction) => ValueKey(
+    'toolbar-${kind.name}-${direction < 0 ? 'decrease' : 'increase'}',
+  );
 }
 
 class _SanitizingTextInputFormatter extends TextInputFormatter {

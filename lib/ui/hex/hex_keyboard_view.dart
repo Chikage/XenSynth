@@ -10,6 +10,11 @@ import '../app_palette.dart';
 
 typedef HexPitchPointerCallback =
     void Function(int pointer, double pitch, int velocity);
+typedef HexBasisDirectionCallback =
+    void Function(
+      HexNeighborDirection qDirection,
+      HexNeighborDirection rDirection,
+    );
 
 class HexKeyboardViewportController extends ChangeNotifier {
   static const double minimumScale = 0.84;
@@ -145,6 +150,9 @@ class HexKeyboardView extends StatefulWidget {
     required this.onPitchUp,
     this.viewportController,
     this.onControlInteraction,
+    this.basisEditorVisible = false,
+    this.onBasisDirectionsChanged,
+    this.onBasisEditorDismissed,
     super.key,
   });
 
@@ -158,6 +166,9 @@ class HexKeyboardView extends StatefulWidget {
   final ValueChanged<int> onPitchUp;
   final HexKeyboardViewportController? viewportController;
   final VoidCallback? onControlInteraction;
+  final bool basisEditorVisible;
+  final HexBasisDirectionCallback? onBasisDirectionsChanged;
+  final VoidCallback? onBasisEditorDismissed;
 
   @override
   State<HexKeyboardView> createState() => _HexKeyboardViewState();
@@ -184,6 +195,10 @@ class _HexKeyboardViewState extends State<HexKeyboardView> {
   double _panRotationDragStartAngle = 0;
   double _panRotationHapticTravel = 0;
   bool _panRotationHasUpdated = false;
+  int? _basisDragPointer;
+  _HexBasisAxis? _basisDragAxis;
+  HexNeighborDirection? _basisDragDirection;
+  double _basisDragHapticTravel = 0;
   @override
   void initState() {
     super.initState();
@@ -196,6 +211,9 @@ class _HexKeyboardViewState extends State<HexKeyboardView> {
   @override
   void didUpdateWidget(covariant HexKeyboardView oldWidget) {
     super.didUpdateWidget(oldWidget);
+    if (oldWidget.basisEditorVisible && !widget.basisEditorVisible) {
+      _clearBasisDrag();
+    }
     if (widget.viewportController != oldWidget.viewportController) {
       _scheduledConstrainedPan = null;
       _detachViewportController();
@@ -240,7 +258,9 @@ class _HexKeyboardViewState extends State<HexKeyboardView> {
           container: true,
           label:
               'Hexagonal microtonal keyboard with ${_layout.cells.length} keys',
-          hint: '滚动左上角滚轮缩放，拖动右上角球体自由移动，拖动外环绕原点旋转',
+          hint: widget.basisEditorVisible
+              ? '拖动Q或R向量选择六边形相邻方向'
+              : '滚动左上角滚轮缩放，拖动右上角球体自由移动，拖动外环绕原点旋转',
           child: Listener(
             behavior: HitTestBehavior.opaque,
             onPointerDown: (event) =>
@@ -268,31 +288,54 @@ class _HexKeyboardViewState extends State<HexKeyboardView> {
                       size: Size.infinite,
                     ),
                   ),
-                  Positioned(
-                    left: _controlMargin,
-                    top: _controlMargin,
-                    width: controlExtent,
-                    height: controlExtent,
-                    child: _HexZoomControl(
-                      onZoom: _viewportController.zoomBy,
-                      onInteraction: widget.onControlInteraction,
+                  if (widget.basisEditorVisible) ...[
+                    Positioned.fill(
+                      child: ColoredBox(
+                        color: Colors.black.withValues(alpha: 0.22),
+                      ),
                     ),
-                  ),
-                  Positioned(
-                    right: _controlMargin,
-                    top: _controlMargin,
-                    width: controlExtent,
-                    height: controlExtent,
-                    child: _HexPanRotationControl(
-                      rotationDegrees: _viewportController.rotationDegrees,
-                      onPanStart: (details) =>
-                          _startPanRotationControl(details, controlExtent),
-                      onPanUpdate: (details) =>
-                          _updatePanRotationControl(details, controlExtent),
-                      onPanEnd: (_) => _endPanRotationControl(),
-                      onPanCancel: _endPanRotationControl,
+                    Positioned.fill(
+                      child: Semantics(
+                        key: const ValueKey('hex-basis-vector-editor'),
+                        container: true,
+                        label: 'Hex Q and R basis vector editor',
+                        child: CustomPaint(
+                          painter: _HexBasisVectorPainter(
+                            geometry: _basisGeometry(transform),
+                            qStep: widget.settings.hexStepQ,
+                            rStep: widget.settings.hexStepR,
+                            activeAxis: _basisDragAxis,
+                          ),
+                        ),
+                      ),
                     ),
-                  ),
+                  ] else ...[
+                    Positioned(
+                      left: _controlMargin,
+                      top: _controlMargin,
+                      width: controlExtent,
+                      height: controlExtent,
+                      child: _HexZoomControl(
+                        onZoom: _viewportController.zoomBy,
+                        onInteraction: widget.onControlInteraction,
+                      ),
+                    ),
+                    Positioned(
+                      right: _controlMargin,
+                      top: _controlMargin,
+                      width: controlExtent,
+                      height: controlExtent,
+                      child: _HexPanRotationControl(
+                        rotationDegrees: _viewportController.rotationDegrees,
+                        onPanStart: (details) =>
+                            _startPanRotationControl(details, controlExtent),
+                        onPanUpdate: (details) =>
+                            _updatePanRotationControl(details, controlExtent),
+                        onPanEnd: (_) => _endPanRotationControl(),
+                        onPanCancel: _endPanRotationControl,
+                      ),
+                    ),
+                  ],
                 ],
               ),
             ),
@@ -381,6 +424,10 @@ class _HexKeyboardViewState extends State<HexKeyboardView> {
     _HexTransform transform,
     Size size,
   ) {
+    if (widget.basisEditorVisible) {
+      _handleBasisPointerDown(event, transform);
+      return;
+    }
     if (_isInsideCornerControl(event.localPosition, size)) {
       _controlPointers.add(event.pointer);
       return;
@@ -389,13 +436,106 @@ class _HexKeyboardViewState extends State<HexKeyboardView> {
   }
 
   void _handlePointerMove(PointerMoveEvent event, _HexTransform transform) {
+    if (event.pointer == _basisDragPointer) {
+      _handleBasisPointerMove(event, transform);
+      return;
+    }
     if (_controlPointers.contains(event.pointer)) return;
     _processPointer(event, transform, false);
   }
 
   void _handlePointerEnd(PointerEvent event) {
+    if (event.pointer == _basisDragPointer) {
+      setState(_clearBasisDrag);
+      return;
+    }
     if (_controlPointers.remove(event.pointer)) return;
     _release(event.pointer);
+  }
+
+  void _handleBasisPointerDown(
+    PointerDownEvent event,
+    _HexTransform transform,
+  ) {
+    final geometry = _basisGeometry(transform);
+    final axis = geometry.hitTest(event.localPosition);
+    if (axis == null) {
+      _controlPointers.add(event.pointer);
+      widget.onBasisEditorDismissed?.call();
+      return;
+    }
+    _basisDragPointer = event.pointer;
+    _basisDragAxis = axis;
+    _basisDragDirection = switch (axis) {
+      _HexBasisAxis.q => geometry.qDirection,
+      _HexBasisAxis.r => geometry.rDirection,
+    };
+    _basisDragHapticTravel = 0;
+    widget.onControlInteraction?.call();
+    setState(() {});
+  }
+
+  void _handleBasisPointerMove(
+    PointerMoveEvent event,
+    _HexTransform transform,
+  ) {
+    final axis = _basisDragAxis;
+    if (axis == null) return;
+    final travel = event.delta.distance;
+    if (travel.isFinite && travel > 0) {
+      _basisDragHapticTravel += travel;
+      if (_basisDragHapticTravel >= _rotationControlHapticStepPixels) {
+        widget.onControlInteraction?.call();
+        _basisDragHapticTravel = _basisDragHapticTravel.remainder(
+          _rotationControlHapticStepPixels,
+        );
+      }
+    }
+
+    final geometry = _basisGeometry(transform);
+    if ((event.localPosition - geometry.origin).distance <
+        _HexBasisVectorGeometry.minimumDragRadius) {
+      return;
+    }
+    final otherDirection = switch (axis) {
+      _HexBasisAxis.q => geometry.rDirection,
+      _HexBasisAxis.r => geometry.qDirection,
+    };
+    final candidate = geometry.nearestDirection(
+      event.localPosition,
+      excludingParallelTo: otherDirection,
+    );
+    if (candidate == _basisDragDirection) return;
+    setState(() => _basisDragDirection = candidate);
+    final qDirection = axis == _HexBasisAxis.q
+        ? candidate
+        : geometry.qDirection;
+    final rDirection = axis == _HexBasisAxis.r
+        ? candidate
+        : geometry.rDirection;
+    widget.onBasisDirectionsChanged?.call(qDirection, rDirection);
+  }
+
+  _HexBasisVectorGeometry _basisGeometry(_HexTransform transform) {
+    final qDirection = _basisDragAxis == _HexBasisAxis.q
+        ? _basisDragDirection ?? widget.settings.hexQDirection
+        : widget.settings.hexQDirection;
+    final rDirection = _basisDragAxis == _HexBasisAxis.r
+        ? _basisDragDirection ?? widget.settings.hexRDirection
+        : widget.settings.hexRDirection;
+    return _HexBasisVectorGeometry.build(
+      configuration: _configuration,
+      transform: transform,
+      qDirection: qDirection,
+      rDirection: rDirection,
+    );
+  }
+
+  void _clearBasisDrag() {
+    _basisDragPointer = null;
+    _basisDragAxis = null;
+    _basisDragDirection = null;
+    _basisDragHapticTravel = 0;
   }
 
   void _startPanRotationControl(DragStartDetails details, double extent) {
@@ -571,6 +711,7 @@ class _HexKeyboardViewState extends State<HexKeyboardView> {
   @override
   void dispose() {
     _controlPointers.clear();
+    _clearBasisDrag();
     _endPanRotationControl();
     _detachViewportController();
     super.dispose();
@@ -578,6 +719,324 @@ class _HexKeyboardViewState extends State<HexKeyboardView> {
 }
 
 enum _HexPanRotationControlMode { freePan, rotation }
+
+enum _HexBasisAxis { q, r }
+
+class _HexBasisVectorGeometry {
+  const _HexBasisVectorGeometry({
+    required this.origin,
+    required this.qDirection,
+    required this.rDirection,
+    required this.qUnit,
+    required this.rUnit,
+    required this.vectorLength,
+  });
+
+  factory _HexBasisVectorGeometry.build({
+    required HexKeyboardConfiguration configuration,
+    required _HexTransform transform,
+    required HexNeighborDirection qDirection,
+    required HexNeighborDirection rDirection,
+  }) {
+    final origin = transform.toScreen(const HexPoint(0, 0));
+
+    Offset directionUnit(HexNeighborDirection direction) {
+      final point = HexGeometry.rotate(
+        HexGeometry.point(direction.coordinate, configuration.radius),
+        configuration.rotationDegrees.toDouble(),
+      );
+      final offset = transform.toScreen(point) - origin;
+      return offset / math.max(0.0001, offset.distance);
+    }
+
+    final adjacent = HexGeometry.point(
+      HexNeighborDirection.positiveQ.coordinate,
+      configuration.radius,
+    );
+    final adjacentLength = math.sqrt(
+      adjacent.x * adjacent.x + adjacent.y * adjacent.y,
+    );
+    final vectorLength = (adjacentLength * transform.scale * 2.35)
+        .clamp(58.0, 104.0)
+        .toDouble();
+    return _HexBasisVectorGeometry(
+      origin: origin,
+      qDirection: qDirection,
+      rDirection: rDirection,
+      qUnit: directionUnit(qDirection),
+      rUnit: directionUnit(rDirection),
+      vectorLength: vectorLength,
+    );
+  }
+
+  static const double minimumDragRadius = 18;
+  static const double _handleHitRadius = 25;
+  static const double _shaftHitRadius = 13;
+
+  final Offset origin;
+  final HexNeighborDirection qDirection;
+  final HexNeighborDirection rDirection;
+  final Offset qUnit;
+  final Offset rUnit;
+  final double vectorLength;
+
+  Offset get qEnd => origin + qUnit * vectorLength;
+  Offset get rEnd => origin + rUnit * vectorLength;
+  Offset get differenceEnd => origin + (qUnit - rUnit) * vectorLength;
+
+  _HexBasisAxis? hitTest(Offset position) {
+    final qHandleDistance = (position - qEnd).distance;
+    final rHandleDistance = (position - rEnd).distance;
+    if (math.min(qHandleDistance, rHandleDistance) <= _handleHitRadius) {
+      return qHandleDistance <= rHandleDistance
+          ? _HexBasisAxis.q
+          : _HexBasisAxis.r;
+    }
+    final qLineDistance = _distanceToSegment(position, origin, qEnd);
+    final rLineDistance = _distanceToSegment(position, origin, rEnd);
+    if (math.min(qLineDistance, rLineDistance) > _shaftHitRadius) return null;
+    return qLineDistance <= rLineDistance ? _HexBasisAxis.q : _HexBasisAxis.r;
+  }
+
+  HexNeighborDirection nearestDirection(
+    Offset position, {
+    required HexNeighborDirection excludingParallelTo,
+  }) {
+    final offset = position - origin;
+    final unit = offset / math.max(0.0001, offset.distance);
+    var best = qDirection;
+    var bestDot = double.negativeInfinity;
+    for (final candidate in HexNeighborDirection.values) {
+      if (candidate.isParallelTo(excludingParallelTo)) continue;
+      final candidateUnit = _unitFor(candidate);
+      final dot = unit.dx * candidateUnit.dx + unit.dy * candidateUnit.dy;
+      if (dot > bestDot) {
+        best = candidate;
+        bestDot = dot;
+      }
+    }
+    return best;
+  }
+
+  Offset _unitFor(HexNeighborDirection direction) {
+    if (direction == qDirection) return qUnit;
+    if (direction == rDirection) return rUnit;
+    final sectorDelta = (direction.index - qDirection.index) * math.pi / 3;
+    final cosine = math.cos(sectorDelta);
+    final sine = math.sin(sectorDelta);
+    return Offset(
+      qUnit.dx * cosine - qUnit.dy * sine,
+      qUnit.dx * sine + qUnit.dy * cosine,
+    );
+  }
+
+  static double _distanceToSegment(Offset point, Offset start, Offset end) {
+    final segment = end - start;
+    final squaredLength = segment.dx * segment.dx + segment.dy * segment.dy;
+    if (squaredLength <= 0.0001) return (point - start).distance;
+    final fromStart = point - start;
+    final projection =
+        (fromStart.dx * segment.dx + fromStart.dy * segment.dy) / squaredLength;
+    final clamped = projection.clamp(0.0, 1.0).toDouble();
+    return (point - (start + segment * clamped)).distance;
+  }
+}
+
+class _HexBasisVectorPainter extends CustomPainter {
+  const _HexBasisVectorPainter({
+    required this.geometry,
+    required this.qStep,
+    required this.rStep,
+    required this.activeAxis,
+  });
+
+  final _HexBasisVectorGeometry geometry;
+  final int qStep;
+  final int rStep;
+  final _HexBasisAxis? activeAxis;
+
+  bool get reversesDifference => qStep - rStep < 0;
+  Offset get displayedDifferenceEnd => reversesDifference
+      ? geometry.origin +
+            (geometry.rUnit - geometry.qUnit) * geometry.vectorLength
+      : geometry.differenceEnd;
+  String get differenceLabel => reversesDifference
+      ? 'R-Q ${_signed(rStep - qStep)}'
+      : 'Q-R ${_signed(qStep - rStep)}';
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final differencePaint = Paint()
+      ..color = AppPalette.outline.withValues(alpha: 0.92)
+      ..style = PaintingStyle.stroke
+      ..strokeCap = StrokeCap.round
+      ..strokeWidth = 2;
+    _drawDashedArrow(
+      canvas,
+      geometry.origin,
+      displayedDifferenceEnd,
+      differencePaint,
+    );
+    _paintVector(
+      canvas,
+      axis: _HexBasisAxis.q,
+      end: geometry.qEnd,
+      color: AppPalette.accent,
+      label: 'Q',
+      step: qStep,
+    );
+    _paintVector(
+      canvas,
+      axis: _HexBasisAxis.r,
+      end: geometry.rEnd,
+      color: AppPalette.selection,
+      label: 'R',
+      step: rStep,
+    );
+    _paintText(
+      canvas,
+      differenceLabel,
+      displayedDifferenceEnd,
+      AppPalette.outline,
+      anchor: displayedDifferenceEnd - geometry.origin,
+    );
+  }
+
+  void _paintVector(
+    Canvas canvas, {
+    required _HexBasisAxis axis,
+    required Offset end,
+    required Color color,
+    required String label,
+    required int step,
+  }) {
+    final active = activeAxis == axis;
+    final paint = Paint()
+      ..color = color
+      ..style = PaintingStyle.stroke
+      ..strokeCap = StrokeCap.round
+      ..strokeWidth = active ? 4 : 3;
+    canvas.drawLine(geometry.origin, end, paint);
+    _drawArrowHead(canvas, geometry.origin, end, paint, active ? 13 : 11);
+    canvas.drawCircle(
+      end,
+      active ? 17 : 15,
+      Paint()..color = AppPalette.background.withValues(alpha: 0.94),
+    );
+    canvas.drawCircle(end, active ? 17 : 15, paint);
+    _paintCenteredText(canvas, label, end, color, fontSize: 12);
+    _paintText(
+      canvas,
+      _signed(step),
+      end,
+      color,
+      anchor: end - geometry.origin,
+    );
+  }
+
+  static void _drawDashedArrow(
+    Canvas canvas,
+    Offset start,
+    Offset end,
+    Paint paint,
+  ) {
+    final vector = end - start;
+    final distance = vector.distance;
+    if (distance <= 0.001) return;
+    final unit = vector / distance;
+    const dash = 7.0;
+    const gap = 5.0;
+    for (var position = 0.0; position < distance - 10; position += dash + gap) {
+      canvas.drawLine(
+        start + unit * position,
+        start + unit * math.min(position + dash, distance - 10),
+        paint,
+      );
+    }
+    _drawArrowHead(canvas, start, end, paint, 10);
+  }
+
+  static void _drawArrowHead(
+    Canvas canvas,
+    Offset start,
+    Offset end,
+    Paint paint,
+    double length,
+  ) {
+    final vector = end - start;
+    if (vector.distance <= 0.001) return;
+    final unit = vector / vector.distance;
+    final perpendicular = Offset(-unit.dy, unit.dx);
+    final base = end - unit * length;
+    canvas.drawLine(end, base + perpendicular * (length * 0.44), paint);
+    canvas.drawLine(end, base - perpendicular * (length * 0.44), paint);
+  }
+
+  static void _paintText(
+    Canvas canvas,
+    String text,
+    Offset end,
+    Color color, {
+    required Offset anchor,
+  }) {
+    final unit = anchor / math.max(0.0001, anchor.distance);
+    final perpendicular = Offset(-unit.dy, unit.dx);
+    final position = end + unit * 21 + perpendicular * 5;
+    final painter = TextPainter(
+      text: TextSpan(
+        text: text,
+        style: TextStyle(
+          color: color,
+          fontSize: 10,
+          fontWeight: FontWeight.w800,
+          fontFamily: 'monospace',
+        ),
+      ),
+      textDirection: TextDirection.ltr,
+    )..layout();
+    painter.paint(
+      canvas,
+      position - Offset(painter.width / 2, painter.height / 2),
+    );
+  }
+
+  static void _paintCenteredText(
+    Canvas canvas,
+    String text,
+    Offset center,
+    Color color, {
+    required double fontSize,
+  }) {
+    final painter = TextPainter(
+      text: TextSpan(
+        text: text,
+        style: TextStyle(
+          color: color,
+          fontSize: fontSize,
+          fontWeight: FontWeight.w900,
+          fontFamily: 'monospace',
+        ),
+      ),
+      textDirection: TextDirection.ltr,
+    )..layout();
+    painter.paint(
+      canvas,
+      center - Offset(painter.width / 2, painter.height / 2),
+    );
+  }
+
+  static String _signed(int value) => value > 0 ? '+$value' : '$value';
+
+  @override
+  bool shouldRepaint(covariant _HexBasisVectorPainter oldDelegate) {
+    return oldDelegate.geometry.origin != geometry.origin ||
+        oldDelegate.geometry.qEnd != geometry.qEnd ||
+        oldDelegate.geometry.rEnd != geometry.rEnd ||
+        oldDelegate.qStep != qStep ||
+        oldDelegate.rStep != rStep ||
+        oldDelegate.activeAxis != activeAxis;
+  }
+}
 
 class _HexZoomControl extends StatefulWidget {
   const _HexZoomControl({required this.onZoom, this.onInteraction});

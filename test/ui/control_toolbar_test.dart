@@ -97,6 +97,10 @@ void main() {
 
     expect(find.byKey(const ValueKey('toolbar-speed-slider')), findsOneWidget);
     expect(find.byType(Slider), findsOneWidget);
+    expect(
+      tester.getSize(find.byKey(const ValueKey('toolbar-speed-slider'))).width,
+      greaterThan(200),
+    );
     final popup = tester.getRect(
       find.byKey(const ValueKey('toolbar-metric-popup')),
     );
@@ -252,6 +256,65 @@ void main() {
 
     await gesture.up();
     await tester.pump();
+  });
+
+  testWidgets('popup slider buttons fine-tune every metric', (tester) async {
+    await tester.binding.setSurfaceSize(const Size(874, 402));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+    var speed = 1.0;
+    var edo = 12;
+    var offset = 0.0;
+
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: AppPalette.theme(),
+        home: StatefulBuilder(
+          builder: (context, setState) => Scaffold(
+            body: Align(
+              alignment: Alignment.topCenter,
+              child: _controlToolbar(
+                speed: speed,
+                edo: edo,
+                offset: offset,
+                onSpeedChanged: (value) => setState(() => speed = value),
+                onEdoChanged: (value) => setState(() => edo = value),
+                onOffsetChanged: (value) => setState(() => offset = value),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+
+    await tester.tap(find.byKey(const ValueKey('toolbar-speed-trigger')));
+    await tester.pump();
+    await tester.tap(find.byTooltip('Increase Playback speed'));
+    await tester.pump();
+    expect(speed, closeTo(1.05, 0.000001));
+
+    await tester.tap(find.byKey(const ValueKey('toolbar-edo-trigger')));
+    await tester.pump();
+    await tester.tap(find.byTooltip('Decrease Equal divisions of the octave'));
+    await tester.pump();
+    expect(edo, 11);
+
+    await tester.tap(find.byKey(const ValueKey('toolbar-offset-trigger')));
+    await tester.pump();
+    await tester.tap(find.byTooltip('Increase Pitch offset'));
+    await tester.pump();
+    expect(offset, 1);
+
+    final slider = tester.getRect(
+      find.byKey(const ValueKey('toolbar-offset-slider')),
+    );
+    expect(
+      tester.getRect(find.byTooltip('Decrease Pitch offset')).right,
+      lessThanOrEqualTo(slider.left),
+    );
+    expect(
+      tester.getRect(find.byTooltip('Increase Pitch offset')).left,
+      greaterThanOrEqualTo(slider.right),
+    );
   });
 
   testWidgets('recording locks file and transport controls', (tester) async {
