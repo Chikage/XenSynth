@@ -384,22 +384,30 @@ class _XenSynthScreenState extends State<XenSynthScreen>
         content: const Text(
           'Save the recording and its recognized-pitch audio as two WAV files?',
         ),
+        actionsAlignment: MainAxisAlignment.spaceBetween,
         actions: [
           TextButton(
             onPressed: () =>
                 Navigator.of(context).pop(_MicrophoneTakeStopChoice.cancel),
             child: const Text('Cancel'),
           ),
-          TextButton(
-            onPressed: () =>
-                Navigator.of(context).pop(_MicrophoneTakeStopChoice.discard),
-            child: const Text('Discard'),
-          ),
-          FilledButton.icon(
-            onPressed: () =>
-                Navigator.of(context).pop(_MicrophoneTakeStopChoice.save),
-            icon: const Icon(Icons.save_alt_rounded),
-            label: const Text('Save'),
+          Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              TextButton(
+                onPressed: () => Navigator.of(
+                  context,
+                ).pop(_MicrophoneTakeStopChoice.discard),
+                child: const Text('Discard'),
+              ),
+              const SizedBox(width: 8),
+              FilledButton.icon(
+                onPressed: () =>
+                    Navigator.of(context).pop(_MicrophoneTakeStopChoice.save),
+                icon: const Icon(Icons.save_alt_rounded),
+                label: const Text('Save'),
+              ),
+            ],
           ),
         ],
       ),

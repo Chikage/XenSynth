@@ -44,6 +44,9 @@ final class PitchRecognitionManager: NSObject {
     label: "icu.ringona.xensynth.pitch-analysis",
     qos: .userInitiated
   )
+  private let pendingAnalysisLock = NSLock()
+  private var pendingAnalysisFrame: PendingAnalysisFrame?
+  private var analysisDrainScheduled = false
 
   private var selectedMode = PitchRecognitionMode.yin
   private var phase = Phase.idle
@@ -63,7 +66,7 @@ final class PitchRecognitionManager: NSObject {
   private var yinDetector: YinPitchDetector?
   private var spectrumAnalyzer: FftSpectrumAnalyzer?
   private var pianoDetector: PianoPitchDetector?
-  private var smoothedMidiPitch: Double?
+  private let yinPitchSmoother = YinPitchSmoother()
   private var yinVoiced = false
   private var yinUnvoicedFrames = 0
   private var pianoActiveNotes: [Int: Int] = [:]
@@ -71,6 +74,7 @@ final class PitchRecognitionManager: NSObject {
   private var pianoAbsentFrames: [Int: Int] = [:]
 
   private var recordingPlayer: AVAudioPlayer?
+  private var recordingPlaybackURL: URL?
 
   init(listener: PitchRecognitionManagerListener? = nil) {
     self.listener = listener
@@ -154,6 +158,7 @@ final class PitchRecognitionManager: NSObject {
     )
     let url = directory.appendingPathComponent("microphone-take.wav")
     try wave.write(to: url, options: .atomic)
+    recordingPlaybackURL = url
     try XenAudioSession.shared.activateForPlayback()
     let player = try AVAudioPlayer(contentsOf: url)
     player.currentTime = max(0, min(player.duration, fromSeconds))
@@ -166,6 +171,18 @@ final class PitchRecognitionManager: NSObject {
   func stopRecordingPlayback() {
     recordingPlayer?.stop()
     recordingPlayer = nil
+  }
+
+  func discardRecording() {
+    stopRecordingPlayback()
+    if let recordingPlaybackURL {
+      try? FileManager.default.removeItem(at: recordingPlaybackURL)
+      self.recordingPlaybackURL = nil
+    }
+    withStateLock {
+      recording = nil
+    }
+    emitState()
   }
 
   func recordingSnapshot() -> PitchRecordingSnapshot? {
@@ -241,7 +258,7 @@ final class PitchRecognitionManager: NSObject {
       )
       frameAccumulator = AudioFrameAccumulator(
         frameSize: frameSize,
-        hopSize: Self.analysisHopSize
+        hopSize: mode == .yin ? Self.yinAnalysisHopSize : Self.analysisHopSize
       )
       analysisQueue.async { [weak self] in
         self?.prepareAnalysis(mode: mode)
@@ -249,7 +266,7 @@ final class PitchRecognitionManager: NSObject {
 
       input.installTap(
         onBus: 0,
-        bufferSize: Self.inputTapBufferSize,
+        bufferSize: mode == .yin ? Self.yinInputTapBufferSize : Self.inputTapBufferSize,
         format: format
       ) { [weak self] buffer, _ in
         guard let channel = buffer.floatChannelData?.pointee else { return }
@@ -332,16 +349,66 @@ final class PitchRecognitionManager: NSObject {
     withStateLock { recording?.append(pcm) }
     let analyzed = resampled.map { max(-1, min(1, $0 * inputGain)) }
     let frames = frameAccumulator.append(analyzed)
-    let timeSeconds = withStateLock { recording?.durationSeconds ?? 0 }
+    let captureTimeSeconds = withStateLock { recording?.durationSeconds ?? 0 }
     for frame in frames {
-      analysisQueue.async { [weak self] in
-        self?.analyze(
-          frame,
-          mode: mode,
-          generation: generation,
-          timeSeconds: timeSeconds
-        )
+      let pending = PendingAnalysisFrame(
+        samples: frame.samples,
+        mode: mode,
+        generation: generation,
+        timeSeconds: mode == .yin
+          ? Double(frame.endSampleIndex) / Double(Self.recordingSampleRate)
+          : captureTimeSeconds
+      )
+      if mode == .yin {
+        enqueueAnalysis(pending)
+      } else {
+        analysisQueue.async { [weak self] in
+          self?.analyze(
+            pending.samples,
+            mode: pending.mode,
+            generation: pending.generation,
+            timeSeconds: pending.timeSeconds
+          )
+        }
       }
+    }
+  }
+
+  private func enqueueAnalysis(_ frame: PendingAnalysisFrame) {
+    pendingAnalysisLock.lock()
+    pendingAnalysisFrame = frame
+    let shouldSchedule = !analysisDrainScheduled
+    analysisDrainScheduled = true
+    pendingAnalysisLock.unlock()
+    guard shouldSchedule else { return }
+    analysisQueue.async { [weak self] in self?.drainPendingAnalysis() }
+  }
+
+  private func drainPendingAnalysis() {
+    pendingAnalysisLock.lock()
+    guard let frame = pendingAnalysisFrame else {
+      analysisDrainScheduled = false
+      pendingAnalysisLock.unlock()
+      return
+    }
+    pendingAnalysisFrame = nil
+    pendingAnalysisLock.unlock()
+
+    analyze(
+      frame.samples,
+      mode: frame.mode,
+      generation: frame.generation,
+      timeSeconds: frame.timeSeconds
+    )
+
+    pendingAnalysisLock.lock()
+    let shouldContinue = pendingAnalysisFrame != nil
+    if !shouldContinue {
+      analysisDrainScheduled = false
+    }
+    pendingAnalysisLock.unlock()
+    if shouldContinue {
+      analysisQueue.async { [weak self] in self?.drainPendingAnalysis() }
     }
   }
 
@@ -364,7 +431,7 @@ final class PitchRecognitionManager: NSObject {
           frameSize: Self.pianoFrameSize
         )
       : nil
-    smoothedMidiPitch = nil
+    yinPitchSmoother.reset()
     yinVoiced = false
     yinUnvoicedFrames = 0
     pianoActiveNotes.removeAll()
@@ -396,7 +463,7 @@ final class PitchRecognitionManager: NSObject {
       yinUnvoicedFrames += 1
       if yinVoiced, yinUnvoicedFrames >= Self.yinUnvoicedFrameCount {
         yinVoiced = false
-        smoothedMidiPitch = nil
+        yinPitchSmoother.reset()
         emitPitch(
           voiced: false,
           frequencyHz: 0,
@@ -410,15 +477,10 @@ final class PitchRecognitionManager: NSObject {
     }
 
     yinUnvoicedFrames = 0
-    let nextMidiPitch: Double
-    if let previous = smoothedMidiPitch,
-       abs(estimate.midiPitch - previous) < Self.yinSmoothingRangeSemitones {
-      nextMidiPitch = previous
-        + (estimate.midiPitch - previous) * Self.yinSmoothingFactor
-    } else {
-      nextMidiPitch = estimate.midiPitch
-    }
-    smoothedMidiPitch = nextMidiPitch
+    let nextMidiPitch = yinPitchSmoother.update(
+      estimate.midiPitch,
+      at: timeSeconds
+    )
     yinVoiced = true
     let decibels = 20 * log10(max(estimate.rms, 0.000_000_001))
     let normalized = max(0, min(1, (decibels + 60) / 48))
@@ -581,6 +643,13 @@ final class PitchRecognitionManager: NSObject {
     case error
   }
 
+  private struct PendingAnalysisFrame {
+    let samples: [Float]
+    let mode: PitchRecognitionMode
+    let generation: UInt64
+    let timeSeconds: Double
+  }
+
   private enum CaptureError: LocalizedError {
     case invalidInputFormat
 
@@ -591,12 +660,12 @@ final class PitchRecognitionManager: NSObject {
 
   private static let recordingSampleRate = 16_000
   private static let inputTapBufferSize: AVAudioFrameCount = 1_024
+  private static let yinInputTapBufferSize: AVAudioFrameCount = 512
   private static let analysisFrameSize = 2_048
   private static let pianoFrameSize = 8_192
   private static let analysisHopSize = 512
-  private static let yinUnvoicedFrameCount = 3
-  private static let yinSmoothingRangeSemitones = 1.5
-  private static let yinSmoothingFactor = 0.35
+  private static let yinAnalysisHopSize = 256
+  private static let yinUnvoicedFrameCount = 6
   private static let pianoNoteOnFrames = 2
   private static let pianoNoteOffFrames = 3
 }
@@ -632,9 +701,15 @@ private final class LinearAudioResampler {
 }
 
 private final class AudioFrameAccumulator {
+  struct Frame {
+    let samples: [Float]
+    let endSampleIndex: Int64
+  }
+
   private let frameSize: Int
   private let hopSize: Int
   private var samples: [Float] = []
+  private var bufferStartSampleIndex: Int64 = 0
 
   init(frameSize: Int, hopSize: Int) {
     precondition(frameSize > 0 && hopSize > 0 && hopSize <= frameSize)
@@ -642,12 +717,16 @@ private final class AudioFrameAccumulator {
     self.hopSize = hopSize
   }
 
-  func append(_ values: [Float]) -> [[Float]] {
+  func append(_ values: [Float]) -> [Frame] {
     samples.append(contentsOf: values)
-    var frames: [[Float]] = []
+    var frames: [Frame] = []
     while samples.count >= frameSize {
-      frames.append(Array(samples.prefix(frameSize)))
+      frames.append(Frame(
+        samples: Array(samples.prefix(frameSize)),
+        endSampleIndex: bufferStartSampleIndex + Int64(frameSize)
+      ))
       samples.removeFirst(hopSize)
+      bufferStartSampleIndex += Int64(hopSize)
     }
     return frames
   }

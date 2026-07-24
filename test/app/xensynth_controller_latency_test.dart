@@ -94,6 +94,34 @@ void main() {
       await pumpEventQueue();
     },
   );
+
+  test('continues the waterfall when native score audio fails', () async {
+    messenger.setMockMethodCallHandler(channel, (call) async {
+      calls.add(call);
+      if (call.method == 'play') {
+        throw PlatformException(
+          code: 'ios_audio_unavailable',
+          message: 'Audio session activation failed',
+        );
+      }
+      return true;
+    });
+    final controller = XenSynthController()
+      ..audioReady = true
+      ..score = _shortScoreWithFinalNote();
+
+    await controller.play();
+
+    expect(controller.playing, isTrue);
+    expect(controller.waterfallAnimating, isTrue);
+    expect(controller.audioReady, isFalse);
+    expect(controller.status, 'VISUAL MODE · AUDIO UNAVAILABLE');
+    await Future<void>.delayed(const Duration(milliseconds: 50));
+    expect(controller.visualPlayhead, greaterThan(0));
+
+    controller.dispose();
+    await pumpEventQueue();
+  });
 }
 
 ParsedScore _shortScore() {

@@ -51,21 +51,19 @@ final class XenAudioSession {
   }
 
   private func configureLocked(wantsInput: Bool) throws {
-    if wantsInput {
-      try session.setCategory(
-        .playAndRecord,
-        mode: .default,
-        options: [.defaultToSpeaker, .allowBluetoothHFP, .allowBluetoothA2DP]
-      )
-    } else {
-      try session.setCategory(
-        .playback,
-        mode: .default,
-        options: [.allowAirPlay, .allowBluetoothA2DP]
-      )
+    let category: AVAudioSession.Category = wantsInput ? .playAndRecord : .playback
+    let options: AVAudioSession.CategoryOptions = wantsInput
+      ? [.defaultToSpeaker, .allowBluetoothHFP, .allowBluetoothA2DP]
+      : [.allowAirPlay, .allowBluetoothA2DP]
+    do {
+      try session.setCategory(category, mode: .default, options: options)
+    } catch {
+      try session.setCategory(category, mode: .default)
     }
-    try session.setPreferredSampleRate(Self.preferredSampleRate)
-    try session.setPreferredIOBufferDuration(Self.preferredBufferDuration)
+
+    // Hardware routes may reject latency preferences even though playback is available.
+    try? session.setPreferredSampleRate(Self.preferredSampleRate)
+    try? session.setPreferredIOBufferDuration(Self.preferredBufferDuration)
     try session.setActive(true)
   }
 

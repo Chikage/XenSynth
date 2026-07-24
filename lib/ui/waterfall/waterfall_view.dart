@@ -943,7 +943,6 @@ class WaterfallPainter extends CustomPainter {
     _paintPlayhead(canvas, size);
     _paintRulerGlass(canvas, size);
     _paintRulerTicks(canvas, size);
-    _paintEmptyState(canvas, size);
   }
 
   void _paintBackground(Canvas canvas, Size size) {
@@ -1371,31 +1370,6 @@ class WaterfallPainter extends CustomPainter {
       Paint()
         ..color = _rulerGold
         ..strokeWidth = 2 * layout.physicalPixel,
-    );
-  }
-
-  void _paintEmptyState(Canvas canvas, Size size) {
-    if (score?.format == 'MIC' || (score != null && score!.notes.isNotEmpty)) {
-      return;
-    }
-    final painter = TextPainter(
-      text: const TextSpan(
-        text: 'OPEN A MIDX / MIDI SCORE',
-        style: TextStyle(
-          color: AppPalette.secondaryText,
-          fontSize: 13,
-          fontWeight: FontWeight.w700,
-          letterSpacing: 1.8,
-        ),
-      ),
-      textDirection: TextDirection.ltr,
-    )..layout();
-    painter.paint(
-      canvas,
-      Offset(
-        (size.width - painter.width) / 2,
-        (layout.keyboardTop - painter.height) / 2,
-      ),
     );
   }
 

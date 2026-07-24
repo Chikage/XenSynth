@@ -3,6 +3,7 @@ package icu.ringona.xensynth.pitch
 import kotlin.math.ceil
 import kotlin.math.floor
 import kotlin.math.ln
+import kotlin.math.pow
 import kotlin.math.sqrt
 
 internal data class YinPitchEstimate(
@@ -11,6 +12,47 @@ internal data class YinPitchEstimate(
     val confidence: Double,
     val rms: Double,
 )
+
+internal class YinPitchSmoother(
+    private val referenceIntervalSeconds: Double = 512.0 / 16_000.0,
+    private val smoothingFactor: Double = 0.35,
+    private val smoothingRangeSemitones: Double = 1.5,
+) {
+    private var value: Double? = null
+    private var timeSeconds: Double? = null
+
+    init {
+        require(referenceIntervalSeconds > 0.0)
+        require(smoothingFactor in 0.0..1.0)
+        require(smoothingRangeSemitones > 0.0)
+    }
+
+    fun update(midiPitch: Double, atTimeSeconds: Double): Double {
+        val previous = value
+        val previousTime = timeSeconds
+        val next = if (
+            previous != null &&
+            previousTime != null &&
+            kotlin.math.abs(midiPitch - previous) < smoothingRangeSemitones
+        ) {
+            val elapsed = (atTimeSeconds - previousTime)
+                .takeIf { it.isFinite() && it > 0.0 }
+                ?: referenceIntervalSeconds
+            val factor = 1.0 - (1.0 - smoothingFactor).pow(elapsed / referenceIntervalSeconds)
+            previous + (midiPitch - previous) * factor.coerceIn(0.0, 1.0)
+        } else {
+            midiPitch
+        }
+        value = next
+        timeSeconds = atTimeSeconds
+        return next
+    }
+
+    fun reset() {
+        value = null
+        timeSeconds = null
+    }
+}
 
 internal class YinPitchDetector(
     private val sampleRate: Int = 16_000,

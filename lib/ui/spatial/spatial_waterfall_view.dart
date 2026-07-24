@@ -498,10 +498,7 @@ class _SpatialWaterfallViewState extends State<SpatialWaterfallView>
                 children: [
                   RepaintBoundary(
                     child: CustomPaint(
-                      painter: _SpatialBackdropPainter(
-                        hasScore: widget.score != null,
-                        scene: scene,
-                      ),
+                      painter: _SpatialBackdropPainter(scene: scene),
                       size: Size.infinite,
                     ),
                   ),
@@ -2375,9 +2372,8 @@ class _PendingSpatialTransform {
 }
 
 class _SpatialBackdropPainter extends CustomPainter {
-  const _SpatialBackdropPainter({required this.hasScore, required this.scene});
+  const _SpatialBackdropPainter({required this.scene});
 
-  final bool hasScore;
   final _SpatialScene scene;
 
   @override
@@ -2408,30 +2404,11 @@ class _SpatialBackdropPainter extends CustomPainter {
       scene.outlineAt(0),
       Paint()..color = AppPalette.surface.withValues(alpha: 0.54),
     );
-    if (!hasScore) {
-      final painter = TextPainter(
-        text: TextSpan(
-          text: 'OPEN MIDI / JSON TO START THE 3D WATERFALL',
-          style: TextStyle(
-            color: AppPalette.secondaryText.withValues(alpha: 0.64),
-            fontSize: 10,
-            fontWeight: FontWeight.w700,
-            letterSpacing: 0.7,
-          ),
-        ),
-        textDirection: TextDirection.ltr,
-        textAlign: TextAlign.center,
-      )..layout(maxWidth: size.width * 0.72);
-      painter.paint(
-        canvas,
-        Offset((size.width - painter.width) / 2, 10 * scene.physicalPixel),
-      );
-    }
   }
 
   @override
   bool shouldRepaint(covariant _SpatialBackdropPainter oldDelegate) {
-    return oldDelegate.hasScore != hasScore || oldDelegate.scene != scene;
+    return oldDelegate.scene != scene;
   }
 }
 

@@ -235,11 +235,12 @@ class SettingsPanel extends StatelessWidget {
                       Row(
                         children: [
                           Expanded(
-                            child: _StepperRow(
+                            child: _IntegerInputRow(
                               label: 'Columns',
                               value: settings.hexColumns,
                               min: 4,
                               max: 64,
+                              fieldKey: const ValueKey('hex-columns-input'),
                               onChanged: (value) => onChanged(
                                 settings.copyWith(hexColumns: value),
                               ),
@@ -247,11 +248,12 @@ class SettingsPanel extends StatelessWidget {
                           ),
                           const SizedBox(width: 8),
                           Expanded(
-                            child: _StepperRow(
+                            child: _IntegerInputRow(
                               label: 'Rows',
                               value: settings.hexRows,
                               min: 3,
                               max: 32,
+                              fieldKey: const ValueKey('hex-rows-input'),
                               onChanged: (value) =>
                                   onChanged(settings.copyWith(hexRows: value)),
                             ),
@@ -261,22 +263,26 @@ class SettingsPanel extends StatelessWidget {
                       Row(
                         children: [
                           Expanded(
-                            child: _StepperRow(
+                            child: _IntegerInputRow(
                               label: 'Q step',
                               value: settings.hexStepQ,
-                              min: 1,
+                              min: -hexStepMaximum,
                               max: hexStepMaximum,
+                              fieldKey: const ValueKey('hex-q-step-input'),
+                              isValueAllowed: (value) => value != 0,
                               onChanged: (value) =>
                                   onChanged(settings.copyWith(hexStepQ: value)),
                             ),
                           ),
                           const SizedBox(width: 8),
                           Expanded(
-                            child: _StepperRow(
+                            child: _IntegerInputRow(
                               label: 'R step',
                               value: settings.hexStepR,
-                              min: 1,
+                              min: -hexStepMaximum,
                               max: hexStepMaximum,
+                              fieldKey: const ValueKey('hex-r-step-input'),
+                              isValueAllowed: (value) => value != 0,
                               onChanged: (value) =>
                                   onChanged(settings.copyWith(hexStepR: value)),
                             ),
@@ -519,6 +525,7 @@ class _IntegerInputRow extends StatefulWidget {
     required this.max,
     required this.onChanged,
     this.fieldKey,
+    this.isValueAllowed,
   });
 
   final String label;
@@ -527,6 +534,7 @@ class _IntegerInputRow extends StatefulWidget {
   final int max;
   final ValueChanged<int> onChanged;
   final Key? fieldKey;
+  final bool Function(int value)? isValueAllowed;
 
   @override
   State<_IntegerInputRow> createState() => _IntegerInputRowState();
@@ -557,27 +565,61 @@ class _IntegerInputRowState extends State<_IntegerInputRow> {
 
   void _handleChanged(String text) {
     final value = int.tryParse(text);
-    if (value == null || value < widget.min || value > widget.max) return;
+    if (value == null || !_isValueAllowed(value)) return;
     if (value != widget.value) widget.onChanged(value);
   }
 
   void _step(int delta) {
     final parsed = int.tryParse(_controller.text);
-    final current = (parsed ?? widget.value)
-        .clamp(widget.min, widget.max)
-        .toInt();
-    final value = (current + delta).clamp(widget.min, widget.max).toInt();
+    final current = _normalizedValue(parsed ?? widget.value);
+    var value = current + delta;
+    if (!_isValueAllowed(value) && value == 0) value += delta;
+    value = _normalizedValue(value);
     _setText(value);
     if (value != widget.value) widget.onChanged(value);
   }
 
   void _commit() {
     final parsed = int.tryParse(_controller.text);
-    final value = (parsed ?? widget.value)
-        .clamp(widget.min, widget.max)
-        .toInt();
+    final value = _normalizedValue(parsed ?? widget.value);
     _setText(value);
     if (value != widget.value) widget.onChanged(value);
+  }
+
+  bool _isValueAllowed(int value) {
+    return value >= widget.min &&
+        value <= widget.max &&
+        (widget.isValueAllowed?.call(value) ?? true);
+  }
+
+  int _normalizedValue(int value) {
+    if (_isValueAllowed(value)) return value;
+    if (value == 0 && widget.isValueAllowed?.call(0) == false) {
+      return widget.value < 0 ? -1 : 1;
+    }
+    return value.clamp(widget.min, widget.max).toInt();
+  }
+
+  int _stepValue(int delta) {
+    final current = _normalizedValue(widget.value);
+    var value = current + delta;
+    if (!_isValueAllowed(value) && value == 0) value += delta;
+    return _normalizedValue(value);
+  }
+
+  int get _maxInputLength {
+    final largestMagnitude = widget.min.abs() > widget.max.abs()
+        ? widget.min.abs()
+        : widget.max.abs();
+    return largestMagnitude.toString().length + (widget.min < 0 ? 1 : 0);
+  }
+
+  TextInputFormatter get _integerInputFormatter {
+    final pattern = widget.min < 0 ? RegExp(r'^-?\d*$') : RegExp(r'^\d*$');
+    return TextInputFormatter.withFunction(
+      (oldValue, newValue) =>
+          pattern.hasMatch(newValue.text) ? newValue : oldValue,
+    );
   }
 
   void _setText(int value) {
@@ -615,7 +657,9 @@ class _IntegerInputRowState extends State<_IntegerInputRow> {
                 ),
               ),
               _CompactIconButton(
-                onPressed: widget.value <= widget.min ? null : () => _step(-1),
+                onPressed: _stepValue(-1) == widget.value
+                    ? null
+                    : () => _step(-1),
                 icon: Icons.remove_rounded,
               ),
               SizedBox(
@@ -625,12 +669,14 @@ class _IntegerInputRowState extends State<_IntegerInputRow> {
                   key: widget.fieldKey,
                   controller: _controller,
                   focusNode: _focusNode,
-                  keyboardType: TextInputType.number,
+                  keyboardType: TextInputType.numberWithOptions(
+                    signed: widget.min < 0,
+                  ),
                   textInputAction: TextInputAction.done,
                   textAlign: TextAlign.center,
                   selectAllOnFocus: true,
-                  maxLength: widget.max.toString().length,
-                  inputFormatters: [FilteringTextInputFormatter.digitsOnly],
+                  maxLength: _maxInputLength,
+                  inputFormatters: [_integerInputFormatter],
                   cursorColor: AppPalette.accent,
                   style: const TextStyle(
                     color: AppPalette.primaryText,
@@ -658,7 +704,9 @@ class _IntegerInputRowState extends State<_IntegerInputRow> {
                 ),
               ),
               _CompactIconButton(
-                onPressed: widget.value >= widget.max ? null : () => _step(1),
+                onPressed: _stepValue(1) == widget.value
+                    ? null
+                    : () => _step(1),
                 icon: Icons.add_rounded,
               ),
             ],
@@ -675,74 +723,6 @@ class _IntegerInputRowState extends State<_IntegerInputRow> {
       ..dispose();
     _controller.dispose();
     super.dispose();
-  }
-}
-
-class _StepperRow extends StatelessWidget {
-  const _StepperRow({
-    required this.label,
-    required this.value,
-    required this.min,
-    required this.max,
-    required this.onChanged,
-  });
-
-  final String label;
-  final int value;
-  final int min;
-  final int max;
-  final ValueChanged<int> onChanged;
-
-  @override
-  Widget build(BuildContext context) {
-    return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 2),
-      child: ToolSurface(
-        color: AppPalette.raisedSurface,
-        child: SizedBox(
-          height: 32,
-          child: Row(
-            children: [
-              Expanded(
-                child: Padding(
-                  padding: const EdgeInsets.only(left: 7),
-                  child: Text(
-                    label,
-                    maxLines: 1,
-                    overflow: TextOverflow.fade,
-                    softWrap: false,
-                    style: const TextStyle(
-                      color: AppPalette.secondaryText,
-                      fontSize: 9,
-                    ),
-                  ),
-                ),
-              ),
-              _CompactIconButton(
-                onPressed: value <= min ? null : () => onChanged(value - 1),
-                icon: Icons.remove_rounded,
-              ),
-              SizedBox(
-                width: 28,
-                child: Text(
-                  '$value',
-                  textAlign: TextAlign.center,
-                  style: const TextStyle(
-                    color: AppPalette.primaryText,
-                    fontSize: 9,
-                    fontWeight: FontWeight.w700,
-                  ),
-                ),
-              ),
-              _CompactIconButton(
-                onPressed: value >= max ? null : () => onChanged(value + 1),
-                icon: Icons.add_rounded,
-              ),
-            ],
-          ),
-        ),
-      ),
-    );
   }
 }
 

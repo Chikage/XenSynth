@@ -210,6 +210,10 @@ final class XenSynthPlatformBridge: NSObject, FlutterStreamHandler, UIDocumentPi
         pitchRecognitionManager.stopRecordingPlayback()
         result(true)
 
+      case "discardPitchRecording":
+        pitchRecognitionManager.discardRecording()
+        result(true)
+
       case "savePitchRecording":
         let noteMaps = noteMaps(from: arguments["notes"]) ?? []
         let duration = arguments.double(forAnyKey: ["duration"]) ?? 0

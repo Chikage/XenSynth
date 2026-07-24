@@ -75,8 +75,8 @@ class XenSynthSettings {
 
   int get hexPeriod => edo > 0 ? edo : 12;
   int get hexStepMaximum => hexStepMaximumForEdo(edo);
-  int get hexStepQ => _hexStepQ.clamp(1, hexStepMaximum);
-  int get hexStepR => _hexStepR.clamp(1, hexStepMaximum);
+  int get hexStepQ => _normalizeHexStep(_hexStepQ, hexStepMaximum);
+  int get hexStepR => _normalizeHexStep(_hexStepR, hexStepMaximum);
   HexKeyboardConfiguration get hexKeyboardConfiguration =>
       HexKeyboardConfiguration(
         columns: hexColumns,
@@ -164,14 +164,14 @@ class XenSynthSettings {
       ),
       hexColumns: _int(map['hexColumns'], defaults.hexColumns).clamp(4, 64),
       hexRows: _int(map['hexRows'], defaults.hexRows).clamp(3, 32),
-      hexStepQ: _int(
-        map['hexStepQ'],
-        defaults.hexStepQ,
-      ).clamp(1, hexStepMaximum),
-      hexStepR: _int(
-        map['hexStepR'],
-        defaults.hexStepR,
-      ).clamp(1, hexStepMaximum),
+      hexStepQ: _normalizeHexStep(
+        _int(map['hexStepQ'], defaults.hexStepQ),
+        hexStepMaximum,
+      ),
+      hexStepR: _normalizeHexStep(
+        _int(map['hexStepR'], defaults.hexStepR),
+        hexStepMaximum,
+      ),
       hexGroupByOctave: _bool(
         map['hexGroupByOctave'],
         defaults.hexGroupByOctave,
@@ -303,8 +303,14 @@ class XenSynthSettings {
           ),
       hexColumns: hexColumns ?? this.hexColumns,
       hexRows: hexRows ?? this.hexRows,
-      hexStepQ: (hexStepQ ?? this.hexStepQ).clamp(1, nextHexStepMaximum),
-      hexStepR: (hexStepR ?? this.hexStepR).clamp(1, nextHexStepMaximum),
+      hexStepQ: _normalizeHexStep(
+        hexStepQ ?? this.hexStepQ,
+        nextHexStepMaximum,
+      ),
+      hexStepR: _normalizeHexStep(
+        hexStepR ?? this.hexStepR,
+        nextHexStepMaximum,
+      ),
       hexGroupByOctave: hexGroupByOctave ?? this.hexGroupByOctave,
       hexRotationDegrees: hexRotationDegrees ?? this.hexRotationDegrees,
       touchSensitivity: (touchSensitivity ?? this.touchSensitivity).clamp(
@@ -325,6 +331,12 @@ class XenSynthSettings {
 
   static int _int(Object? value, int fallback) {
     return value is num ? value.toInt() : int.tryParse('$value') ?? fallback;
+  }
+
+  static int _normalizeHexStep(int value, int maximum) {
+    if (value == 0) return 1;
+    final magnitude = value.abs().clamp(1, maximum).toInt();
+    return value < 0 ? -magnitude : magnitude;
   }
 
   static double _double(Object? value, double fallback) {

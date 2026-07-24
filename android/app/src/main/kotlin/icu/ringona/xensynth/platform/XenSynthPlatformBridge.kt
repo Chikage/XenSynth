@@ -226,6 +226,10 @@ internal class XenSynthPlatformBridge(
                     pitchRecognitionManager.stopRecordingPlayback()
                     result.success(true)
                 }
+                "discardPitchRecording" -> {
+                    pitchRecognitionManager.discardRecording()
+                    result.success(true)
+                }
                 "savePitchRecording" -> savePitchRecording(arguments, result)
                 "pickDocument" -> pickDocument(result)
                 "saveSettings" -> result.success(saveSettings(arguments))

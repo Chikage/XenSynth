@@ -17,6 +17,50 @@ struct YinPitchEstimate {
   let rms: Double
 }
 
+final class YinPitchSmoother {
+  private let referenceIntervalSeconds: Double
+  private let smoothingFactor: Double
+  private let smoothingRangeSemitones: Double
+  private var value: Double?
+  private var timeSeconds: Double?
+
+  init(
+    referenceIntervalSeconds: Double = 512.0 / 16_000.0,
+    smoothingFactor: Double = 0.35,
+    smoothingRangeSemitones: Double = 1.5
+  ) {
+    precondition(referenceIntervalSeconds > 0)
+    precondition((0...1).contains(smoothingFactor))
+    precondition(smoothingRangeSemitones > 0)
+    self.referenceIntervalSeconds = referenceIntervalSeconds
+    self.smoothingFactor = smoothingFactor
+    self.smoothingRangeSemitones = smoothingRangeSemitones
+  }
+
+  func update(_ midiPitch: Double, at timeSeconds: Double) -> Double {
+    let next: Double
+    if let value, let previousTime = self.timeSeconds,
+       abs(midiPitch - value) < smoothingRangeSemitones {
+      let measuredInterval = timeSeconds - previousTime
+      let interval = measuredInterval.isFinite && measuredInterval > 0
+        ? measuredInterval
+        : referenceIntervalSeconds
+      let factor = 1 - pow(1 - smoothingFactor, interval / referenceIntervalSeconds)
+      next = value + (midiPitch - value) * max(0, min(1, factor))
+    } else {
+      next = midiPitch
+    }
+    value = next
+    self.timeSeconds = timeSeconds
+    return next
+  }
+
+  func reset() {
+    value = nil
+    timeSeconds = nil
+  }
+}
+
 final class YinPitchDetector {
   let sampleRate: Double
   let frameSize: Int

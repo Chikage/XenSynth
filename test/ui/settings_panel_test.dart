@@ -270,4 +270,77 @@ void main() {
     expect(find.text('R step'), findsOneWidget);
     expect(tester.takeException(), isNull);
   });
+
+  testWidgets('hex dimensions and signed steps accept direct input', (
+    tester,
+  ) async {
+    await tester.binding.setSurfaceSize(const Size(874, 402));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+
+    var settings = const XenSynthSettings(
+      layoutMode: KeyboardLayoutMode.hexagonal,
+      edo: 7,
+    );
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: AppPalette.theme(),
+        home: Scaffold(
+          body: Align(
+            alignment: Alignment.topRight,
+            child: SizedBox(
+              height: 330,
+              child: StatefulBuilder(
+                builder: (context, setState) => SettingsPanel(
+                  settings: settings,
+                  onChanged: (value) => setState(() => settings = value),
+                  onReset: () {},
+                ),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+
+    final scrollable = find.byWidgetPredicate(
+      (widget) =>
+          widget is Scrollable && widget.axisDirection == AxisDirection.down,
+    );
+    await tester.scrollUntilVisible(
+      find.byKey(const ValueKey('hex-q-step-input')),
+      120,
+      scrollable: scrollable,
+    );
+
+    expect(find.byKey(const ValueKey('hex-columns-input')), findsOneWidget);
+    expect(find.byKey(const ValueKey('hex-rows-input')), findsOneWidget);
+    expect(find.byKey(const ValueKey('hex-r-step-input')), findsOneWidget);
+
+    await tester.enterText(
+      find.byKey(const ValueKey('hex-columns-input')),
+      '42',
+    );
+    await tester.enterText(find.byKey(const ValueKey('hex-rows-input')), '12');
+    await tester.enterText(
+      find.byKey(const ValueKey('hex-q-step-input')),
+      '-5',
+    );
+    await tester.enterText(
+      find.byKey(const ValueKey('hex-r-step-input')),
+      '-99',
+    );
+    await tester.testTextInput.receiveAction(TextInputAction.done);
+    await tester.pump();
+
+    expect(settings.hexColumns, 42);
+    expect(settings.hexRows, 12);
+    expect(settings.hexStepQ, -5);
+    expect(settings.hexStepR, -6);
+
+    await tester.enterText(find.byKey(const ValueKey('hex-r-step-input')), '0');
+    await tester.testTextInput.receiveAction(TextInputAction.done);
+    await tester.pump();
+    expect(settings.hexStepR, -1);
+    expect(find.text('-1'), findsOneWidget);
+  });
 }

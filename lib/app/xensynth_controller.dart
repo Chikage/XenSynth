@@ -269,10 +269,14 @@ class XenSynthController extends ChangeNotifier {
         );
       }
     } catch (error) {
-      playing = false;
-      waterfallAnimating = false;
-      _stopClock();
-      _setStatus('PLAYBACK FAILED · $error');
+      if (_microphoneTake) {
+        playing = false;
+        waterfallAnimating = false;
+        _stopClock();
+        _setStatus('PLAYBACK FAILED · $error');
+      } else {
+        _continueVisualPlaybackAfterAudioError(error);
+      }
     }
   }
 
@@ -379,10 +383,14 @@ class XenSynthController extends ChangeNotifier {
         );
       }
     } catch (error) {
-      playing = false;
-      waterfallAnimating = false;
-      _stopClock();
-      _setStatus('PLAYBACK FAILED · $error');
+      if (_microphoneTake) {
+        playing = false;
+        waterfallAnimating = false;
+        _stopClock();
+        _setStatus('PLAYBACK FAILED · $error');
+      } else {
+        _continueVisualPlaybackAfterAudioError(error);
+      }
     }
   }
 
@@ -518,13 +526,18 @@ class XenSynthController extends ChangeNotifier {
     waterfallAnimating = false;
     _clearSeekGestureState();
     _stopClock();
-    await releaseAllNotes();
-    await _native.stopPitchRecording();
-    _clearMicrophoneTake();
-    pitchInputEvents.clear();
-    pitchVisualizationGeneration++;
-    status = 'MICROPHONE TAKE DISCARDED';
-    notifyListeners();
+    try {
+      await releaseAllNotes();
+      await _native.discardPitchRecording();
+    } catch (error) {
+      debugPrint('Microphone take discard cleanup failed: $error');
+    } finally {
+      _clearMicrophoneTake();
+      pitchInputEvents.clear();
+      pitchVisualizationGeneration++;
+      status = 'MICROPHONE TAKE DISCARDED';
+      notifyListeners();
+    }
   }
 
   Future<void> _prepareMicrophoneTake(PitchRecognitionMode mode) async {
@@ -722,12 +735,16 @@ class XenSynthController extends ChangeNotifier {
       await _native.loadScore(_nativeScoreMap(currentScore, next));
     }
     if (!_microphoneTake && playing && playbackParametersChanged) {
-      await _native.play(
-        from: playhead,
-        speed: next.playbackSpeed,
-        offsetCents: next.appliedPitchOffsetCents,
-        audioStartDelaySeconds: next.audioLatencyMs / 1000,
-      );
+      try {
+        await _native.play(
+          from: playhead,
+          speed: next.playbackSpeed,
+          offsetCents: next.appliedPitchOffsetCents,
+          audioStartDelaySeconds: next.audioLatencyMs / 1000,
+        );
+      } catch (error) {
+        _continueVisualPlaybackAfterAudioError(error);
+      }
     }
   }
 
@@ -1449,6 +1466,14 @@ class XenSynthController extends ChangeNotifier {
   void _setStatus(String value) {
     status = value.toUpperCase();
     notifyListeners();
+  }
+
+  void _continueVisualPlaybackAfterAudioError(Object error) {
+    debugPrint(
+      'Native score audio failed; continuing waterfall in visual mode: $error',
+    );
+    audioReady = false;
+    _setStatus('VISUAL MODE · AUDIO UNAVAILABLE');
   }
 
   static bool _looksLikeTuning(String name, Uint8List bytes) {

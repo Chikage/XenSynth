@@ -186,6 +186,14 @@ internal class PitchRecognitionManager(
         recordingPlayer.stop()
     }
 
+    fun discardRecording() {
+        recordingPlayer.stop()
+        synchronized(stateLock) {
+            recording = null
+        }
+        emitState()
+    }
+
     fun recordingSnapshot(): PitchRecordingSnapshot? {
         return synchronized(stateLock) {
             recording?.let { value ->
@@ -873,7 +881,7 @@ internal class PitchRecognitionManager(
 
         private fun analysisLoop() {
             val detector = YinPitchDetector(sampleRate = SAMPLE_RATE, frameSize = YIN_FRAME_SIZE)
-            var smoothedMidiPitch: Double? = null
+            val pitchSmoother = YinPitchSmoother()
             var voiced = false
             var unvoicedFrames = 0
             try {
@@ -884,22 +892,17 @@ internal class PitchRecognitionManager(
                         unvoicedFrames++
                         if (voiced && unvoicedFrames >= YIN_UNVOICED_FRAME_COUNT) {
                             voiced = false
-                            smoothedMidiPitch = null
+                            pitchSmoother.reset()
                             onPitch(false, 0.0, 0.0, 0.0, 0, frame.timeSeconds)
                         }
                         continue
                     }
 
                     unvoicedFrames = 0
-                    val previous = smoothedMidiPitch
-                    val nextMidiPitch = if (
-                        previous != null && abs(estimate.midiPitch - previous) < YIN_SMOOTHING_RANGE_SEMITONES
-                    ) {
-                        previous + (estimate.midiPitch - previous) * YIN_SMOOTHING_FACTOR
-                    } else {
-                        estimate.midiPitch
-                    }
-                    smoothedMidiPitch = nextMidiPitch
+                    val nextMidiPitch = pitchSmoother.update(
+                        estimate.midiPitch,
+                        frame.timeSeconds,
+                    )
                     voiced = true
                     onPitch(
                         true,
@@ -995,14 +998,12 @@ internal class PitchRecognitionManager(
         const val INFERENCE_HOP_SAMPLES = 512
         const val AUDIO_READ_BUFFER_SAMPLES = 512
         const val YIN_FRAME_SIZE = 2_048
-        const val YIN_HOP_SAMPLES = 512
-        const val YIN_READ_BUFFER_SAMPLES = 512
+        const val YIN_HOP_SAMPLES = 256
+        const val YIN_READ_BUFFER_SAMPLES = 256
         const val FFT_FRAME_SIZE = 2_048
         const val FFT_HOP_SAMPLES = 512
         const val FFT_READ_BUFFER_SAMPLES = 512
-        const val YIN_UNVOICED_FRAME_COUNT = 3
-        const val YIN_SMOOTHING_RANGE_SEMITONES = 1.5
-        const val YIN_SMOOTHING_FACTOR = 0.35
+        const val YIN_UNVOICED_FRAME_COUNT = 6
         const val YIN_MINIMUM_DECIBELS = -60.0
         const val YIN_MAXIMUM_DECIBELS = -12.0
         const val INTERPRETER_THREAD_COUNT = 4

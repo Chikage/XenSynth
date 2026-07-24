@@ -34,6 +34,28 @@ class YinPitchDetectorTest {
         assertNull(detector.detect(FloatArray(FRAME_SIZE)))
     }
 
+    @Test
+    fun smoothingIsStableAcrossDifferentFrameCadences() {
+        val coarse = YinPitchSmoother()
+        coarse.update(69.0, 0.0)
+        val coarseResult = coarse.update(70.0, 0.032)
+
+        val fine = YinPitchSmoother()
+        fine.update(69.0, 0.0)
+        fine.update(70.0, 0.016)
+        val fineResult = fine.update(70.0, 0.032)
+
+        assertEquals(coarseResult, fineResult, 0.000_001)
+    }
+
+    @Test
+    fun smoothingDoesNotDelayLargePitchChanges() {
+        val smoother = YinPitchSmoother()
+        smoother.update(60.0, 0.0)
+
+        assertEquals(64.0, smoother.update(64.0, 0.016), 0.000_001)
+    }
+
     private fun sineWave(frequencyHz: Double): FloatArray {
         return FloatArray(FRAME_SIZE) { index ->
             (AMPLITUDE * sin(2.0 * PI * frequencyHz * index / SAMPLE_RATE)).toFloat()

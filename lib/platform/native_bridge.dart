@@ -217,6 +217,8 @@ class XenSynthNativeBridge {
 
   Future<void> stopPitchRecording() => _invokeVoid('stopPitchRecording');
 
+  Future<void> discardPitchRecording() => _invokeVoid('discardPitchRecording');
+
   Future<Map<String, Object?>> savePitchRecording({
     required String suggestedName,
     required double duration,

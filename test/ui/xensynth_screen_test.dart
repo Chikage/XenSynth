@@ -74,6 +74,11 @@ void main() {
 
     expect(find.text('Save microphone recording?'), findsOneWidget);
     expect(controller.playing, isFalse);
+    final dialogLeft = tester.getTopLeft(find.byType(AlertDialog)).dx;
+    final cancelLeft = tester
+        .getTopLeft(find.widgetWithText(TextButton, 'Cancel'))
+        .dx;
+    expect(cancelLeft - dialogLeft, lessThan(80));
     await tester.tap(find.widgetWithText(FilledButton, 'Save'));
     await tester.pumpAndSettle();
 
@@ -102,7 +107,9 @@ void main() {
     const nativeChannel = MethodChannel('icu.ringona.xensynth/platform');
     final messenger =
         TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
+    final calls = <MethodCall>[];
     messenger.setMockMethodCallHandler(nativeChannel, (call) async {
+      calls.add(call);
       return switch (call.method) {
         'startPitchRecognition' => <String, Object?>{
           'supported': true,
@@ -133,6 +140,7 @@ void main() {
     addTearDown(() => messenger.setMockMethodCallHandler(nativeChannel, null));
 
     for (final action in <String>['direct-save', 'Cancel', 'Discard']) {
+      calls.clear();
       final controller = XenSynthController()
         ..pitchRecognitionAvailable = true
         ..initialized = true;
@@ -168,6 +176,11 @@ void main() {
       expect(
         controller.hasMicrophoneTake,
         action == 'Discard' ? isFalse : isTrue,
+        reason: action,
+      );
+      expect(
+        calls.where((call) => call.method == 'discardPitchRecording'),
+        action == 'Discard' ? hasLength(1) : isEmpty,
         reason: action,
       );
 

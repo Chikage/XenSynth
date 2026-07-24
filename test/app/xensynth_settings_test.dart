@@ -81,13 +81,35 @@ void main() {
 
       expect(settings.hexPeriod, 19);
       expect(settings.hexStepQ, 18);
-      expect(settings.hexStepR, 1);
+      expect(settings.hexStepR, -7);
       expect(settings.touchSensitivity, closeTo(0.58, 0.000001));
       expect(settings.touchSensitivityPercent, closeTo(129, 0.000001));
       expect(settings.playbackPreviewSeconds, 2.8);
       expect(settings.pitchSnapEnabled, isTrue);
       expect(settings.toMap()['hexPeriod'], 19);
     });
+
+    test(
+      'preserves signed steps while rejecting zero and limiting magnitude',
+      () {
+        final settings = XenSynthSettings.fromMap(<String, Object?>{
+          'edo': 7,
+          'hexStepQ': -99,
+          'hexStepR': 0,
+        });
+
+        expect(settings.hexStepQ, -6);
+        expect(settings.hexStepR, 1);
+        expect(const XenSynthSettings(edo: 7, hexStepQ: -99).hexStepQ, -6);
+        expect(
+          const XenSynthSettings(
+            edo: 7,
+            hexStepR: -99,
+          ).copyWith(hexStepR: -99).hexStepR,
+          -6,
+        );
+      },
+    );
 
     test('accepts legacy percentage-form sensitivity values', () {
       final settings = XenSynthSettings.fromMap(<String, Object?>{
