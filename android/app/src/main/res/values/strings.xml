@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Xen Synth</string>
+    <string name="play">Play</string>
+    <string name="pause">Pause</string>
+    <string name="paused">Paused</string>
+    <string name="playing">Playing</string>
+    <string name="stop">Stop</string>
+    <string name="playback_channel_name">Xen Synth playback</string>
+    <string name="playback_channel_description">Playback controls and status</string>
+</resources>

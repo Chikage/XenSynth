@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<devices>
+    <device
+        manufacturer="XenSynth"
+        name="XenSynth MIDI Output"
+        product="XenSynth">
+        <output-port name="Output" />
+    </device>
+</devices>

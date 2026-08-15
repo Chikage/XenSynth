@@ -42,11 +42,17 @@ class _XenSynthScreenState extends State<XenSynthScreen>
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) {
+      unawaited(_controller.syncPlaybackState());
+      return;
+    }
     if (state == AppLifecycleState.paused ||
         state == AppLifecycleState.inactive ||
         state == AppLifecycleState.detached) {
-      unawaited(_controller.pause());
-      unawaited(_controller.releaseAllNotes());
+      if (_controller.hasMicrophoneTake) {
+        unawaited(_controller.pause());
+      }
+      unawaited(_controller.releaseInputNotes());
       unawaited(_controller.stopPitchRecognition());
     }
   }

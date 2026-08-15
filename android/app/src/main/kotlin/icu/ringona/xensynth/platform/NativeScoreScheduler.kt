@@ -1,8 +1,10 @@
 package icu.ringona.xensynth.platform
 
-import android.view.Choreographer
+import android.os.Handler
+import android.os.Looper
 import icu.ringona.xensynth.audio.NativeAudio
 import icu.ringona.xensynth.audio.NativeAudioEngine
+import icu.ringona.xensynth.midi.MidiOutputRouter
 import kotlin.math.max
 import kotlin.math.roundToInt
 
@@ -19,11 +21,13 @@ internal data class PlatformScoreNote(
 )
 
 /**
- * Keeps score-time scheduling on Android's vsync clock while FluidSynth performs
- * the sample-accurate delayed note starts in the native audio callback.
+ * Keeps score-time scheduling on an application looper while FluidSynth performs
+ * the sample-accurate delayed note starts in the native audio callback. A Handler
+ * clock keeps playback alive when the Activity has no visible surface.
  */
 internal class NativeScoreScheduler(
     private val nativeAudio: NativeAudio = NativeAudioEngine,
+    private val midiOutput: MidiOutputRouter = MidiOutputRouter,
 ) {
     private var notes: List<PlatformScoreNote> = emptyList()
     private var durationSeconds = 0.0
@@ -35,13 +39,17 @@ internal class NativeScoreScheduler(
     private var audioStartDelaySeconds = 0.0
     private var latencyMilliseconds = 0.0
     private var audioCursor = 0
+    private var midiCursor = 0
+    private var audioAvailable = false
     private var playing = false
     private var framePosted = false
     private val activeNotes = linkedMapOf<Int, ActiveScheduledNote>()
+    private val activeMidiNotes = linkedMapOf<Int, ActiveMidiScheduledNote>()
 
-    private val frameCallback = Choreographer.FrameCallback { frameTimeNanos ->
+    private val handler = Handler(Looper.getMainLooper())
+    private val frameCallback = Runnable {
         framePosted = false
-        handleFrame(frameTimeNanos)
+        handleFrame(System.nanoTime())
     }
 
     fun loadScore(arguments: Map<*, *>): Map<String, Any> {
@@ -56,6 +64,7 @@ internal class NativeScoreScheduler(
         positionSeconds = 0.0
         basePositionSeconds = 0.0
         audioCursor = 0
+        midiCursor = 0
         return mapOf(
             "noteCount" to notes.size,
             "duration" to durationSeconds,
@@ -72,8 +81,9 @@ internal class NativeScoreScheduler(
         offsetCents: Double,
         audioDelayOverrideSeconds: Double?,
     ): Boolean {
-        if (!nativeAudio.hasSoundFont()) return false
-        if (!nativeAudio.isStarted() && !nativeAudio.restart()) return false
+        audioAvailable = runCatching {
+            nativeAudio.hasSoundFont() && (nativeAudio.isStarted() || nativeAudio.restart())
+        }.getOrDefault(false)
 
         val now = System.nanoTime()
         releaseScheduledNotes(immediate = true)
@@ -90,7 +100,8 @@ internal class NativeScoreScheduler(
         baseTimeNanos = now
         playing = true
         resetCursor(audioPosition(now))
-        scheduleAt(audioPosition(now))
+        if (audioAvailable) scheduleAt(audioPosition(now))
+        scheduleMidiAt(positionSeconds)
         postFrame()
         return true
     }
@@ -114,7 +125,8 @@ internal class NativeScoreScheduler(
         releaseScheduledNotes(immediate = true)
         resetCursor(audioPosition(now))
         if (wasPlaying) {
-            scheduleAt(audioPosition(now))
+            if (audioAvailable) scheduleAt(audioPosition(now))
+            scheduleMidiAt(positionSeconds)
             postFrame()
         }
         return next
@@ -128,13 +140,20 @@ internal class NativeScoreScheduler(
         removeFrame()
         releaseScheduledNotes(immediate = true)
         audioCursor = 0
+        midiCursor = 0
+        audioAvailable = false
     }
 
     fun currentPosition(): Double = currentPosition(System.nanoTime())
 
+    fun isPlaying(): Boolean = playing
+
+    fun duration(): Double = durationSeconds
+
     fun allNotesOff() {
-        activeNotes.clear()
+        releaseScheduledNotes(immediate = true)
         nativeAudio.allSoundOff()
+        midiOutput.allNotesOff()
     }
 
     fun dispose() {
@@ -146,7 +165,8 @@ internal class NativeScoreScheduler(
 
         positionSeconds = currentPosition(frameTimeNanos)
         val audioPosition = audioPosition(frameTimeNanos)
-        scheduleAt(audioPosition)
+        if (audioAvailable) scheduleAt(audioPosition)
+        scheduleMidiAt(positionSeconds)
 
         val logicalFinished = durationSeconds <= 0.0 || positionSeconds >= durationSeconds
         val audioFinished = durationSeconds <= 0.0 || audioPosition >= durationSeconds
@@ -202,6 +222,44 @@ internal class NativeScoreScheduler(
         }
     }
 
+    private fun scheduleMidiAt(positionSeconds: Double) {
+        val ended = activeMidiNotes
+            .filterValues { it.note.end <= positionSeconds + AUDIO_EPSILON_SECONDS }
+            .keys
+            .toList()
+        ended.forEach { index ->
+            activeMidiNotes.remove(index)?.let { active -> midiOutput.noteOff(active.midiToken) }
+        }
+
+        while (midiCursor < notes.size) {
+            val index = midiCursor
+            val note = notes[index]
+            if (note.end <= positionSeconds + AUDIO_EPSILON_SECONDS) {
+                midiCursor++
+                continue
+            }
+            if (note.start > positionSeconds + AUDIO_EPSILON_SECONDS) break
+
+            if (!activeMidiNotes.containsKey(index)) {
+                val renderedPitch = note.pitch + pitchOffsetCents / 100.0
+                val key = renderedPitch.roundToInt()
+                if (renderedPitch.isFinite() && key in MIDI_KEY_MIN..MIDI_KEY_MAX) {
+                    val midiToken = midiOutput.noteOn(
+                        id = index,
+                        pitch = renderedPitch,
+                        velocity = note.velocity,
+                        channel = note.channel,
+                        program = note.program,
+                        bankMsb = note.bankMsb,
+                        bankLsb = note.bankLsb,
+                    )
+                    activeMidiNotes[index] = ActiveMidiScheduledNote(midiToken, note)
+                }
+            }
+            midiCursor++
+        }
+    }
+
     private fun releaseScheduledNotes(immediate: Boolean) {
         val noteIds = activeNotes.values.map { it.noteId }
         activeNotes.clear()
@@ -212,10 +270,16 @@ internal class NativeScoreScheduler(
                 nativeAudio.noteOff(noteId)
             }
         }
+        val midiTokens = activeMidiNotes.values.map { it.midiToken }
+        activeMidiNotes.clear()
+        midiTokens.forEach(midiOutput::noteOff)
     }
 
     private fun resetCursor(audioPositionSeconds: Double) {
         audioCursor = notes.indexOfFirst { it.end > audioPositionSeconds + AUDIO_EPSILON_SECONDS }
+            .takeIf { it >= 0 }
+            ?: notes.size
+        midiCursor = notes.indexOfFirst { it.end > audioPositionSeconds + AUDIO_EPSILON_SECONDS }
             .takeIf { it >= 0 }
             ?: notes.size
     }
@@ -247,13 +311,13 @@ internal class NativeScoreScheduler(
     private fun postFrame() {
         if (!framePosted) {
             framePosted = true
-            Choreographer.getInstance().postFrameCallback(frameCallback)
+            handler.postDelayed(frameCallback, FRAME_INTERVAL_MILLIS)
         }
     }
 
     private fun removeFrame() {
         if (framePosted) {
-            Choreographer.getInstance().removeFrameCallback(frameCallback)
+            handler.removeCallbacks(frameCallback)
             framePosted = false
         }
     }
@@ -263,9 +327,15 @@ internal class NativeScoreScheduler(
         val note: PlatformScoreNote,
     )
 
+    private data class ActiveMidiScheduledNote(
+        val midiToken: Int,
+        val note: PlatformScoreNote,
+    )
+
     private companion object {
         const val AUDIO_LOOKAHEAD_SECONDS = 0.18
         const val AUDIO_EPSILON_SECONDS = 0.002
+        const val FRAME_INTERVAL_MILLIS = 8L
         const val MIN_PLAYBACK_SPEED = 0.05
         const val MAX_PLAYBACK_SPEED = 8.0
         const val MIN_PLAYHEAD_SECONDS = -1.0

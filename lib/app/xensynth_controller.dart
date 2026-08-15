@@ -297,6 +297,45 @@ class XenSynthController extends ChangeNotifier {
     }
   }
 
+  Future<void> syncPlaybackState() async {
+    if (_microphoneTake) return;
+    final state = await _native.getPlaybackState();
+    if (state.isEmpty) return;
+    final nativePosition = _finiteDouble(state['position']);
+    final nativePlaying = _stateBool(state['playing'], false);
+    if (nativePosition != null) {
+      playhead = nativePosition.clamp(0.0, duration).toDouble();
+      visualPlayhead = playhead;
+    }
+    playing = nativePlaying;
+    waterfallAnimating = nativePlaying;
+    if (nativePlaying) {
+      _startPlaybackClock();
+    } else {
+      _stopClock();
+    }
+    notifyListeners();
+  }
+
+  Future<void> releaseInputNotes() async {
+    _noteEpochs.updateAll((key, value) => value + 1);
+    _noteTokens.clear();
+    for (final entry in activePitches.entries) {
+      _emitPitchInput(
+        pointer: entry.key,
+        pitch: entry.value,
+        velocity: 0,
+        down: false,
+      );
+    }
+    activePitches = const {};
+    activePitchVelocities = const {};
+    _sustainedMidiPointers.clear();
+    _deferredMidiOffs.clear();
+    notifyListeners();
+    await _native.releaseInputNotes();
+  }
+
   Future<void> seek(double position) async {
     if (_seekGestureActive) {
       updateSeekGesture(position);

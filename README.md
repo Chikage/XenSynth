@@ -10,6 +10,8 @@ XenSynth 的 iOS / Android 跨平台版本。界面、乐谱解析、瀑布流�
 - `.mscz` / `.mscx` 原生转换后导入
 - JSON 调律、EDO、音高偏移、速度、音量、混响和延迟设置
 - USB / 系统 MIDI 键盘输入，支持延音踏板与音色切换
+- Android 系统虚拟 MIDI 输出，其他应用可接收键盘和乐谱播放的 MIDI 流
+- Android 后台乐谱播放与 MediaSession 通知栏控制（播放、暂停、停止、进度拖动）
 - iOS / Android 麦克风录音与实时分析：钢琴音符、YIN 连续基频和 FFT 频谱模式
 - FluidSynth SoundFont 合成；Android 使用 Oboe，iOS 使用原生音频排程
 
@@ -28,6 +30,10 @@ assets/    演示乐谱、背景图和共享资源
 MethodChannel  icu.ringona.xensynth/platform
 EventChannel   icu.ringona.xensynth/platform/midi
 ```
+
+Android 安装后会向系统注册 `XenSynth MIDI Output`（设备支持 Android MIDI 时可见），包含一个 `Output` 端口。其他应用通过系统 MIDI 设备列表连接该端口即可接收实时键盘和乐谱播放事件。微分音使用每个活动音符独立 MIDI 通道的 Pitch Bend 表示，并在音符开始前声明标准 ±2 半音弯音范围；这样同一和弦中的不同音分不会互相改变音高。
+
+Android 乐谱播放由 `XenSynthPlaybackService` 持有 Android MediaSession。开始播放后会显示媒体通知，返回桌面或锁屏不会停止乐谱；通知栏和耳机媒体按键可以播放、暂停、停止和拖动进度。Android 13 及以上首次开始播放时需要允许通知权限。关闭应用任务会按 Android 媒体应用惯例停止播放并清理通知。
 
 ## 环境要求
 

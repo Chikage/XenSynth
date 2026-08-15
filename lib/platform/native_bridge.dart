@@ -153,6 +153,14 @@ class XenSynthNativeBridge {
 
   Future<void> stop() => _invokeVoid('stop');
 
+  Future<Map<String, Object?>> getPlaybackState() async {
+    final result = await _invoke('getPlaybackState');
+    if (result is! Map) return const {};
+    return result.map((key, value) => MapEntry(key.toString(), value));
+  }
+
+  Future<void> releaseInputNotes() => _invokeVoid('releaseInputNotes');
+
   Future<int?> noteOn({
     int? id,
     required double pitch,

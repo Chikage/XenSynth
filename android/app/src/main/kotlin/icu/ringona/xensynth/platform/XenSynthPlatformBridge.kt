@@ -7,6 +7,7 @@ import android.content.Intent
 import android.content.SharedPreferences
 import android.content.pm.PackageManager
 import android.net.Uri
+import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.provider.OpenableColumns
@@ -18,6 +19,8 @@ import icu.ringona.xensynth.audio.NativeAudioEngine
 import icu.ringona.xensynth.midi.MidiDeviceInputManager
 import icu.ringona.xensynth.midi.MidiInputDevice
 import icu.ringona.xensynth.midi.MidiInputEvent
+import icu.ringona.xensynth.midi.MidiOutputRouter
+import icu.ringona.xensynth.playback.XenSynthPlaybackService
 import icu.ringona.xensynth.pitch.PitchRecognitionManager
 import icu.ringona.xensynth.pitch.PitchRecognitionMode
 import icu.ringona.xensynth.pitch.PitchRecordingStore
@@ -43,7 +46,6 @@ internal class XenSynthPlatformBridge(
 
     private val mainHandler = Handler(Looper.getMainLooper())
     private val worker: ExecutorService = Executors.newSingleThreadExecutor()
-    private val scheduler = NativeScoreScheduler(nativeAudio)
     private val preferences = activity.getSharedPreferences(PREFERENCES_NAME, Activity.MODE_PRIVATE)
     private val midiInputManager = MidiDeviceInputManager(activity, this)
     private val pitchRecognitionManager = PitchRecognitionManager(
@@ -126,6 +128,8 @@ internal class XenSynthPlatformBridge(
     private var pendingPitchRecognitionStart = false
     private var pendingPitchRecognitionDownload = false
     private var pendingPitchRecognitionMode = PitchRecognitionMode.PIANO
+    private val manualNoteTokens = mutableMapOf<Int, ManualNoteToken>()
+    private var nextManualNoteToken = 1
 
     fun attachMethodChannel(channel: MethodChannel) {
         methodChannel = channel
@@ -156,10 +160,14 @@ internal class XenSynthPlatformBridge(
                     latencyMilliseconds = number(arguments, "milliseconds")
                         ?.takeIf(Double::isFinite)
                         ?: 0.0
-                    scheduler.setLatency(latencyMilliseconds)
+                    XenSynthPlaybackCoordinator.setLatency(latencyMilliseconds)
                     result.success(true)
                 }
-                "loadScore" -> result.success(scheduler.loadScore(arguments))
+                "loadScore" -> {
+                    val loaded = XenSynthPlaybackCoordinator.loadScore(arguments)
+                    XenSynthPlaybackService.refreshIfRunning()
+                    result.success(loaded)
+                }
                 "convertMuseScore" -> convertMuseScore(arguments, result)
                 "play" -> {
                     val explicitDelay = if (arguments.containsKey("audioStartDelaySeconds")) {
@@ -168,33 +176,52 @@ internal class XenSynthPlatformBridge(
                         null
                     }
                     result.success(
-                        scheduler.play(
+                        XenSynthPlaybackCoordinator.play(
                             fromSeconds = number(arguments, "from"),
                             speed = number(arguments, "speed") ?: 1.0,
                             offsetCents = number(arguments, "offsetCents") ?: 0.0,
-                            audioDelayOverrideSeconds = explicitDelay,
-                        )
+                            audioDelaySeconds = explicitDelay,
+                        ).also { started ->
+                            if (started) startPlaybackService()
+                        }
                     )
                 }
-                "pause" -> result.success(mapOf("position" to scheduler.pause()))
+                "pause" -> result.success(
+                    mapOf("position" to XenSynthPlaybackCoordinator.pause()).also {
+                        XenSynthPlaybackService.refreshIfRunning()
+                    },
+                )
                 "seek" -> {
                     val position = number(arguments, "position") ?: 0.0
-                    result.success(mapOf("position" to scheduler.seek(position)))
+                    result.success(
+                        mapOf("position" to XenSynthPlaybackCoordinator.seek(position)).also {
+                            XenSynthPlaybackService.refreshIfRunning()
+                        },
+                    )
                 }
                 "stop" -> {
-                    scheduler.stop()
+                    XenSynthPlaybackCoordinator.stop()
+                    XenSynthPlaybackService.stopIfRunning(activity)
                     result.success(true)
                 }
                 "noteOn" -> noteOn(arguments, result)
                 "noteOff" -> {
                     val token = integer(arguments, "token", -1)
-                    if (token >= 0) nativeAudio.noteOff(token)
+                    val active = if (token >= 0) manualNoteTokens.remove(token) else null
+                    runCatching { active?.audioToken?.let(nativeAudio::noteOff) }
+                    active?.midiToken?.let(MidiOutputRouter::noteOff)
                     result.success(true)
                 }
                 "allNotesOff" -> {
-                    scheduler.allNotesOff()
+                    XenSynthPlaybackCoordinator.allNotesOff()
+                    releaseManualNotes()
                     result.success(true)
                 }
+                "releaseInputNotes" -> {
+                    releaseManualNotes()
+                    result.success(true)
+                }
+                "getPlaybackState" -> result.success(XenSynthPlaybackCoordinator.snapshot().toMap())
                 "getPitchRecognitionState" -> result.success(pitchRecognitionManager.state())
                 "setPitchRecognitionSensitivity" -> {
                     pitchRecognitionManager.setSensitivity(
@@ -323,19 +350,67 @@ internal class XenSynthPlatformBridge(
             result.error("invalid_note", "Pitch is outside the MIDI range", null)
             return
         }
-        val token = nativeAudio.noteOn(
-            key = key,
-            velocity = integer(arguments, "velocity", 100).coerceIn(1, 127),
-            cents = ((pitch - key) * 100.0).toFloat(),
-            channel = integer(arguments, "channel", 0).coerceIn(0, 15),
-            program = integer(arguments, "program", 0).coerceIn(0, 127),
-            bankMsb = integer(arguments, "bankMsb", 0).coerceIn(0, 127),
-            bankLsb = integer(arguments, "bankLsb", 0).coerceIn(0, 127),
+        val velocity = integer(arguments, "velocity", 100).coerceIn(1, 127)
+        val channel = integer(arguments, "channel", 0).coerceIn(0, 15)
+        val program = integer(arguments, "program", 0).coerceIn(0, 127)
+        val bankMsb = integer(arguments, "bankMsb", 0).coerceIn(0, 127)
+        val bankLsb = integer(arguments, "bankLsb", 0).coerceIn(0, 127)
+        val midiToken = MidiOutputRouter.noteOn(
+            id = integerOrNull(arguments, "id"),
+            pitch = pitch,
+            velocity = velocity,
+            channel = channel,
+            program = program,
+            bankMsb = bankMsb,
+            bankLsb = bankLsb,
         )
-        if (token == null) {
-            result.error("audio_unavailable", "Native audio is not ready", null)
-        } else {
-            result.success(token)
+        val audioToken = runCatching {
+            nativeAudio.noteOn(
+                key = key,
+                velocity = velocity,
+                cents = ((pitch - key) * 100.0).toFloat(),
+                channel = channel,
+                program = program,
+                bankMsb = bankMsb,
+                bankLsb = bankLsb,
+            )
+        }.getOrNull()
+        val token = allocateManualNoteToken()
+        manualNoteTokens[token] = ManualNoteToken(audioToken, midiToken)
+        result.success(token)
+    }
+
+    private fun releaseManualNotes() {
+        val active = manualNoteTokens.values.toList()
+        active.mapNotNull { it.audioToken }
+            .forEach { noteId -> runCatching { nativeAudio.noteOffImmediately(noteId) } }
+        active.forEach { MidiOutputRouter.noteOff(it.midiToken) }
+        manualNoteTokens.clear()
+    }
+
+    private fun startPlaybackService() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+            ContextCompat.checkSelfPermission(activity, Manifest.permission.POST_NOTIFICATIONS) !=
+            PackageManager.PERMISSION_GRANTED
+        ) {
+            ActivityCompat.requestPermissions(
+                activity,
+                arrayOf(Manifest.permission.POST_NOTIFICATIONS),
+                NOTIFICATION_PERMISSION_REQUEST_CODE,
+            )
+        }
+        runCatching { XenSynthPlaybackService.startOrRefresh(activity) }
+            .onFailure { error ->
+                android.util.Log.w("XenSynthPlayback", "Could not start playback service", error)
+            }
+    }
+
+    private fun allocateManualNoteToken(): Int {
+        while (manualNoteTokens.containsKey(nextManualNoteToken)) {
+            nextManualNoteToken = if (nextManualNoteToken == Int.MAX_VALUE) 1 else nextManualNoteToken + 1
+        }
+        return nextManualNoteToken.also {
+            nextManualNoteToken = if (nextManualNoteToken == Int.MAX_VALUE) 1 else nextManualNoteToken + 1
         }
     }
 
@@ -679,11 +754,11 @@ internal class XenSynthPlatformBridge(
     fun onHostPause() {
         hostResumed = false
         midiInputManager.stop()
+        releaseManualNotes()
         pendingPitchRecognitionStart = false
         pendingPitchRecognitionDownload = false
         pendingPitchRecognitionMode = PitchRecognitionMode.PIANO
         pitchRecognitionManager.stop()
-        scheduler.pause()
     }
 
     fun close() {
@@ -694,17 +769,26 @@ internal class XenSynthPlatformBridge(
         midiEventSink = null
         midiInputManager.close()
         pitchRecognitionManager.close()
-        scheduler.dispose()
-        nativeAudio.allSoundOff()
-        nativeAudio.teardown()
+        releaseManualNotes()
+        if (!XenSynthPlaybackService.isRunning()) {
+            XenSynthPlaybackCoordinator.dispose()
+            nativeAudio.allSoundOff()
+            nativeAudio.teardown()
+        }
         worker.shutdownNow()
         initializeWaiters.clear()
     }
+
+    private data class ManualNoteToken(
+        val audioToken: Int?,
+        val midiToken: Int,
+    )
 
     private companion object {
         const val PREFERENCES_NAME = "xensynth_flutter_settings"
         const val DOCUMENT_REQUEST_CODE = 0x5845
         const val MICROPHONE_PERMISSION_REQUEST_CODE = 0x5846
+        const val NOTIFICATION_PERMISSION_REQUEST_CODE = 0x5847
         const val DOCUMENT_CACHE_DIRECTORY = "xensynth-documents"
         const val SAMPLE_SCHEDULER_MILLIS = 8
         const val DEFAULT_GAIN = 2.05f
@@ -743,6 +827,14 @@ internal class XenSynthPlatformBridge(
                 is Number -> value.toInt()
                 is String -> value.toIntOrNull() ?: defaultValue
                 else -> defaultValue
+            }
+        }
+
+        fun integerOrNull(map: Map<*, *>, key: String): Int? {
+            return when (val value = map[key]) {
+                is Number -> value.toInt()
+                is String -> value.toIntOrNull()
+                else -> null
             }
         }
 
