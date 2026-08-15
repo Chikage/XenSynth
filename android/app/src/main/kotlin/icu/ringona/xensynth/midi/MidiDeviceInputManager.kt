@@ -74,7 +74,14 @@ class MidiDeviceInputManager(
 
     private fun openDevice(info: MidiDeviceInfo) {
         val manager = midiManager ?: return
-        if (!started || !info.hasOutputPorts() || openDevices.containsKey(info.id)) {
+        // The app exposes its own virtual output port. Opening that port here
+        // would feed every scheduled output event straight back into the
+        // Flutter MIDI input stream (note-on -> output -> input -> note-on),
+        // causing a feedback loop during score playback. Other virtual MIDI
+        // devices remain valid input sources and are intentionally untouched.
+        if (!started || info.isOwnVirtualOutput() || !info.hasOutputPorts() ||
+            openDevices.containsKey(info.id)
+        ) {
             return
         }
         manager.openDevice(
@@ -107,6 +114,16 @@ class MidiDeviceInputManager(
 
     private fun MidiDeviceInfo.hasOutputPorts(): Boolean {
         return ports.any { it.type == MidiDeviceInfo.PortInfo.TYPE_OUTPUT }
+    }
+
+    private fun MidiDeviceInfo.isOwnVirtualOutput(): Boolean {
+        if (type != MidiDeviceInfo.TYPE_VIRTUAL) return false
+        val properties = properties
+        val name = properties.getString(MidiDeviceInfo.PROPERTY_NAME)
+        val manufacturer = properties.getString(MidiDeviceInfo.PROPERTY_MANUFACTURER)
+        val product = properties.getString(MidiDeviceInfo.PROPERTY_PRODUCT)
+        return name == OWN_OUTPUT_NAME &&
+            (manufacturer == OWN_MANUFACTURER || product == OWN_PRODUCT)
     }
 
     private fun MidiDevice.outputPortConnections(): List<OpenMidiPort> {
@@ -182,6 +199,9 @@ class MidiDeviceInputManager(
 
     companion object {
         private const val TAG = "MidiDeviceInput"
+        private const val OWN_OUTPUT_NAME = "XenSynth MIDI Output"
+        private const val OWN_MANUFACTURER = "XenSynth"
+        private const val OWN_PRODUCT = "XenSynth"
     }
 }
 
