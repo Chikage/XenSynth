@@ -63,6 +63,11 @@ void main() {
                 magnitudes: Float32List.fromList(
                   List<double>.generate(128, (index) => index / 127),
                 ),
+                peaks: const [
+                  SpectrumPeak(pitch: 69, magnitude: 0.92),
+                  SpectrumPeak(pitch: 69.04, magnitude: 0.48),
+                  SpectrumPeak(pitch: 72, magnitude: 0.75),
+                ],
               ),
             ],
             onPitchDown: (_, _, _) {},

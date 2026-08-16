@@ -95,6 +95,5 @@ flutter {
 dependencies {
     implementation("androidx.media:media:1.8.0")
     implementation("com.github.wendykierp:JTransforms:3.1")
-    implementation("org.tensorflow:tensorflow-lite:2.17.0")
     testImplementation("junit:junit:4.13.2")
 }

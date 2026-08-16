@@ -15,7 +15,7 @@ void main() {
       expect(settings.playbackPreviewSeconds, 1.8);
       expect(settings.pitchSnapEnabled, isFalse);
       expect(settings.hapticFeedbackEnabled, isTrue);
-      expect(settings.pitchRecognitionMode, PitchRecognitionMode.yin);
+      expect(settings.pitchRecognitionMode, PitchRecognitionMode.hybrid);
       expect(settings.microphoneSensitivity, 1);
       expect(
         settings.hapticFeedbackStrength,
@@ -198,32 +198,21 @@ void main() {
       );
     });
 
-    test('round-trips and copies microphone recognition mode', () {
+    test('migrates legacy microphone modes to local hybrid recognition', () {
       final yin = XenSynthSettings.fromMap(<String, Object?>{
         'pitchRecognitionMode': 'YIN',
       });
 
-      expect(yin.pitchRecognitionMode, PitchRecognitionMode.yin);
-      expect(yin.toMap()['pitchRecognitionMode'], 'yin');
-      expect(
-        yin
-            .copyWith(pitchRecognitionMode: PitchRecognitionMode.piano)
-            .pitchRecognitionMode,
-        PitchRecognitionMode.piano,
-      );
+      expect(yin.pitchRecognitionMode, PitchRecognitionMode.hybrid);
+      expect(yin.toMap()['pitchRecognitionMode'], 'hybrid');
 
       final fft = XenSynthSettings.fromMap(<String, Object?>{
         'pitchRecognitionMode': 'FFT',
         'keyboardLayoutMode': 'spatial',
       });
-      expect(fft.pitchRecognitionMode, PitchRecognitionMode.fft);
-      expect(fft.layoutMode, KeyboardLayoutMode.linear);
-      expect(fft.toMap()['pitchRecognitionMode'], 'fft');
-
-      final forcedLinear = const XenSynthSettings(
-        layoutMode: KeyboardLayoutMode.hexagonal,
-      ).copyWith(pitchRecognitionMode: PitchRecognitionMode.fft);
-      expect(forcedLinear.layoutMode, KeyboardLayoutMode.linear);
+      expect(fft.pitchRecognitionMode, PitchRecognitionMode.hybrid);
+      expect(fft.layoutMode, KeyboardLayoutMode.spatial);
+      expect(fft.toMap()['pitchRecognitionMode'], 'hybrid');
     });
 
     test('round-trips and clamps microphone sensitivity', () {

@@ -28,7 +28,7 @@ void main() {
       'recognizing': true,
       'busy': false,
       'progress': 1.0,
-      'message': 'Listening for piano notes',
+      'message': 'Listening with local FFT and YIN fusion',
     };
     messenger.setMockMethodCallHandler(channel, (call) async {
       calls.add(call);
@@ -65,25 +65,20 @@ void main() {
   test('starts and stops the native microphone recognizer', () async {
     final controller = XenSynthController()..pitchRecognitionAvailable = true;
 
-    final started = await controller.startPitchRecognition(
-      downloadIfNeeded: true,
-    );
+    final started = await controller.startPitchRecognition();
 
     expect(started, isTrue);
     expect(controller.pitchRecognizing, isTrue);
-    expect(controller.pitchRecognitionModelReady, isTrue);
     final startCall = calls.singleWhere(
       (call) => call.method == 'startPitchRecognition',
     );
     expect(
-      Map<Object?, Object?>.from(
-        startCall.arguments! as Map,
-      )['downloadIfNeeded'],
-      isTrue,
+      Map<Object?, Object?>.from(startCall.arguments! as Map),
+      isNot(contains('downloadIfNeeded')),
     );
     expect(
       Map<Object?, Object?>.from(startCall.arguments! as Map)['mode'],
-      'yin',
+      'hybrid',
     );
     final sensitivityCall = calls.singleWhere(
       (call) => call.method == 'setPitchRecognitionSensitivity',
@@ -108,11 +103,11 @@ void main() {
     await pumpEventQueue();
   });
 
-  test('starts YIN mode without requesting a model download', () async {
+  test('starts the local hybrid recognizer without a model download', () async {
     final controller = XenSynthController()
       ..pitchRecognitionAvailable = true
       ..settings = const XenSynthSettings(
-        pitchRecognitionMode: PitchRecognitionMode.yin,
+        pitchRecognitionMode: PitchRecognitionMode.hybrid,
       );
 
     final started = await controller.startPitchRecognition();
@@ -122,8 +117,8 @@ void main() {
       (call) => call.method == 'startPitchRecognition',
     );
     final arguments = Map<Object?, Object?>.from(startCall.arguments! as Map);
-    expect(arguments['mode'], 'yin');
-    expect(arguments['downloadIfNeeded'], isFalse);
+    expect(arguments['mode'], 'hybrid');
+    expect(arguments, isNot(contains('downloadIfNeeded')));
 
     controller.dispose();
     await pumpEventQueue();
@@ -240,7 +235,7 @@ void main() {
       saveCall.arguments! as Map,
     );
     expect(saveArguments['duration'], closeTo(0.8, 0.000001));
-    expect(saveArguments['suggestedName'], startsWith('XenSynth_yin_'));
+    expect(saveArguments['suggestedName'], startsWith('XenSynth_hybrid_'));
     final savedNotes = saveArguments['notes']! as List<Object?>;
     expect(savedNotes, hasLength(1));
     final savedNote = Map<Object?, Object?>.from(savedNotes.single! as Map);
@@ -255,7 +250,7 @@ void main() {
     await pumpEventQueue();
   });
 
-  test('accepts FFT frames and keeps FFT on the linear ruler', () async {
+  test('accepts FFT peak frames in the hybrid microphone take', () async {
     stopDuration = 0.4;
     startState = <String, Object?>{
       'supported': true,
@@ -264,12 +259,12 @@ void main() {
       'recognizing': true,
       'busy': false,
       'progress': 0.0,
-      'message': 'Listening for FFT spectrum',
+      'message': 'Listening with local FFT and YIN fusion',
     };
     final controller = XenSynthController()
       ..pitchRecognitionAvailable = true
       ..settings = const XenSynthSettings(
-        pitchRecognitionMode: PitchRecognitionMode.fft,
+        pitchRecognitionMode: PitchRecognitionMode.hybrid,
       );
     await controller.initialize();
 
@@ -279,7 +274,7 @@ void main() {
     );
     expect(
       Map<Object?, Object?>.from(startCall.arguments! as Map)['mode'],
-      'fft',
+      'hybrid',
     );
 
     await messenger.handlePlatformMessage(
@@ -287,9 +282,12 @@ void main() {
       codec.encodeSuccessEnvelope(<String, Object?>{
         'type': 'spectrum',
         'source': 'microphone',
-        'mode': 'fft',
+        'mode': 'hybrid',
         'time': 0.25,
         'magnitudes': Float32List.fromList(<double>[0.1, 0.8, 0.2]),
+        'peaks': <Map<String, double>>[
+          <String, double>{'pitch': 69.1, 'magnitude': 0.8},
+        ],
       }),
       (_) {},
     );
@@ -299,30 +297,12 @@ void main() {
     expect(controller.showingFftSpectrum, isTrue);
     expect(controller.spectrumFrames, hasLength(1));
     expect(controller.spectrumFrames.single.magnitudes[1], closeTo(0.8, 0.001));
+    expect(
+      controller.spectrumFrames.single.peaks.single.pitch,
+      closeTo(69.1, 0.001),
+    );
 
     await controller.stopPitchRecognition();
-    controller.dispose();
-    await pumpEventQueue();
-  });
-
-  test('reports that a model download is required before starting', () async {
-    startState = <String, Object?>{
-      'supported': true,
-      'phase': 'needsDownload',
-      'modelReady': false,
-      'recognizing': false,
-      'busy': false,
-      'progress': 0.0,
-      'message': 'Pitch recognition model is not downloaded',
-    };
-    final controller = XenSynthController()..pitchRecognitionAvailable = true;
-
-    final started = await controller.startPitchRecognition();
-
-    expect(started, isFalse);
-    expect(controller.pitchRecognitionPhase, 'needsDownload');
-    expect(controller.pitchRecognitionModelReady, isFalse);
-
     controller.dispose();
     await pumpEventQueue();
   });
@@ -333,7 +313,7 @@ void main() {
       final controller = XenSynthController()
         ..settings = const XenSynthSettings(
           edo: 19,
-          pitchRecognitionMode: PitchRecognitionMode.yin,
+          pitchRecognitionMode: PitchRecognitionMode.hybrid,
         );
       await controller.initialize();
 
@@ -380,7 +360,7 @@ void main() {
 
       controller.settings = const XenSynthSettings(
         edo: 0,
-        pitchRecognitionMode: PitchRecognitionMode.yin,
+        pitchRecognitionMode: PitchRecognitionMode.hybrid,
       );
       await emit(const {'pitch': 69.37});
       expect(controller.activePitches.values.single, closeTo(69.37, 0.000001));

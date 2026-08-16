@@ -59,39 +59,21 @@ internal class XenSynthPlatformBridge(
                 midiEventSink?.success(state)
             }
 
-            override fun onPitchNote(
-                pitch: Int,
-                velocity: Int,
-                down: Boolean,
-                timeSeconds: Double,
-            ) {
-                midiEventSink?.success(
-                    mapOf(
-                        "type" to if (down) "noteOn" else "noteOff",
-                        "source" to "microphone",
-                        "channel" to 0,
-                        "pitch" to pitch,
-                        "note" to pitch,
-                        "noteNumber" to pitch,
-                        "velocity" to if (down) velocity else 0,
-                        "time" to timeSeconds,
-                    ),
-                )
-            }
-
             override fun onContinuousPitch(
                 voiced: Boolean,
                 frequencyHz: Double,
                 midiPitch: Double,
                 confidence: Double,
                 velocity: Int,
+                algorithm: String,
                 timeSeconds: Double,
             ) {
                 midiEventSink?.success(
                     mapOf(
                         "type" to "pitch",
                         "source" to "microphone",
-                        "mode" to PitchRecognitionMode.YIN.wireName,
+                        "mode" to PitchRecognitionMode.HYBRID.wireName,
+                        "algorithm" to algorithm,
                         "voiced" to voiced,
                         "frequencyHz" to frequencyHz,
                         "pitch" to midiPitch,
@@ -102,14 +84,24 @@ internal class XenSynthPlatformBridge(
                 )
             }
 
-            override fun onSpectrum(timeSeconds: Double, magnitudes: FloatArray) {
+            override fun onSpectrum(
+                timeSeconds: Double,
+                magnitudes: FloatArray,
+                peaks: List<icu.ringona.xensynth.pitch.SpectrumPeak>,
+            ) {
                 midiEventSink?.success(
                     mapOf(
                         "type" to "spectrum",
                         "source" to "microphone",
-                        "mode" to PitchRecognitionMode.FFT.wireName,
+                        "mode" to PitchRecognitionMode.HYBRID.wireName,
                         "time" to timeSeconds,
                         "magnitudes" to magnitudes,
+                        "peaks" to peaks.map { peak ->
+                            mapOf(
+                                "pitch" to peak.midiPitch,
+                                "magnitude" to peak.magnitude,
+                            )
+                        },
                     ),
                 )
             }
@@ -131,8 +123,7 @@ internal class XenSynthPlatformBridge(
     private var reverb = DEFAULT_REVERB
     private var latencyMilliseconds = 0.0
     private var pendingPitchRecognitionStart = false
-    private var pendingPitchRecognitionDownload = false
-    private var pendingPitchRecognitionMode = PitchRecognitionMode.PIANO
+    private var pendingPitchRecognitionMode = PitchRecognitionMode.HYBRID
     private var pendingBluetoothMidiOutputIds = emptyList<String>()
     private val manualNoteTokens = mutableMapOf<Int, ManualNoteToken>()
     private var nextManualNoteToken = 1
@@ -262,13 +253,11 @@ internal class XenSynthPlatformBridge(
                 }
                 "startPitchRecognition" -> startPitchRecognition(
                     mode = PitchRecognitionMode.fromWireName(arguments["mode"]?.toString()),
-                    downloadIfNeeded = boolean(arguments, "downloadIfNeeded"),
                     result = result,
                 )
                 "stopPitchRecognition" -> {
                     pendingPitchRecognitionStart = false
-                    pendingPitchRecognitionDownload = false
-                    pendingPitchRecognitionMode = PitchRecognitionMode.PIANO
+                    pendingPitchRecognitionMode = PitchRecognitionMode.HYBRID
                     result.success(pitchRecognitionManager.stop())
                 }
                 "playPitchRecording" -> result.success(
@@ -480,17 +469,15 @@ internal class XenSynthPlatformBridge(
 
     private fun startPitchRecognition(
         mode: PitchRecognitionMode,
-        downloadIfNeeded: Boolean,
         result: MethodChannel.Result,
     ) {
         if (ContextCompat.checkSelfPermission(activity, Manifest.permission.RECORD_AUDIO) ==
             PackageManager.PERMISSION_GRANTED
         ) {
-            result.success(pitchRecognitionManager.start(mode, downloadIfNeeded))
+            result.success(pitchRecognitionManager.start(mode))
             return
         }
         pendingPitchRecognitionStart = true
-        pendingPitchRecognitionDownload = downloadIfNeeded
         pendingPitchRecognitionMode = mode
         val state = pitchRecognitionManager.waitingForPermission(mode)
         ActivityCompat.requestPermissions(
@@ -597,13 +584,11 @@ internal class XenSynthPlatformBridge(
         val requestedMicrophone = permissions.any { it == Manifest.permission.RECORD_AUDIO }
         val granted = requestedMicrophone && grantResults.any { it == PackageManager.PERMISSION_GRANTED }
         val shouldStart = pendingPitchRecognitionStart
-        val downloadIfNeeded = pendingPitchRecognitionDownload
         val mode = pendingPitchRecognitionMode
         pendingPitchRecognitionStart = false
-        pendingPitchRecognitionDownload = false
-        pendingPitchRecognitionMode = PitchRecognitionMode.PIANO
+        pendingPitchRecognitionMode = PitchRecognitionMode.HYBRID
         if (granted && shouldStart) {
-            pitchRecognitionManager.start(mode, downloadIfNeeded)
+            pitchRecognitionManager.start(mode)
         } else {
             pitchRecognitionManager.permissionDenied()
         }
@@ -837,8 +822,7 @@ internal class XenSynthPlatformBridge(
         midiInputManager.stop()
         releaseManualNotes()
         pendingPitchRecognitionStart = false
-        pendingPitchRecognitionDownload = false
-        pendingPitchRecognitionMode = PitchRecognitionMode.PIANO
+        pendingPitchRecognitionMode = PitchRecognitionMode.HYBRID
         pitchRecognitionManager.stop()
     }
 

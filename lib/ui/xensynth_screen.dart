@@ -217,11 +217,6 @@ class _XenSynthScreenState extends State<XenSynthScreen>
                         _controller.pitchRecognitionAvailable,
                     pitchRecognizing: _controller.pitchRecognizing,
                     pitchRecognitionBusy: _controller.pitchRecognitionBusy,
-                    pitchRecognitionModelReady:
-                        _controller.pitchRecognitionModelReady,
-                    pitchRecognitionDownloadProgress:
-                        _controller.pitchRecognitionDownloadProgress,
-                    pitchRecognitionMode: settings.pitchRecognitionMode,
                     onPitchRecognition: _togglePitchRecognition,
                     microphoneTakeReadyForSave:
                         _controller.microphoneTakeNeedsSaving,
@@ -254,9 +249,6 @@ class _XenSynthScreenState extends State<XenSynthScreen>
                     child: _StatusBadge(
                       icon: _controller.pitchRecognizing
                           ? Icons.mic_rounded
-                          : settings.pitchRecognitionMode ==
-                                PitchRecognitionMode.piano
-                          ? Icons.downloading_rounded
                           : Icons.graphic_eq_rounded,
                       label: _pitchRecognitionBadgeLabel,
                     ),
@@ -362,38 +354,7 @@ class _XenSynthScreenState extends State<XenSynthScreen>
       return;
     }
 
-    var downloadIfNeeded = false;
-    if (_controller.settings.pitchRecognitionMode ==
-            PitchRecognitionMode.piano &&
-        !_controller.pitchRecognitionModelReady) {
-      final confirmed = await showDialog<bool>(
-        context: context,
-        builder: (context) => AlertDialog(
-          title: const Text('Piano note recognition'),
-          content: const Text(
-            'The first use downloads the official Magenta Onsets and Frames '
-            'model (about 72.3 MB). After download, microphone audio is '
-            'processed locally on this device. Continue?',
-          ),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.of(context).pop(false),
-              child: const Text('Cancel'),
-            ),
-            FilledButton(
-              onPressed: () => Navigator.of(context).pop(true),
-              child: const Text('Download'),
-            ),
-          ],
-        ),
-      );
-      if (confirmed != true || !mounted) return;
-      downloadIfNeeded = true;
-    }
-
-    final started = await _controller.startPitchRecognition(
-      downloadIfNeeded: downloadIfNeeded,
-    );
+    final started = await _controller.startPitchRecognition();
     if (!started && mounted) {
       final message = _controller.pitchRecognitionMessage.isEmpty
           ? 'Microphone pitch recognition is unavailable.'
@@ -470,24 +431,13 @@ class _XenSynthScreenState extends State<XenSynthScreen>
 
   String get _pitchRecognitionBadgeLabel {
     if (_controller.pitchRecognizing) {
-      if (_controller.settings.pitchRecognitionMode ==
-          PitchRecognitionMode.fft) {
-        return 'FFT RECORDING';
-      }
-      if (_controller.settings.pitchRecognitionMode ==
-          PitchRecognitionMode.yin) {
-        final frequency = _controller.pitchRecognitionFrequencyHz;
-        return frequency == null
-            ? 'YIN LISTENING'
-            : 'YIN ${frequency.toStringAsFixed(1)} HZ';
-      }
-      return 'PIANO LISTENING';
-    }
-    if (_controller.pitchRecognitionPhase == 'downloading') {
-      final progress = (_controller.pitchRecognitionDownloadProgress * 100)
-          .clamp(0, 100)
-          .round();
-      return 'MODEL $progress%';
+      final frequency = _controller.pitchRecognitionFrequencyHz;
+      final algorithm = _controller.pitchRecognitionAlgorithm == 'fft'
+          ? 'FFT'
+          : 'FFT+YIN';
+      return frequency == null
+          ? '$algorithm LISTENING'
+          : '$algorithm ${frequency.toStringAsFixed(1)} HZ';
     }
     if (_controller.pitchRecognitionPhase == 'permission') {
       return 'MIC PERMISSION';

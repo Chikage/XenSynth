@@ -28,7 +28,7 @@ void main() {
           'recognizing': true,
           'busy': false,
           'progress': 1.0,
-          'message': 'Listening for piano notes',
+          'message': 'Listening with local FFT and YIN fusion',
         },
         'stopPitchRecognition' => <String, Object?>{
           'supported': true,
@@ -190,7 +190,7 @@ void main() {
     }
   });
 
-  testWidgets('YIN microphone mode starts without a model download dialog', (
+  testWidgets('hybrid microphone mode starts without a model download dialog', (
     tester,
   ) async {
     const nativeChannel = MethodChannel('icu.ringona.xensynth/platform');
@@ -202,13 +202,13 @@ void main() {
       if (call.method == 'startPitchRecognition') {
         return <String, Object?>{
           'supported': true,
-          'mode': 'yin',
+          'mode': 'hybrid',
           'phase': 'listening',
           'modelReady': false,
           'recognizing': true,
           'busy': false,
           'progress': 0.0,
-          'message': 'Listening for continuous pitch',
+          'message': 'Listening with local FFT and YIN fusion',
         };
       }
       return true;
@@ -216,7 +216,7 @@ void main() {
     addTearDown(() => messenger.setMockMethodCallHandler(nativeChannel, null));
     final controller = XenSynthController()
       ..settings = const XenSynthSettings(
-        pitchRecognitionMode: PitchRecognitionMode.yin,
+        pitchRecognitionMode: PitchRecognitionMode.hybrid,
       )
       ..pitchRecognitionAvailable = true
       ..initialized = true;
@@ -238,8 +238,8 @@ void main() {
       (call) => call.method == 'startPitchRecognition',
     );
     final arguments = Map<Object?, Object?>.from(startCall.arguments! as Map);
-    expect(arguments['mode'], 'yin');
-    expect(arguments['downloadIfNeeded'], isFalse);
+    expect(arguments['mode'], 'hybrid');
+    expect(arguments, isNot(contains('downloadIfNeeded')));
 
     await controller.stopPitchRecognition();
     await tester.pump();

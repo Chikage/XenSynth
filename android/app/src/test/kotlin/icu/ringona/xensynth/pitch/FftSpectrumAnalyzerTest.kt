@@ -23,4 +23,20 @@ class FftSpectrumAnalyzerTest {
         assertTrue(spectrum[strongestPoint] > 0.8f)
         assertEquals(69.0, detectedPitch, 1.1)
     }
+
+    @Test
+    fun estimatesFundamentalPitchFromPureSine() {
+        val analyzer = FftSpectrumAnalyzer(sampleRate = 16_000, frameSize = 2_048)
+        val samples = FloatArray(analyzer.frameSize) { index ->
+            (0.8 * sin(2.0 * PI * 440.0 * index / 16_000)).toFloat()
+        }
+
+        val result = analyzer.analyzeFrame(samples)
+        val estimate = requireNotNull(result.pitchEstimate)
+
+        assertEquals(440.0, estimate.frequencyHz, 4.0)
+        assertEquals(69.0, estimate.midiPitch, 0.16)
+        assertTrue(estimate.confidence >= 0.5)
+        assertTrue(result.peaks.any { kotlin.math.abs(it.midiPitch - 69.0) < 0.16 })
+    }
 }

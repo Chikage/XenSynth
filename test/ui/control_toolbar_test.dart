@@ -1,6 +1,5 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
-import 'package:xensynth/app/xensynth_settings.dart';
 import 'package:xensynth/ui/app_palette.dart';
 import 'package:xensynth/ui/widgets/control_toolbar.dart';
 
@@ -354,7 +353,7 @@ void main() {
   });
 
   testWidgets(
-    'microphone recognition control exposes download and active states',
+    'microphone recognition control exposes local hybrid and active states',
     (tester) async {
       await tester.binding.setSurfaceSize(const Size(874, 402));
       addTearDown(() => tester.binding.setSurfaceSize(null));
@@ -379,10 +378,7 @@ void main() {
         const ValueKey('toolbar-pitch-recognition-button'),
       );
       expect(button, findsOneWidget);
-      expect(
-        find.byTooltip('Download model and recognize piano notes'),
-        findsOneWidget,
-      );
+      expect(find.byTooltip('Record pitch with FFT and YIN'), findsOneWidget);
 
       await tester.tap(button);
       expect(taps, 1);
@@ -396,7 +392,6 @@ void main() {
               child: _controlToolbar(
                 pitchRecognitionAvailable: true,
                 pitchRecognizing: true,
-                pitchRecognitionModelReady: true,
                 onPitchRecognition: () => taps++,
               ),
             ),
@@ -404,7 +399,7 @@ void main() {
         ),
       );
 
-      expect(find.byTooltip('Stop piano note recognition'), findsOneWidget);
+      expect(find.byTooltip('Stop pitch recording'), findsOneWidget);
       expect(find.byIcon(Icons.mic_rounded), findsOneWidget);
 
       await tester.pumpWidget(
@@ -415,17 +410,13 @@ void main() {
               alignment: Alignment.topCenter,
               child: _controlToolbar(
                 pitchRecognitionAvailable: true,
-                pitchRecognitionMode: PitchRecognitionMode.yin,
                 onPitchRecognition: () => taps++,
               ),
             ),
           ),
         ),
       );
-      expect(
-        find.byTooltip('Detect continuous monophonic pitch with YIN'),
-        findsOneWidget,
-      );
+      expect(find.byTooltip('Record pitch with FFT and YIN'), findsOneWidget);
     },
   );
 
@@ -536,8 +527,6 @@ ControlToolbar _controlToolbar({
   ValueChanged<double>? onOffsetChanged,
   bool pitchRecognitionAvailable = false,
   bool pitchRecognizing = false,
-  bool pitchRecognitionModelReady = false,
-  PitchRecognitionMode pitchRecognitionMode = PitchRecognitionMode.piano,
   VoidCallback? onPitchRecognition,
   bool microphoneTakeReadyForSave = false,
   VoidCallback? onSaveMicrophoneTake,
@@ -578,8 +567,6 @@ ControlToolbar _controlToolbar({
     onSeek: (_) {},
     pitchRecognitionAvailable: pitchRecognitionAvailable,
     pitchRecognizing: pitchRecognizing,
-    pitchRecognitionModelReady: pitchRecognitionModelReady,
-    pitchRecognitionMode: pitchRecognitionMode,
     onPitchRecognition: onPitchRecognition,
     microphoneTakeReadyForSave: microphoneTakeReadyForSave,
     onSaveMicrophoneTake: onSaveMicrophoneTake,

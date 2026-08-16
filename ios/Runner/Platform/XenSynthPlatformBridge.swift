@@ -709,36 +709,19 @@ extension XenSynthPlatformBridge: PitchRecognitionManagerListener {
 
   func pitchRecognitionManager(
     _ manager: PitchRecognitionManager,
-    didRecognizeNote pitch: Int,
-    velocity: Int,
-    down: Bool,
-    timeSeconds: Double
-  ) {
-    midiEventSink?([
-      "type": down ? "noteOn" : "noteOff",
-      "source": "microphone",
-      "channel": 0,
-      "pitch": pitch,
-      "note": pitch,
-      "noteNumber": pitch,
-      "velocity": down ? velocity : 0,
-      "time": timeSeconds,
-    ])
-  }
-
-  func pitchRecognitionManager(
-    _ manager: PitchRecognitionManager,
     didRecognizePitch voiced: Bool,
     frequencyHz: Double,
     midiPitch: Double,
     confidence: Double,
     velocity: Int,
+    algorithm: String,
     timeSeconds: Double
   ) {
     midiEventSink?([
       "type": "pitch",
       "source": "microphone",
-      "mode": PitchRecognitionMode.yin.rawValue,
+      "mode": PitchRecognitionMode.hybrid.rawValue,
+      "algorithm": algorithm,
       "voiced": voiced,
       "frequencyHz": frequencyHz,
       "pitch": midiPitch,
@@ -751,14 +734,21 @@ extension XenSynthPlatformBridge: PitchRecognitionManagerListener {
   func pitchRecognitionManager(
     _ manager: PitchRecognitionManager,
     didAnalyzeSpectrum magnitudes: [Float],
+    peaks: [SpectrumPeak],
     timeSeconds: Double
   ) {
     midiEventSink?([
       "type": "spectrum",
       "source": "microphone",
-      "mode": PitchRecognitionMode.fft.rawValue,
+      "mode": PitchRecognitionMode.hybrid.rawValue,
       "time": timeSeconds,
       "magnitudes": magnitudes,
+      "peaks": peaks.map { peak in
+        [
+          "pitch": peak.midiPitch,
+          "magnitude": peak.magnitude,
+        ]
+      },
     ])
   }
 }

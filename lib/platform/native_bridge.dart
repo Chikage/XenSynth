@@ -252,13 +252,9 @@ class XenSynthNativeBridge {
 
   Future<Map<String, Object?>> startPitchRecognition({
     required String mode,
-    bool downloadIfNeeded = false,
   }) async {
     return _stringKeyedMap(
-      await _invoke('startPitchRecognition', <String, Object?>{
-        'mode': mode,
-        'downloadIfNeeded': downloadIfNeeded,
-      }),
+      await _invoke('startPitchRecognition', <String, Object?>{'mode': mode}),
     );
   }
 

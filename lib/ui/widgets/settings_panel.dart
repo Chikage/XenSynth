@@ -67,17 +67,11 @@ class SettingsPanel extends StatelessWidget {
                             value: KeyboardLayoutMode.hexagonal,
                             label: Text('HEX'),
                             icon: Icon(Icons.hive_outlined, size: 15),
-                            enabled:
-                                settings.pitchRecognitionMode !=
-                                PitchRecognitionMode.fft,
                           ),
                           ButtonSegment(
                             value: KeyboardLayoutMode.spatial,
                             label: Text('3D'),
                             icon: Icon(Icons.view_in_ar_outlined, size: 15),
-                            enabled:
-                                settings.pitchRecognitionMode !=
-                                PitchRecognitionMode.fft,
                           ),
                         ],
                         selected: {settings.layoutMode},
@@ -220,49 +214,6 @@ class SettingsPanel extends StatelessWidget {
                       ),
                     if (pitchRecognitionAvailable) ...[
                       const _SectionLabel('MIC INPUT'),
-                      _SpacedControl(
-                        child: SegmentedButton<PitchRecognitionMode>(
-                          key: const ValueKey('pitch-recognition-mode'),
-                          style: _compactButtonStyle,
-                          showSelectedIcon: false,
-                          segments: const [
-                            ButtonSegment(
-                              value: PitchRecognitionMode.piano,
-                              label: Text('PIANO'),
-                              icon: Icon(Icons.piano_rounded, size: 15),
-                              tooltip: 'Polyphonic piano note recognition',
-                            ),
-                            ButtonSegment(
-                              value: PitchRecognitionMode.yin,
-                              label: Text('YIN'),
-                              icon: Icon(Icons.graphic_eq_rounded, size: 15),
-                              tooltip: 'Continuous monophonic pitch detection',
-                            ),
-                            ButtonSegment(
-                              value: PitchRecognitionMode.fft,
-                              label: Text('FFT'),
-                              icon: Icon(
-                                Icons.multiline_chart_rounded,
-                                size: 15,
-                              ),
-                              tooltip:
-                                  'Live frequency spectrum on the linear ruler',
-                            ),
-                          ],
-                          selected: {settings.pitchRecognitionMode},
-                          onSelectionChanged: (value) {
-                            final mode = value.single;
-                            onChanged(
-                              settings.copyWith(
-                                pitchRecognitionMode: mode,
-                                layoutMode: mode == PitchRecognitionMode.fft
-                                    ? KeyboardLayoutMode.linear
-                                    : settings.layoutMode,
-                              ),
-                            );
-                          },
-                        ),
-                      ),
                       _SliderRow(
                         label: 'Mic sensitivity',
                         value: settings.microphoneSensitivity * 100,

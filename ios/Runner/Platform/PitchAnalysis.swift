@@ -1,12 +1,10 @@
 import Foundation
 
 enum PitchRecognitionMode: String {
-  case piano
-  case yin
-  case fft
+  case hybrid
 
   init(wireName: String?) {
-    self = PitchRecognitionMode(rawValue: wireName?.lowercased() ?? "") ?? .yin
+    self = .hybrid
   }
 }
 
@@ -182,6 +180,100 @@ final class YinPitchDetector {
   }
 }
 
+struct SpectrumPeak {
+  let midiPitch: Double
+  let magnitude: Float
+}
+
+struct FftPitchEstimate {
+  let frequencyHz: Double
+  let midiPitch: Double
+  let confidence: Double
+  let rms: Double
+}
+
+struct FftSpectrumResult {
+  let magnitudes: [Float]
+  let peaks: [SpectrumPeak]
+  let pitchEstimate: FftPitchEstimate?
+}
+
+struct HybridPitchEstimate {
+  let frequencyHz: Double
+  let midiPitch: Double
+  let confidence: Double
+  let rms: Double
+  let algorithm: String
+}
+
+enum HybridPitchFusion {
+  static let fusedAlgorithm = "yin+fft"
+  static let yinAlgorithm = "yin"
+  static let fftAlgorithm = "fft"
+
+  static func fuse(yin: YinPitchEstimate?, fft: FftPitchEstimate?) -> HybridPitchEstimate? {
+    guard let yin else {
+      guard let fft, fft.confidence >= 0.50 else { return nil }
+      return hybrid(fft, algorithm: fftAlgorithm)
+    }
+    guard let fft else { return hybrid(yin, algorithm: yinAlgorithm) }
+
+    let distance = abs(yin.midiPitch - fft.midiPitch)
+    if distance <= 1.5 {
+      let yinWeight = max(0.01, yin.confidence)
+      let fftWeight = max(0.01, fft.confidence) * 0.55
+      let pitch = (yin.midiPitch * yinWeight + fft.midiPitch * fftWeight)
+        / (yinWeight + fftWeight)
+      return HybridPitchEstimate(
+        frequencyHz: midiToFrequency(pitch),
+        midiPitch: pitch,
+        confidence: max(0, min(1, yin.confidence + fft.confidence * 0.5)),
+        rms: max(yin.rms, fft.rms),
+        algorithm: fusedAlgorithm
+      )
+    }
+
+    let octaveDistance = distance.truncatingRemainder(dividingBy: 12)
+    let nearOctave = min(octaveDistance, 12 - octaveDistance) <= 1.5
+    if nearOctave, fft.confidence >= 0.58 {
+      return hybrid(fft, algorithm: fusedAlgorithm)
+    }
+    if yin.confidence >= 0.84 { return hybrid(yin, algorithm: yinAlgorithm) }
+    if fft.confidence >= 0.64 { return hybrid(fft, algorithm: fftAlgorithm) }
+    return hybrid(yin, algorithm: yinAlgorithm)
+  }
+
+  private static func hybrid(
+    _ estimate: YinPitchEstimate,
+    algorithm: String
+  ) -> HybridPitchEstimate {
+    HybridPitchEstimate(
+      frequencyHz: estimate.frequencyHz,
+      midiPitch: estimate.midiPitch,
+      confidence: estimate.confidence,
+      rms: estimate.rms,
+      algorithm: algorithm
+    )
+  }
+
+  private static func hybrid(
+    _ estimate: FftPitchEstimate,
+    algorithm: String
+  ) -> HybridPitchEstimate {
+    HybridPitchEstimate(
+      frequencyHz: estimate.frequencyHz,
+      midiPitch: estimate.midiPitch,
+      confidence: estimate.confidence,
+      rms: estimate.rms,
+      algorithm: algorithm
+    )
+  }
+
+  private static func midiToFrequency(_ midiPitch: Double) -> Double {
+    440 * pow(2, (midiPitch - 69) / 12)
+  }
+}
+
 final class FftSpectrumAnalyzer {
   static let pointCount = 128
 
@@ -202,94 +294,186 @@ final class FftSpectrumAnalyzer {
   }
 
   func analyze(_ samples: [Float]) -> [Float] {
+    analyzeFrame(samples).magnitudes
+  }
+
+  func analyzeFrame(_ samples: [Float]) -> FftSpectrumResult {
     precondition(samples.count == frameSize)
-    let magnitudes = FourierTransform.magnitudes(
+    let rawMagnitudes = FourierTransform.magnitudes(
       samples: samples,
       window: window,
       windowSum: windowSum
     )
-    return (0..<Self.pointCount).map { point in
+    let display = displayMagnitudes(rawMagnitudes)
+    let rms = YinPitchDetector.acRMS(samples)
+    guard rms.isFinite, rms >= 0.0035 else {
+      return FftSpectrumResult(magnitudes: display, peaks: [], pitchEstimate: nil)
+    }
+
+    let minimumBin = max(2, Int(frequencyToBin(27.5).rounded()))
+    let maximumBin = min(rawMagnitudes.count - 3, Int(frequencyToBin(2_000).rounded()))
+    guard maximumBin > minimumBin else {
+      return FftSpectrumResult(magnitudes: display, peaks: [], pitchEstimate: nil)
+    }
+    let useful = Array(rawMagnitudes[minimumBin...maximumBin])
+    guard let maximumMagnitude = useful.max(), maximumMagnitude > 0.000_000_01 else {
+      return FftSpectrumResult(magnitudes: display, peaks: [], pitchEstimate: nil)
+    }
+    let sortedNoise = useful.sorted()
+    let noiseFloor = sortedNoise[sortedNoise.count / 2]
+    let detectionFloor = max(0.000_15, noiseFloor * 6, maximumMagnitude * 0.035)
+    var rawPeaks: [RawPeak] = []
+    for bin in minimumBin...maximumBin {
+      let magnitude = rawMagnitudes[bin]
+      if magnitude >= detectionFloor,
+         magnitude >= rawMagnitudes[bin - 1],
+         magnitude > rawMagnitudes[bin + 1] {
+        rawPeaks.append(RawPeak(bin: refinedBin(bin, rawMagnitudes), magnitude: magnitude))
+      }
+    }
+    guard !rawPeaks.isEmpty else {
+      return FftSpectrumResult(magnitudes: display, peaks: [], pitchEstimate: nil)
+    }
+
+    let peaks = rawPeaks
+      .sorted { $0.magnitude > $1.magnitude }
+      .prefix(16)
+      .compactMap { peak -> SpectrumPeak? in
+        let midiPitch = frequencyToMidi(binToFrequency(peak.bin))
+        guard midiPitch.isFinite, (0...127).contains(midiPitch) else { return nil }
+        return SpectrumPeak(
+          midiPitch: midiPitch,
+          magnitude: normalizedMagnitude(peak.magnitude)
+        )
+      }
+      .sorted { $0.midiPitch < $1.midiPitch }
+
+    var candidates: [CandidateScore] = []
+    for peak in rawPeaks.sorted(by: { $0.magnitude > $1.magnitude }).prefix(12) {
+      for divisor in 1...5 {
+        let frequency = binToFrequency(peak.bin) / Double(divisor)
+        guard (27.5...2_000).contains(frequency) else { continue }
+        candidates.append(scoreCandidate(
+          frequencyHz: frequency,
+          rawMagnitudes: rawMagnitudes,
+          maximumMagnitude: maximumMagnitude,
+          detectionFloor: detectionFloor
+        ))
+      }
+    }
+    candidates.sort { $0.score > $1.score }
+    guard let best = candidates.first else {
+      return FftSpectrumResult(magnitudes: display, peaks: peaks, pitchEstimate: nil)
+    }
+    let selectedPitch = frequencyToMidi(best.frequencyHz)
+    let runnerUp = candidates.dropFirst().first {
+      abs(frequencyToMidi($0.frequencyHz) - selectedPitch) > 0.75
+    }
+    let signalDecibels = 20 * log10(max(maximumMagnitude, 0.000_000_01))
+    let signalStrength = max(0, min(1, (signalDecibels + 70) / 45))
+    let separation = best.score <= 0
+      ? 0
+      : max(0, min(1, (best.score - (runnerUp?.score ?? 0)) / best.score))
+    let coverage = max(0, min(1, best.support / harmonicWeights.reduce(0, +)))
+    let confidence = max(0, min(1, 0.30 * signalStrength + 0.35 * separation + 0.35 * coverage))
+    let estimate = confidence >= 0.42 && selectedPitch.isFinite && (0...127).contains(selectedPitch)
+      ? FftPitchEstimate(
+          frequencyHz: best.frequencyHz,
+          midiPitch: selectedPitch,
+          confidence: confidence,
+          rms: rms
+        )
+      : nil
+    return FftSpectrumResult(magnitudes: display, peaks: peaks, pitchEstimate: estimate)
+  }
+
+  private func displayMagnitudes(_ rawMagnitudes: [Double]) -> [Float] {
+    (0..<Self.pointCount).map { point in
       let midiPitch = Double(point) * 127 / Double(Self.pointCount - 1)
-      let frequency = 440 * pow(2, (midiPitch - 69) / 12)
-      let exactBin = frequency * Double(frameSize) / sampleRate
-      guard exactBin < Double(magnitudes.count - 1) else { return 0 }
+      let exactBin = frequencyToBin(440 * pow(2, (midiPitch - 69) / 12))
+      guard exactBin < Double(rawMagnitudes.count - 1) else { return 0 }
       let lower = max(0, Int(exactBin))
       let fraction = exactBin - Double(lower)
-      let magnitude = magnitudes[lower] * (1 - fraction)
-        + magnitudes[lower + 1] * fraction
-      let decibels = 20 * log10(max(magnitude, 0.000_000_01))
-      return Float(max(0, min(1, (decibels + 90) / 75)))
+      return normalizedMagnitude(
+        rawMagnitudes[lower] * (1 - fraction) + rawMagnitudes[lower + 1] * fraction
+      )
     }
   }
-}
 
-final class PianoPitchDetector {
-  let sampleRate: Double
-  let frameSize: Int
-  private let window: [Double]
-  private let windowSum: Double
-
-  init(sampleRate: Double, frameSize: Int) {
-    precondition(sampleRate > 0)
-    precondition(frameSize > 1 && frameSize.nonzeroBitCount == 1)
-    self.sampleRate = sampleRate
-    self.frameSize = frameSize
-    window = (0..<frameSize).map { index in
-      0.5 - 0.5 * cos(2 * .pi * Double(index) / Double(frameSize - 1))
+  private func scoreCandidate(
+    frequencyHz: Double,
+    rawMagnitudes: [Double],
+    maximumMagnitude: Double,
+    detectionFloor: Double
+  ) -> CandidateScore {
+    var support = 0.0
+    var matches = 0
+    for index in harmonicWeights.indices {
+      let exactBin = frequencyToBin(frequencyHz * Double(index + 1))
+      guard exactBin < Double(rawMagnitudes.count - 1) else { break }
+      let magnitude = peakMagnitude(near: exactBin, magnitudes: rawMagnitudes)
+      support += harmonicWeights[index] * max(0, min(1, magnitude / maximumMagnitude))
+      if magnitude >= detectionFloor * 0.75 { matches += 1 }
     }
-    windowSum = max(1, window.reduce(0, +))
-  }
-
-  func detect(_ samples: [Float]) -> [Int: Int] {
-    precondition(samples.count == frameSize)
-    guard YinPitchDetector.acRMS(samples) >= 0.004 else { return [:] }
-    let magnitudes = FourierTransform.magnitudes(
-      samples: samples,
-      window: window,
-      windowSum: windowSum
+    let fundamental = peakMagnitude(
+      near: frequencyToBin(frequencyHz),
+      magnitudes: rawMagnitudes
     )
-    let usefulMagnitudes = magnitudes.prefix(min(magnitudes.count, frameSize / 4))
-    let sortedNoise = usefulMagnitudes.sorted()
-    let noiseFloor = sortedNoise.isEmpty ? 0 : sortedNoise[sortedNoise.count / 2]
-    let detectionFloor = max(0.0015, noiseFloor * 10)
-    var notes: [Int: Int] = [:]
-
-    for midiPitch in 21...108 {
-      let frequency = 440 * pow(2, (Double(midiPitch) - 69) / 12)
-      let fundamental = peakMagnitude(
-        near: frequency * Double(frameSize) / sampleRate,
-        magnitudes: magnitudes
-      )
-      guard fundamental >= detectionFloor else { continue }
-
-      var harmonicScore = fundamental
-      for harmonic in 2...5 {
-        let bin = frequency * Double(harmonic) * Double(frameSize) / sampleRate
-        guard bin < Double(magnitudes.count - 1) else { break }
-        harmonicScore += peakMagnitude(near: bin, magnitudes: magnitudes)
-          * (0.55 / Double(harmonic))
-      }
-      let lowerOctave = peakMagnitude(
-        near: frequency * 0.5 * Double(frameSize) / sampleRate,
-        magnitudes: magnitudes
-      )
-      guard harmonicScore >= detectionFloor * 1.25,
-            fundamental >= lowerOctave * 0.28 else { continue }
-
-      let decibels = 20 * log10(max(fundamental, 0.000_000_01))
-      let normalized = max(0, min(1, (decibels + 62) / 48))
-      notes[midiPitch] = max(1, min(127, Int((1 + normalized * 126).rounded())))
-    }
-    return notes
+    let fundamentalRatio = max(0, min(1, fundamental / maximumMagnitude))
+    let fundamentalWeight = 0.55 + 0.45 * sqrt(fundamentalRatio)
+    let matchWeight = 0.8 + 0.2 * Double(matches) / Double(harmonicWeights.count)
+    return CandidateScore(
+      frequencyHz: frequencyHz,
+      score: support * fundamentalWeight * matchWeight,
+      support: support
+    )
   }
 
   private func peakMagnitude(near exactBin: Double, magnitudes: [Double]) -> Double {
     let center = Int(exactBin.rounded())
-    guard center > 0, center < magnitudes.count else { return 0 }
-    let lower = max(1, center - 1)
-    let upper = min(magnitudes.count - 1, center + 1)
-    return magnitudes[lower...upper].max() ?? 0
+    guard center > 0, center < magnitudes.count - 1 else { return 0 }
+    return magnitudes[max(1, center - 1)...min(magnitudes.count - 1, center + 1)].max() ?? 0
   }
+
+  private func refinedBin(_ bin: Int, _ magnitudes: [Double]) -> Double {
+    guard bin > 0, bin < magnitudes.count - 1 else { return Double(bin) }
+    let previous = log(max(magnitudes[bin - 1], 0.000_000_01))
+    let current = log(max(magnitudes[bin], 0.000_000_01))
+    let next = log(max(magnitudes[bin + 1], 0.000_000_01))
+    let denominator = previous - 2 * current + next
+    guard abs(denominator) >= 0.000_000_000_001 else { return Double(bin) }
+    return Double(bin) + max(-0.5, min(0.5, 0.5 * (previous - next) / denominator))
+  }
+
+  private func normalizedMagnitude(_ magnitude: Double) -> Float {
+    let decibels = 20 * log10(max(magnitude, 0.000_000_01))
+    return Float(max(0, min(1, (decibels + 90) / 75)))
+  }
+
+  private func frequencyToBin(_ frequencyHz: Double) -> Double {
+    frequencyHz * Double(frameSize) / sampleRate
+  }
+
+  private func binToFrequency(_ bin: Double) -> Double {
+    bin * sampleRate / Double(frameSize)
+  }
+
+  private func frequencyToMidi(_ frequencyHz: Double) -> Double {
+    69 + 12 * log2(frequencyHz / 440)
+  }
+
+  private struct RawPeak {
+    let bin: Double
+    let magnitude: Double
+  }
+
+  private struct CandidateScore {
+    let frequencyHz: Double
+    let score: Double
+    let support: Double
+  }
+
+  private let harmonicWeights = [0.90, 0.45, 0.30, 0.22, 0.18, 0.14]
 }
 
 private enum FourierTransform {

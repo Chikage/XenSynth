@@ -6,7 +6,7 @@ import 'package:xensynth/ui/app_palette.dart';
 import 'package:xensynth/ui/widgets/settings_panel.dart';
 
 void main() {
-  testWidgets('microphone input exposes piano, YIN, and FFT modes', (
+  testWidgets('microphone input exposes one local hybrid sensitivity control', (
     tester,
   ) async {
     await tester.binding.setSurfaceSize(const Size(874, 402));
@@ -40,34 +40,17 @@ void main() {
           widget is Scrollable && widget.axisDirection == AxisDirection.down,
     );
     await tester.scrollUntilVisible(
-      find.byKey(const ValueKey('pitch-recognition-mode')),
-      100,
-      scrollable: scrollable,
-    );
-    expect(find.text('MIC INPUT'), findsOneWidget);
-    expect(find.text('PIANO'), findsOneWidget);
-    expect(find.text('YIN'), findsOneWidget);
-    expect(find.text('FFT'), findsOneWidget);
-    await tester.scrollUntilVisible(
       find.byKey(const ValueKey('microphone-sensitivity-slider')),
       60,
       scrollable: scrollable,
     );
     expect(find.text('Mic sensitivity'), findsOneWidget);
     expect(find.text('100%'), findsOneWidget);
-
-    await tester.drag(scrollable, const Offset(0, -60));
-    await tester.pumpAndSettle();
-    await tester.tap(find.text('YIN'));
-    await tester.pump();
-
-    expect(settings.pitchRecognitionMode, PitchRecognitionMode.yin);
-
-    await tester.tap(find.text('FFT'));
-    await tester.pump();
-
-    expect(settings.pitchRecognitionMode, PitchRecognitionMode.fft);
-    expect(settings.layoutMode, KeyboardLayoutMode.linear);
+    expect(find.text('MIC INPUT'), findsOneWidget);
+    expect(find.text('PIANO'), findsNothing);
+    expect(find.text('YIN'), findsNothing);
+    expect(find.text('FFT'), findsNothing);
+    expect(settings.pitchRecognitionMode, PitchRecognitionMode.hybrid);
   });
 
   testWidgets('touch vibration strength slider sits with surface settings', (

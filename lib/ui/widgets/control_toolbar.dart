@@ -3,7 +3,6 @@ import 'dart:math' as math;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
-import '../../app/xensynth_settings.dart';
 import '../app_palette.dart';
 
 class ControlToolbar extends StatelessWidget {
@@ -32,9 +31,6 @@ class ControlToolbar extends StatelessWidget {
     this.pitchRecognitionAvailable = false,
     this.pitchRecognizing = false,
     this.pitchRecognitionBusy = false,
-    this.pitchRecognitionModelReady = false,
-    this.pitchRecognitionDownloadProgress = 0,
-    this.pitchRecognitionMode = PitchRecognitionMode.yin,
     this.onPitchRecognition,
     this.microphoneTakeReadyForSave = false,
     this.savingMicrophoneTake = false,
@@ -79,9 +75,6 @@ class ControlToolbar extends StatelessWidget {
   final bool pitchRecognitionAvailable;
   final bool pitchRecognizing;
   final bool pitchRecognitionBusy;
-  final bool pitchRecognitionModelReady;
-  final double pitchRecognitionDownloadProgress;
-  final PitchRecognitionMode pitchRecognitionMode;
   final VoidCallback? onPitchRecognition;
   final bool microphoneTakeReadyForSave;
   final bool savingMicrophoneTake;
@@ -100,36 +93,13 @@ class ControlToolbar extends StatelessWidget {
     final sliderSpeed = speed.clamp(0.2, 4.0).toDouble();
     final sliderEdo = edo.clamp(0, 72);
     final sliderOffset = offsetCents.clamp(-128.0, 128.0).toDouble();
-    final downloadPercent = (pitchRecognitionDownloadProgress * 100)
-        .clamp(0, 100)
-        .round();
-    final pitchRecognitionTooltip = switch (pitchRecognitionMode) {
-      PitchRecognitionMode.fft => switch ((
-        pitchRecognitionBusy,
-        pitchRecognizing,
-      )) {
-        (true, _) => 'Starting FFT spectrum recording',
-        (_, true) => 'Stop FFT spectrum recording',
-        _ => 'Record and display the microphone FFT spectrum',
-      },
-      PitchRecognitionMode.yin => switch ((
-        pitchRecognitionBusy,
-        pitchRecognizing,
-      )) {
-        (true, _) => 'Starting continuous YIN pitch detection',
-        (_, true) => 'Stop continuous YIN pitch detection',
-        _ => 'Detect continuous monophonic pitch with YIN',
-      },
-      PitchRecognitionMode.piano => switch ((
-        pitchRecognitionBusy,
-        pitchRecognizing,
-        pitchRecognitionModelReady,
-      )) {
-        (true, _, _) => 'Preparing piano recognition · $downloadPercent%',
-        (_, true, _) => 'Stop piano note recognition',
-        (_, _, false) => 'Download model and recognize piano notes',
-        _ => 'Recognize piano notes from microphone',
-      },
+    final pitchRecognitionTooltip = switch ((
+      pitchRecognitionBusy,
+      pitchRecognizing,
+    )) {
+      (true, _) => 'Starting pitch recording',
+      (_, true) => 'Stop pitch recording',
+      _ => 'Record pitch with FFT and YIN',
     };
     return LayoutBuilder(
       builder: (context, constraints) {
@@ -245,10 +215,7 @@ class ControlToolbar extends StatelessWidget {
                                 size: controlSize,
                                 tooltip: pitchRecognitionTooltip,
                                 icon: pitchRecognitionBusy
-                                    ? pitchRecognitionMode ==
-                                              PitchRecognitionMode.piano
-                                          ? Icons.downloading_rounded
-                                          : Icons.graphic_eq_rounded
+                                    ? Icons.graphic_eq_rounded
                                     : pitchRecognizing
                                     ? Icons.mic_rounded
                                     : Icons.mic_none_rounded,

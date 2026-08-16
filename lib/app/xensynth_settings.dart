@@ -6,7 +6,7 @@ enum KeyboardLayoutMode { linear, hexagonal, spatial }
 
 enum SpatialProjectionMode { cabinet, obliquePerspective }
 
-enum PitchRecognitionMode { piano, yin, fft }
+enum PitchRecognitionMode { hybrid }
 
 extension KeyboardLayoutModeSemantics on KeyboardLayoutMode {
   bool get usesHexKeyboard => this != KeyboardLayoutMode.linear;
@@ -29,7 +29,7 @@ class XenSynthSettings {
     this.networkMidiHost = '',
     this.networkMidiPort = defaultNetworkMidiPort,
     this.bluetoothMidiOutputIds = const <String>[],
-    this.pitchRecognitionMode = PitchRecognitionMode.yin,
+    this.pitchRecognitionMode = PitchRecognitionMode.hybrid,
     this.microphoneSensitivity = 1,
     this.hapticFeedbackStrength = defaultHapticFeedbackStrength,
     this.hexColumns = 35,
@@ -147,9 +147,7 @@ class XenSynthSettings {
     final pitchRecognitionMode = switch (map['pitchRecognitionMode']
         ?.toString()
         .toLowerCase()) {
-      'fft' => PitchRecognitionMode.fft,
-      'yin' => PitchRecognitionMode.yin,
-      'piano' => PitchRecognitionMode.piano,
+      'hybrid' || 'fft' || 'yin' || 'piano' => PitchRecognitionMode.hybrid,
       _ => defaults.pitchRecognitionMode,
     };
     final requestedLayoutMode = switch (map['keyboardLayoutMode']?.toString()) {
@@ -161,9 +159,7 @@ class XenSynthSettings {
       _ => defaults.layoutMode,
     };
     return XenSynthSettings(
-      layoutMode: pitchRecognitionMode == PitchRecognitionMode.fft
-          ? KeyboardLayoutMode.linear
-          : requestedLayoutMode,
+      layoutMode: requestedLayoutMode,
       playbackSpeed: _double(
         map['playbackSpeed'],
         defaults.playbackSpeed,
@@ -348,13 +344,9 @@ class XenSynthSettings {
   }) {
     final nextEdo = (edo ?? this.edo).clamp(0, 72);
     final nextHexStepMaximum = hexStepMaximumForEdo(nextEdo);
-    final nextPitchRecognitionMode =
-        pitchRecognitionMode ?? this.pitchRecognitionMode;
     final requestedLayoutMode = layoutMode ?? this.layoutMode;
     return XenSynthSettings(
-      layoutMode: nextPitchRecognitionMode == PitchRecognitionMode.fft
-          ? KeyboardLayoutMode.linear
-          : requestedLayoutMode,
+      layoutMode: requestedLayoutMode,
       playbackSpeed: playbackSpeed ?? this.playbackSpeed,
       edo: nextEdo,
       pitchOffsetCents: pitchOffsetCents ?? this.pitchOffsetCents,
@@ -374,7 +366,7 @@ class XenSynthSettings {
       ),
       bluetoothMidiOutputIds:
           bluetoothMidiOutputIds ?? this.bluetoothMidiOutputIds,
-      pitchRecognitionMode: nextPitchRecognitionMode,
+      pitchRecognitionMode: pitchRecognitionMode ?? this.pitchRecognitionMode,
       microphoneSensitivity:
           (microphoneSensitivity ?? this.microphoneSensitivity).clamp(
             microphoneSensitivityMin,

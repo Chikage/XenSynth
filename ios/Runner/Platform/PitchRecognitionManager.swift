@@ -9,25 +9,19 @@ protocol PitchRecognitionManagerListener: AnyObject {
 
   func pitchRecognitionManager(
     _ manager: PitchRecognitionManager,
-    didRecognizeNote pitch: Int,
-    velocity: Int,
-    down: Bool,
-    timeSeconds: Double
-  )
-
-  func pitchRecognitionManager(
-    _ manager: PitchRecognitionManager,
     didRecognizePitch voiced: Bool,
     frequencyHz: Double,
     midiPitch: Double,
     confidence: Double,
     velocity: Int,
+    algorithm: String,
     timeSeconds: Double
   )
 
   func pitchRecognitionManager(
     _ manager: PitchRecognitionManager,
     didAnalyzeSpectrum magnitudes: [Float],
+    peaks: [SpectrumPeak],
     timeSeconds: Double
   )
 }
@@ -48,7 +42,7 @@ final class PitchRecognitionManager: NSObject {
   private var pendingAnalysisFrame: PendingAnalysisFrame?
   private var analysisDrainScheduled = false
 
-  private var selectedMode = PitchRecognitionMode.yin
+  private var selectedMode = PitchRecognitionMode.hybrid
   private var phase = Phase.idle
   private var message = ""
   private var generation: UInt64 = 0
@@ -65,13 +59,10 @@ final class PitchRecognitionManager: NSObject {
   // Accessed only from analysisQueue.
   private var yinDetector: YinPitchDetector?
   private var spectrumAnalyzer: FftSpectrumAnalyzer?
-  private var pianoDetector: PianoPitchDetector?
   private let yinPitchSmoother = YinPitchSmoother()
   private var yinVoiced = false
   private var yinUnvoicedFrames = 0
-  private var pianoActiveNotes: [Int: Int] = [:]
-  private var pianoPresentFrames: [Int: Int] = [:]
-  private var pianoAbsentFrames: [Int: Int] = [:]
+  private var yinAvailable = true
 
   private var recordingPlayer: AVAudioPlayer?
   private var recordingPlaybackURL: URL?
@@ -251,14 +242,13 @@ final class PitchRecognitionManager: NSObject {
         throw CaptureError.invalidInputFormat
       }
 
-      let frameSize = mode == .piano ? Self.pianoFrameSize : Self.analysisFrameSize
       resampler = LinearAudioResampler(
         sourceSampleRate: format.sampleRate,
         targetSampleRate: Double(Self.recordingSampleRate)
       )
       frameAccumulator = AudioFrameAccumulator(
-        frameSize: frameSize,
-        hopSize: mode == .yin ? Self.yinAnalysisHopSize : Self.analysisHopSize
+        frameSize: Self.analysisFrameSize,
+        hopSize: Self.analysisHopSize
       )
       analysisQueue.async { [weak self] in
         self?.prepareAnalysis(mode: mode)
@@ -266,7 +256,7 @@ final class PitchRecognitionManager: NSObject {
 
       input.installTap(
         onBus: 0,
-        bufferSize: mode == .yin ? Self.yinInputTapBufferSize : Self.inputTapBufferSize,
+        bufferSize: Self.inputTapBufferSize,
         format: format
       ) { [weak self] buffer, _ in
         guard let channel = buffer.floatChannelData?.pointee else { return }
@@ -290,11 +280,7 @@ final class PitchRecognitionManager: NSObject {
         audioEngine = engine
         recording = nextRecording
         phase = .listening
-        message = switch mode {
-        case .piano: "Listening for piano notes"
-        case .yin: "Listening for continuous pitch"
-        case .fft: "Listening for FFT spectrum"
-        }
+        message = "Listening with local FFT and YIN fusion"
         return true
       }
       guard accepted else {
@@ -355,22 +341,9 @@ final class PitchRecognitionManager: NSObject {
         samples: frame.samples,
         mode: mode,
         generation: generation,
-        timeSeconds: mode == .yin
-          ? Double(frame.endSampleIndex) / Double(Self.recordingSampleRate)
-          : captureTimeSeconds
+        timeSeconds: Double(frame.endSampleIndex) / Double(Self.recordingSampleRate)
       )
-      if mode == .yin {
-        enqueueAnalysis(pending)
-      } else {
-        analysisQueue.async { [weak self] in
-          self?.analyze(
-            pending.samples,
-            mode: pending.mode,
-            generation: pending.generation,
-            timeSeconds: pending.timeSeconds
-          )
-        }
-      }
+      enqueueAnalysis(pending)
     }
   }
 
@@ -413,30 +386,18 @@ final class PitchRecognitionManager: NSObject {
   }
 
   private func prepareAnalysis(mode: PitchRecognitionMode) {
-    yinDetector = mode == .yin
-      ? YinPitchDetector(
-          sampleRate: Double(Self.recordingSampleRate),
-          frameSize: Self.analysisFrameSize
-        )
-      : nil
-    spectrumAnalyzer = mode == .fft
-      ? FftSpectrumAnalyzer(
-          sampleRate: Double(Self.recordingSampleRate),
-          frameSize: Self.analysisFrameSize
-        )
-      : nil
-    pianoDetector = mode == .piano
-      ? PianoPitchDetector(
-          sampleRate: Double(Self.recordingSampleRate),
-          frameSize: Self.pianoFrameSize
-        )
-      : nil
+    yinDetector = YinPitchDetector(
+      sampleRate: Double(Self.recordingSampleRate),
+      frameSize: Self.analysisFrameSize
+    )
+    spectrumAnalyzer = FftSpectrumAnalyzer(
+      sampleRate: Double(Self.recordingSampleRate),
+      frameSize: Self.analysisFrameSize
+    )
     yinPitchSmoother.reset()
     yinVoiced = false
     yinUnvoicedFrames = 0
-    pianoActiveNotes.removeAll()
-    pianoPresentFrames.removeAll()
-    pianoAbsentFrames.removeAll()
+    yinAvailable = true
   }
 
   private func analyze(
@@ -446,20 +407,21 @@ final class PitchRecognitionManager: NSObject {
     timeSeconds: Double
   ) {
     guard isCurrent(generation: generation, phase: .listening) else { return }
-    switch mode {
-    case .yin:
-      analyzeYin(frame, timeSeconds: timeSeconds)
-    case .fft:
-      guard let magnitudes = spectrumAnalyzer?.analyze(frame) else { return }
-      emitSpectrum(magnitudes, timeSeconds: timeSeconds)
-    case .piano:
-      guard let notes = pianoDetector?.detect(frame) else { return }
-      analyzePiano(notes, timeSeconds: timeSeconds)
-    }
+    analyzeHybrid(frame, timeSeconds: timeSeconds)
   }
 
-  private func analyzeYin(_ frame: [Float], timeSeconds: Double) {
-    guard let estimate = yinDetector?.detect(frame) else {
+  private func analyzeHybrid(_ frame: [Float], timeSeconds: Double) {
+    guard let spectrum = spectrumAnalyzer?.analyzeFrame(frame) else { return }
+    emitSpectrum(
+      spectrum.magnitudes,
+      peaks: spectrum.peaks,
+      timeSeconds: timeSeconds
+    )
+    let yinEstimate = yinAvailable ? yinDetector?.detect(frame) : nil
+    guard let estimate = HybridPitchFusion.fuse(
+      yin: yinEstimate,
+      fft: spectrum.pitchEstimate
+    ) else {
       yinUnvoicedFrames += 1
       if yinVoiced, yinUnvoicedFrames >= Self.yinUnvoicedFrameCount {
         yinVoiced = false
@@ -470,6 +432,9 @@ final class PitchRecognitionManager: NSObject {
           midiPitch: 0,
           confidence: 0,
           velocity: 0,
+          algorithm: yinAvailable
+            ? HybridPitchFusion.fusedAlgorithm
+            : HybridPitchFusion.fftAlgorithm,
           timeSeconds: timeSeconds
         )
       }
@@ -491,43 +456,13 @@ final class PitchRecognitionManager: NSObject {
       midiPitch: nextMidiPitch,
       confidence: estimate.confidence,
       velocity: velocity,
+      algorithm: estimate.algorithm,
       timeSeconds: timeSeconds
     )
   }
 
-  private func analyzePiano(_ detected: [Int: Int], timeSeconds: Double) {
-    let pitches = Set(detected.keys).union(pianoActiveNotes.keys)
-    for pitch in pitches.sorted() {
-      if let velocity = detected[pitch] {
-        pianoAbsentFrames[pitch] = 0
-        pianoPresentFrames[pitch, default: 0] += 1
-        if pianoActiveNotes[pitch] == nil,
-           pianoPresentFrames[pitch, default: 0] >= Self.pianoNoteOnFrames {
-          pianoActiveNotes[pitch] = velocity
-          emitNote(pitch: pitch, velocity: velocity, down: true, timeSeconds: timeSeconds)
-        } else if pianoActiveNotes[pitch] != nil {
-          pianoActiveNotes[pitch] = velocity
-        }
-      } else if pianoActiveNotes[pitch] != nil {
-        pianoPresentFrames[pitch] = 0
-        pianoAbsentFrames[pitch, default: 0] += 1
-        if pianoAbsentFrames[pitch, default: 0] >= Self.pianoNoteOffFrames {
-          pianoActiveNotes.removeValue(forKey: pitch)
-          pianoAbsentFrames.removeValue(forKey: pitch)
-          emitNote(pitch: pitch, velocity: 0, down: false, timeSeconds: timeSeconds)
-        }
-      } else {
-        pianoPresentFrames.removeValue(forKey: pitch)
-        pianoAbsentFrames.removeValue(forKey: pitch)
-      }
-    }
-  }
-
   private func releaseAnalysisState() {
     let timeSeconds = withStateLock { recording?.durationSeconds ?? 0 }
-    for pitch in pianoActiveNotes.keys.sorted() {
-      emitNote(pitch: pitch, velocity: 0, down: false, timeSeconds: timeSeconds)
-    }
     if yinVoiced {
       emitPitch(
         voiced: false,
@@ -535,6 +470,9 @@ final class PitchRecognitionManager: NSObject {
         midiPitch: 0,
         confidence: 0,
         velocity: 0,
+        algorithm: yinAvailable
+          ? HybridPitchFusion.fusedAlgorithm
+          : HybridPitchFusion.fftAlgorithm,
         timeSeconds: timeSeconds
       )
     }
@@ -555,30 +493,13 @@ final class PitchRecognitionManager: NSObject {
     }
   }
 
-  private func emitNote(
-    pitch: Int,
-    velocity: Int,
-    down: Bool,
-    timeSeconds: Double
-  ) {
-    DispatchQueue.main.async { [weak self] in
-      guard let self, !self.withStateLock({ self.closed }) else { return }
-      self.listener?.pitchRecognitionManager(
-        self,
-        didRecognizeNote: pitch,
-        velocity: velocity,
-        down: down,
-        timeSeconds: timeSeconds
-      )
-    }
-  }
-
   private func emitPitch(
     voiced: Bool,
     frequencyHz: Double,
     midiPitch: Double,
     confidence: Double,
     velocity: Int,
+    algorithm: String,
     timeSeconds: Double
   ) {
     DispatchQueue.main.async { [weak self] in
@@ -590,17 +511,23 @@ final class PitchRecognitionManager: NSObject {
         midiPitch: midiPitch,
         confidence: confidence,
         velocity: velocity,
+        algorithm: algorithm,
         timeSeconds: timeSeconds
       )
     }
   }
 
-  private func emitSpectrum(_ magnitudes: [Float], timeSeconds: Double) {
+  private func emitSpectrum(
+    _ magnitudes: [Float],
+    peaks: [SpectrumPeak],
+    timeSeconds: Double
+  ) {
     DispatchQueue.main.async { [weak self] in
       guard let self, !self.withStateLock({ self.closed }) else { return }
       self.listener?.pitchRecognitionManager(
         self,
         didAnalyzeSpectrum: magnitudes,
+        peaks: peaks,
         timeSeconds: timeSeconds
       )
     }
@@ -660,14 +587,9 @@ final class PitchRecognitionManager: NSObject {
 
   private static let recordingSampleRate = 16_000
   private static let inputTapBufferSize: AVAudioFrameCount = 1_024
-  private static let yinInputTapBufferSize: AVAudioFrameCount = 512
   private static let analysisFrameSize = 2_048
-  private static let pianoFrameSize = 8_192
-  private static let analysisHopSize = 512
-  private static let yinAnalysisHopSize = 256
+  private static let analysisHopSize = 256
   private static let yinUnvoicedFrameCount = 6
-  private static let pianoNoteOnFrames = 2
-  private static let pianoNoteOffFrames = 3
 }
 
 private final class LinearAudioResampler {

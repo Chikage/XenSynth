@@ -6,6 +6,7 @@ import 'package:flutter/scheduler.dart';
 
 import '../../core/midi_parser.dart';
 import '../../core/microphone_take.dart';
+import '../../core/potd_note_name.dart';
 import '../../core/score.dart';
 import '../../core/tuning.dart';
 import '../app_palette.dart';
@@ -1223,7 +1224,142 @@ class WaterfallPainter extends CustomPainter {
         ..strokeJoin = StrokeJoin.round
         ..color = const Color(0xFFFFDE6F),
     );
+    _paintSpectrumPeaks(
+      canvas,
+      current,
+      baseline: layout.keyboardTop,
+      amplitude: amplitude,
+    );
     canvas.restore();
+  }
+
+  void _paintSpectrumPeaks(
+    Canvas canvas,
+    SpectrumFrame frame, {
+    required double baseline,
+    required double amplitude,
+  }) {
+    if (frame.peaks.isEmpty) return;
+    final strongestByStep = <int, ({double pitch, double magnitude})>{};
+    final normalizedEdo = edo > 0 ? edo : 12;
+    for (final peak in frame.peaks) {
+      if (!peak.pitch.isFinite || !peak.magnitude.isFinite) continue;
+      final displayedPitch = peak.pitch + layout.offsetCents / 100;
+      final snappedPitch = EdoScaleGuide.snapPitch(
+        normalizedEdo,
+        displayedPitch,
+      );
+      final stepIndex = (snappedPitch * normalizedEdo / 12).round();
+      final magnitude = peak.magnitude.clamp(0.0, 1.0).toDouble();
+      final previous = strongestByStep[stepIndex];
+      if (previous == null || magnitude > previous.magnitude) {
+        strongestByStep[stepIndex] = (
+          pitch: snappedPitch,
+          magnitude: magnitude,
+        );
+      }
+    }
+    final peaks = strongestByStep.values.toList()
+      ..sort((left, right) => left.pitch.compareTo(right.pitch));
+    final linePaint = Paint()
+      ..color = AppPalette.selection.withValues(alpha: 0.88)
+      ..strokeWidth = math.max(1.2, 1.6 * layout.physicalPixel)
+      ..strokeCap = StrokeCap.round;
+    final capPaint = Paint()
+      ..color = const Color(0xFFFFF0B2)
+      ..strokeWidth = math.max(1.6, 2.2 * layout.physicalPixel)
+      ..strokeCap = StrokeCap.round;
+    final labelPainter = TextPainter(
+      textDirection: TextDirection.ltr,
+      maxLines: 1,
+    );
+    final occupiedLabels = <Rect>[];
+
+    for (final peak in peaks) {
+      final x = layout.pitchToX(peak.pitch);
+      if (x < -2 || x > layout.size.width + 2) continue;
+      final height = math.max(
+        5 * layout.physicalPixel,
+        peak.magnitude * amplitude,
+      );
+      final top = baseline - height;
+      canvas.drawLine(Offset(x, baseline), Offset(x, top), linePaint);
+      canvas.drawLine(
+        Offset(x - 2 * layout.physicalPixel, top),
+        Offset(x + 2 * layout.physicalPixel, top),
+        capPaint,
+      );
+
+      final label = potdNoteNameForPitch(pitch: peak.pitch, edo: normalizedEdo);
+      var fontSize = 9.0;
+      labelPainter.text = TextSpan(
+        text: label,
+        style: const TextStyle(
+          color: Color(0xFFFFE7A0),
+          fontSize: 9,
+          fontFamily: 'monospace',
+          fontWeight: FontWeight.w600,
+        ),
+      );
+      labelPainter.layout();
+      if (labelPainter.width > 82) {
+        fontSize = math.max(6.0, fontSize * 82 / labelPainter.width);
+        labelPainter.text = TextSpan(
+          text: label,
+          style: TextStyle(
+            color: const Color(0xFFFFE7A0),
+            fontSize: fontSize,
+            fontFamily: 'monospace',
+            fontWeight: FontWeight.w600,
+          ),
+        );
+        labelPainter.layout();
+      }
+      var left = (x - labelPainter.width / 2)
+          .clamp(2.0, math.max(2.0, layout.size.width - labelPainter.width - 2))
+          .toDouble();
+      var topLabel = math.max(
+        2.0,
+        top - labelPainter.height - 3 * layout.physicalPixel,
+      );
+      var labelRect = Rect.fromLTWH(
+        left,
+        topLabel,
+        labelPainter.width,
+        labelPainter.height,
+      );
+      while (occupiedLabels.any(
+        (rect) => rect.inflate(2 * layout.physicalPixel).overlaps(labelRect),
+      )) {
+        topLabel = math.max(
+          2.0,
+          topLabel - labelPainter.height - 2 * layout.physicalPixel,
+        );
+        labelRect = Rect.fromLTWH(
+          left,
+          topLabel,
+          labelPainter.width,
+          labelPainter.height,
+        );
+        if (topLabel <= 2.0) {
+          left = (left + labelPainter.width * 0.55)
+              .clamp(
+                2.0,
+                math.max(2.0, layout.size.width - labelPainter.width - 2),
+              )
+              .toDouble();
+          labelRect = Rect.fromLTWH(
+            left,
+            topLabel,
+            labelPainter.width,
+            labelPainter.height,
+          );
+          break;
+        }
+      }
+      occupiedLabels.add(labelRect);
+      labelPainter.paint(canvas, labelRect.topLeft);
+    }
   }
 
   Path _spectrumPath(

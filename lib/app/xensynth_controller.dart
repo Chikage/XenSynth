@@ -56,15 +56,14 @@ class XenSynthController extends ChangeNotifier {
   bool playing = false;
   bool pitchRecognitionAvailable = false;
   List<NativeMidiOutput> bluetoothMidiOutputs = const <NativeMidiOutput>[];
-  bool pitchRecognitionModelReady = false;
   bool pitchRecognizing = false;
   bool pitchRecognitionBusy = false;
-  double pitchRecognitionDownloadProgress = 0;
   String pitchRecognitionPhase = 'unavailable';
   String pitchRecognitionMessage = '';
   double? pitchRecognitionFrequencyHz;
   double? pitchRecognitionDetectedPitch;
   double pitchRecognitionConfidence = 0;
+  String pitchRecognitionAlgorithm = '';
   bool savingMicrophoneTake = false;
   List<SpectrumFrame> spectrumFrames = <SpectrumFrame>[];
   final List<PitchInputEvent> pitchInputEvents = <PitchInputEvent>[];
@@ -95,8 +94,7 @@ class XenSynthController extends ChangeNotifier {
       microphoneTakeReadyForSave &&
       !_microphoneTakeSaved &&
       !_microphoneTakeSaveDismissed;
-  bool get showingFftSpectrum =>
-      _microphoneTake && _microphoneTakeMode == PitchRecognitionMode.fft;
+  bool get showingFftSpectrum => _microphoneTake;
   String get scoreTitle => score?.title ?? 'XEN SYNTH';
   String get tuningLabel => tuning.profile.isEmpty ? 'TUN' : tuning.profile;
   double get currentBpm {
@@ -477,7 +475,7 @@ class XenSynthController extends ChangeNotifier {
     notifyListeners();
   }
 
-  Future<bool> startPitchRecognition({bool downloadIfNeeded = false}) async {
+  Future<bool> startPitchRecognition() async {
     if (!pitchRecognitionAvailable) return false;
     try {
       await _prepareMicrophoneTake(settings.pitchRecognitionMode);
@@ -486,12 +484,9 @@ class XenSynthController extends ChangeNotifier {
       );
       final state = await _native.startPitchRecognition(
         mode: settings.pitchRecognitionMode.name,
-        downloadIfNeeded: downloadIfNeeded,
       );
       if (state.isNotEmpty) _applyPitchRecognitionState(state);
-      final started =
-          pitchRecognitionPhase != 'error' &&
-          pitchRecognitionPhase != 'needsDownload';
+      final started = pitchRecognitionPhase != 'error';
       if (!started) _finalizeMicrophoneTake();
       return started;
     } on PlatformException catch (error) {
@@ -1075,6 +1070,7 @@ class XenSynthController extends ChangeNotifier {
     final frequencyHz = _finiteDouble(event.payload['frequencyHz']);
     final rawPitch = _finiteDouble(event.payload['pitch']);
     final confidence = _finiteDouble(event.payload['confidence']);
+    pitchRecognitionAlgorithm = event.payload['algorithm']?.toString() ?? '';
     pitchRecognitionFrequencyHz = voiced ? frequencyHz : null;
     pitchRecognitionDetectedPitch = voiced ? rawPitch : null;
     pitchRecognitionConfidence = voiced
@@ -1187,7 +1183,7 @@ class XenSynthController extends ChangeNotifier {
   }
 
   void _handleSpectrum(NativeMidiEvent event) {
-    if (!_microphoneTake || _microphoneTakeMode != PitchRecognitionMode.fft) {
+    if (!_microphoneTake) {
       return;
     }
     final rawMagnitudes = event.payload['magnitudes'];
@@ -1200,8 +1196,21 @@ class XenSynthController extends ChangeNotifier {
       _ => null,
     };
     if (magnitudes == null || magnitudes.isEmpty) return;
+    final peaks = <SpectrumPeak>[
+      if (event.payload['peaks'] case final List values)
+        for (final value in values)
+          if (value case final Map peak)
+            if (_finiteDouble(peak['pitch']) case final double pitch)
+              if (_finiteDouble(peak['magnitude']) case final double magnitude)
+                SpectrumPeak(
+                  pitch: pitch,
+                  magnitude: magnitude.clamp(0.0, 1.0),
+                ),
+    ];
     final time = _microphoneEventTime(event);
-    spectrumFrames.add(SpectrumFrame(time: time, magnitudes: magnitudes));
+    spectrumFrames.add(
+      SpectrumFrame(time: time, magnitudes: magnitudes, peaks: peaks),
+    );
     notifyListeners();
   }
 
@@ -1230,7 +1239,7 @@ class XenSynthController extends ChangeNotifier {
     int velocity,
     double time,
   ) {
-    if (!_microphoneTake || _microphoneTakeMode == PitchRecognitionMode.fft) {
+    if (!_microphoneTake) {
       return;
     }
     _recordMicrophoneNoteUp(pointer, time);
@@ -1392,20 +1401,8 @@ class XenSynthController extends ChangeNotifier {
       state['supported'],
       pitchRecognitionAvailable,
     );
-    pitchRecognitionModelReady = _stateBool(
-      state['modelReady'],
-      pitchRecognitionModelReady,
-    );
     pitchRecognizing = _stateBool(state['recognizing'], false);
     pitchRecognitionBusy = _stateBool(state['busy'], false);
-    pitchRecognitionDownloadProgress = switch (state['progress']) {
-      num value => value.toDouble().clamp(0.0, 1.0).toDouble(),
-      String value =>
-        (double.tryParse(value) ?? pitchRecognitionDownloadProgress)
-            .clamp(0.0, 1.0)
-            .toDouble(),
-      _ => pitchRecognitionDownloadProgress,
-    };
     pitchRecognitionPhase = state['phase']?.toString() ?? pitchRecognitionPhase;
     pitchRecognitionMessage = state['message']?.toString() ?? '';
     final recordingDuration = _finiteDouble(state['recordingDuration']);

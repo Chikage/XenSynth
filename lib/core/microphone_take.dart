@@ -1,11 +1,23 @@
 import 'dart:typed_data';
 
 class SpectrumFrame {
-  SpectrumFrame({required this.time, required Float32List magnitudes})
-    : magnitudes = Float32List.fromList(magnitudes);
+  SpectrumFrame({
+    required this.time,
+    required Float32List magnitudes,
+    List<SpectrumPeak> peaks = const <SpectrumPeak>[],
+  }) : magnitudes = Float32List.fromList(magnitudes),
+       peaks = List<SpectrumPeak>.unmodifiable(peaks);
 
   final double time;
   final Float32List magnitudes;
+  final List<SpectrumPeak> peaks;
+}
+
+class SpectrumPeak {
+  const SpectrumPeak({required this.pitch, required this.magnitude});
+
+  final double pitch;
+  final double magnitude;
 }
 
 class PitchInputEvent {
