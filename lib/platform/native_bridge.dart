@@ -61,6 +61,25 @@ class NativeMidiEvent {
   }
 }
 
+class NativeMidiOutput {
+  const NativeMidiOutput({required this.id, required this.name});
+
+  final String id;
+  final String name;
+
+  static NativeMidiOutput? fromMessage(Object? message) {
+    if (message is! Map) return null;
+    final map = Map<Object?, Object?>.from(message);
+    final id = map['id']?.toString().trim();
+    if (id == null || id.isEmpty) return null;
+    final name = map['name']?.toString().trim();
+    return NativeMidiOutput(
+      id: id,
+      name: name == null || name.isEmpty ? 'MIDI output' : name,
+    );
+  }
+}
+
 class XenSynthNativeBridge {
   XenSynthNativeBridge._() {
     _methods.setMethodCallHandler(_handleNativeMethodCall);
@@ -187,6 +206,45 @@ class XenSynthNativeBridge {
   }
 
   Future<void> allNotesOff() => _invokeVoid('allNotesOff');
+
+  Future<void> setMidiInputEnabled(bool enabled) {
+    return _invokeVoid('setMidiInputEnabled', <String, Object?>{
+      'enabled': enabled,
+    });
+  }
+
+  Future<void> setMidiOutputEnabled(bool enabled) {
+    return _invokeVoid('setMidiOutputEnabled', <String, Object?>{
+      'enabled': enabled,
+    });
+  }
+
+  Future<void> configureNetworkMidiOutput({
+    required bool enabled,
+    required String host,
+    required int port,
+  }) {
+    return _invokeVoid('configureNetworkMidiOutput', <String, Object?>{
+      'enabled': enabled,
+      'host': host,
+      'port': port,
+    });
+  }
+
+  Future<List<NativeMidiOutput>> getBluetoothMidiOutputs() async {
+    final result = await _invoke('getBluetoothMidiOutputs');
+    if (result is! List) return const <NativeMidiOutput>[];
+    return result
+        .map(NativeMidiOutput.fromMessage)
+        .whereType<NativeMidiOutput>()
+        .toList(growable: false);
+  }
+
+  Future<void> setBluetoothMidiOutputIds(List<String> ids) {
+    return _invokeVoid('setBluetoothMidiOutputIds', <String, Object?>{
+      'ids': ids,
+    });
+  }
 
   Future<Map<String, Object?>> getPitchRecognitionState() async {
     return _stringKeyedMap(await _invoke('getPitchRecognitionState'));

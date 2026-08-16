@@ -19,6 +19,7 @@ import icu.ringona.xensynth.audio.NativeAudioEngine
 import icu.ringona.xensynth.midi.MidiDeviceInputManager
 import icu.ringona.xensynth.midi.MidiInputDevice
 import icu.ringona.xensynth.midi.MidiInputEvent
+import icu.ringona.xensynth.midi.MidiOutputDestinationManager
 import icu.ringona.xensynth.midi.MidiOutputRouter
 import icu.ringona.xensynth.playback.XenSynthPlaybackService
 import icu.ringona.xensynth.pitch.PitchRecognitionManager
@@ -48,6 +49,9 @@ internal class XenSynthPlatformBridge(
     private val worker: ExecutorService = Executors.newSingleThreadExecutor()
     private val preferences = activity.getSharedPreferences(PREFERENCES_NAME, Activity.MODE_PRIVATE)
     private val midiInputManager = MidiDeviceInputManager(activity, this)
+    private val midiOutputDestinationManager = MidiOutputDestinationManager(
+        activity.applicationContext,
+    )
     private val pitchRecognitionManager = PitchRecognitionManager(
         activity.applicationContext,
         object : PitchRecognitionManager.Listener {
@@ -119,6 +123,7 @@ internal class XenSynthPlatformBridge(
     private var pendingDocumentResult: MethodChannel.Result? = null
     private var pendingViewUri: Uri? = null
     private var hostResumed = false
+    private var midiInputEnabled = true
     private var audioInitialized = false
     private var audioInitializing = false
     private var closed = false
@@ -128,6 +133,7 @@ internal class XenSynthPlatformBridge(
     private var pendingPitchRecognitionStart = false
     private var pendingPitchRecognitionDownload = false
     private var pendingPitchRecognitionMode = PitchRecognitionMode.PIANO
+    private var pendingBluetoothMidiOutputIds = emptyList<String>()
     private val manualNoteTokens = mutableMapOf<Int, ManualNoteToken>()
     private var nextManualNoteToken = 1
 
@@ -215,6 +221,31 @@ internal class XenSynthPlatformBridge(
                 "allNotesOff" -> {
                     XenSynthPlaybackCoordinator.allNotesOff()
                     releaseManualNotes()
+                    result.success(true)
+                }
+                "setMidiInputEnabled" -> {
+                    setMidiInputEnabled(boolean(arguments, "enabled", defaultValue = true))
+                    result.success(true)
+                }
+                "setMidiOutputEnabled" -> {
+                    MidiOutputRouter.setOutputEnabled(
+                        boolean(arguments, "enabled", defaultValue = true),
+                    )
+                    result.success(true)
+                }
+                "configureNetworkMidiOutput" -> {
+                    MidiOutputRouter.configureNetworkOutput(
+                        enabled = boolean(arguments, "enabled"),
+                        host = arguments["host"]?.toString().orEmpty(),
+                        port = integer(arguments, "port", 5004).coerceIn(1, 65535),
+                    )
+                    result.success(true)
+                }
+                "getBluetoothMidiOutputs" -> result.success(
+                    midiOutputDestinationManager.bluetoothDestinations(),
+                )
+                "setBluetoothMidiOutputIds" -> {
+                    setBluetoothMidiOutputIds(stringList(arguments["ids"]))
                     result.success(true)
                 }
                 "releaseInputNotes" -> {
@@ -388,6 +419,39 @@ internal class XenSynthPlatformBridge(
         manualNoteTokens.clear()
     }
 
+    private fun setMidiInputEnabled(enabled: Boolean) {
+        if (midiInputEnabled == enabled) return
+        midiInputEnabled = enabled
+        if (!enabled) {
+            onMidiEvent(MidiInputEvent.AllNotesOff(channel = 0))
+            midiInputManager.stop()
+        } else if (hostResumed && midiEventSink != null && midiInputManager.isSupported) {
+            midiInputManager.start()
+        }
+    }
+
+    private fun setBluetoothMidiOutputIds(ids: List<String>) {
+        if (ids.isEmpty()) {
+            pendingBluetoothMidiOutputIds = emptyList()
+            midiOutputDestinationManager.selectBluetoothDestinations(ids)
+            return
+        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S &&
+            ContextCompat.checkSelfPermission(activity, Manifest.permission.BLUETOOTH_CONNECT) !=
+            PackageManager.PERMISSION_GRANTED
+        ) {
+            pendingBluetoothMidiOutputIds = ids
+            ActivityCompat.requestPermissions(
+                activity,
+                arrayOf(Manifest.permission.BLUETOOTH_CONNECT),
+                BLUETOOTH_PERMISSION_REQUEST_CODE,
+            )
+            return
+        }
+        pendingBluetoothMidiOutputIds = emptyList()
+        midiOutputDestinationManager.selectBluetoothDestinations(ids)
+    }
+
     private fun startPlaybackService() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
             ContextCompat.checkSelfPermission(activity, Manifest.permission.POST_NOTIFICATIONS) !=
@@ -514,6 +578,21 @@ internal class XenSynthPlatformBridge(
         permissions: Array<out String>,
         grantResults: IntArray,
     ): Boolean {
+        if (requestCode == BLUETOOTH_PERMISSION_REQUEST_CODE) {
+            val requestedBluetooth = permissions.any {
+                it == Manifest.permission.BLUETOOTH_CONNECT
+            }
+            val granted = requestedBluetooth && grantResults.any {
+                it == PackageManager.PERMISSION_GRANTED
+            }
+            if (granted) {
+                midiOutputDestinationManager.selectBluetoothDestinations(
+                    pendingBluetoothMidiOutputIds,
+                )
+            }
+            pendingBluetoothMidiOutputIds = emptyList()
+            return true
+        }
         if (requestCode != MICROPHONE_PERMISSION_REQUEST_CODE) return false
         val requestedMicrophone = permissions.any { it == Manifest.permission.RECORD_AUDIO }
         val granted = requestedMicrophone && grantResults.any { it == PackageManager.PERMISSION_GRANTED }
@@ -692,7 +771,7 @@ internal class XenSynthPlatformBridge(
         midiEventSink = events
         deliverPendingViewDocument()
         pitchRecognitionManager.emitCurrentState()
-        if (hostResumed && midiInputManager.isSupported) midiInputManager.start()
+        if (midiInputEnabled && hostResumed && midiInputManager.isSupported) midiInputManager.start()
     }
 
     override fun onCancel(arguments: Any?) {
@@ -743,7 +822,9 @@ internal class XenSynthPlatformBridge(
 
     fun onHostResume() {
         hostResumed = true
-        if (midiEventSink != null && midiInputManager.isSupported) midiInputManager.start()
+        if (midiInputEnabled && midiEventSink != null && midiInputManager.isSupported) {
+            midiInputManager.start()
+        }
         if (audioInitialized) {
             worker.execute {
                 if (!nativeAudio.isStarted()) nativeAudio.restart()
@@ -768,6 +849,7 @@ internal class XenSynthPlatformBridge(
         pendingDocumentResult = null
         midiEventSink = null
         midiInputManager.close()
+        midiOutputDestinationManager.close()
         pitchRecognitionManager.close()
         releaseManualNotes()
         if (!XenSynthPlaybackService.isRunning()) {
@@ -789,6 +871,7 @@ internal class XenSynthPlatformBridge(
         const val DOCUMENT_REQUEST_CODE = 0x5845
         const val MICROPHONE_PERMISSION_REQUEST_CODE = 0x5846
         const val NOTIFICATION_PERMISSION_REQUEST_CODE = 0x5847
+        const val BLUETOOTH_PERMISSION_REQUEST_CODE = 0x5848
         const val DOCUMENT_CACHE_DIRECTORY = "xensynth-documents"
         const val SAMPLE_SCHEDULER_MILLIS = 8
         const val DEFAULT_GAIN = 2.05f
@@ -836,6 +919,13 @@ internal class XenSynthPlatformBridge(
                 is String -> value.toIntOrNull()
                 else -> null
             }
+        }
+
+        fun stringList(value: Any?): List<String> {
+            return (value as? List<*>)
+                ?.mapNotNull { item -> item?.toString()?.trim()?.takeIf(String::isNotEmpty) }
+                ?.distinct()
+                .orEmpty()
         }
 
         fun boolean(map: Map<*, *>, key: String, defaultValue: Boolean = false): Boolean {

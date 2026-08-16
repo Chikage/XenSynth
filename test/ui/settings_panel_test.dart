@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:xensynth/app/xensynth_settings.dart';
+import 'package:xensynth/platform/native_bridge.dart';
 import 'package:xensynth/ui/app_palette.dart';
 import 'package:xensynth/ui/widgets/settings_panel.dart';
 
@@ -117,6 +118,91 @@ void main() {
     expect(settings.hapticFeedbackEnabled, isFalse);
     expect(find.text('OFF'), findsOneWidget);
   });
+
+  testWidgets(
+    'MIDI panel exposes input output network and Bluetooth controls',
+    (tester) async {
+      await tester.binding.setSurfaceSize(const Size(874, 402));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+
+      var settings = const XenSynthSettings(networkMidiEnabled: true);
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: AppPalette.theme(),
+          home: Scaffold(
+            body: Align(
+              alignment: Alignment.topRight,
+              child: SizedBox(
+                height: 330,
+                child: StatefulBuilder(
+                  builder: (context, setState) => SettingsPanel(
+                    settings: settings,
+                    bluetoothMidiOutputs: const [
+                      NativeMidiOutput(id: 'bluetooth:9:0', name: 'Controller'),
+                    ],
+                    onChanged: (value) => setState(() => settings = value),
+                    onReset: () {},
+                  ),
+                ),
+              ),
+            ),
+          ),
+        ),
+      );
+
+      final scrollable = find.byWidgetPredicate(
+        (widget) =>
+            widget is Scrollable && widget.axisDirection == AxisDirection.down,
+      );
+      await tester.scrollUntilVisible(
+        find.text('MIDI input'),
+        100,
+        scrollable: scrollable,
+      );
+      expect(find.text('MIDI'), findsOneWidget);
+      expect(find.text('MIDI input'), findsOneWidget);
+      await tester.scrollUntilVisible(
+        find.text('MIDI output'),
+        100,
+        scrollable: scrollable,
+      );
+      expect(find.text('MIDI output'), findsOneWidget);
+      await tester.scrollUntilVisible(
+        find.text('Network MIDI (UDP)'),
+        100,
+        scrollable: scrollable,
+      );
+      expect(find.text('Network MIDI (UDP)'), findsOneWidget);
+      await tester.scrollUntilVisible(
+        find.byKey(const ValueKey('network-midi-host-input')),
+        100,
+        scrollable: scrollable,
+      );
+      expect(
+        find.byKey(const ValueKey('network-midi-host-input')),
+        findsOneWidget,
+      );
+      await tester.scrollUntilVisible(
+        find.byKey(const ValueKey('network-midi-port-input')),
+        100,
+        scrollable: scrollable,
+      );
+      expect(
+        find.byKey(const ValueKey('network-midi-port-input')),
+        findsOneWidget,
+      );
+      await tester.scrollUntilVisible(
+        find.text('Controller'),
+        100,
+        scrollable: scrollable,
+      );
+      expect(find.text('Controller'), findsOneWidget);
+
+      await tester.tap(find.byType(Checkbox));
+      await tester.pump();
+      expect(settings.bluetoothMidiOutputIds, ['bluetooth:9:0']);
+    },
+  );
 
   testWidgets('settings controls keep clear vertical separation', (
     tester,

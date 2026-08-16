@@ -8,8 +8,15 @@ final class MIDIKeyboardController {
   private var inputPort = MIDIPortRef()
   private var connectedSources = Set<MIDIEndpointRef>()
   private var isStarted = false
+  private(set) var inputEnabled = true
+
+  func setInputEnabled(_ enabled: Bool) {
+    inputEnabled = enabled
+    if !enabled { stop() }
+  }
 
   func start() throws {
+    guard inputEnabled else { return }
     guard !isStarted else {
       refreshConnections()
       return
@@ -74,6 +81,7 @@ final class MIDIKeyboardController {
   }
 
   private func handle(packetList: UnsafePointer<MIDIPacketList>) {
+    guard inputEnabled else { return }
     let parsed = Self.events(from: packetList)
     guard !parsed.isEmpty else { return }
     DispatchQueue.main.async { [weak self] in

@@ -6,7 +6,8 @@ final class XenSynthPlatformBridge: NSObject, FlutterStreamHandler, UIDocumentPi
   static let methodChannelName = "icu.ringona.xensynth/platform"
   static let midiEventChannelName = "icu.ringona.xensynth/platform/midi"
 
-  private let playbackController = ScorePlaybackController()
+  private let midiOutput = MIDIOutputRouter()
+  private lazy var playbackController = ScorePlaybackController(midiOutput: midiOutput)
   private let midiController = MIDIKeyboardController()
   private lazy var pitchRecognitionManager = PitchRecognitionManager(listener: self)
   private let audioInitializationQueue = DispatchQueue(
@@ -182,6 +183,29 @@ final class XenSynthPlatformBridge: NSObject, FlutterStreamHandler, UIDocumentPi
 
       case "allNotesOff":
         playbackController.allNotesOff()
+        result(true)
+
+      case "setMidiInputEnabled":
+        setMidiInputEnabled(arguments.bool(forAnyKey: ["enabled"]) ?? true)
+        result(true)
+
+      case "setMidiOutputEnabled":
+        midiOutput.setOutputEnabled(arguments.bool(forAnyKey: ["enabled"]) ?? true)
+        result(true)
+
+      case "configureNetworkMidiOutput":
+        midiOutput.configureNetwork(
+          enabled: arguments.bool(forAnyKey: ["enabled"]) ?? false,
+          host: arguments["host"] as? String ?? "",
+          port: (arguments.int(forAnyKey: ["port"]) ?? 5004).clamped(to: 1...65_535)
+        )
+        result(true)
+
+      case "getBluetoothMidiOutputs":
+        result(midiOutput.bluetoothDestinations())
+
+      case "setBluetoothMidiOutputIds":
+        midiOutput.setBluetoothDestinationIds(stringList(from: arguments["ids"]) ?? [])
         result(true)
 
       case "setPitchRecognitionSensitivity":
@@ -457,6 +481,27 @@ final class XenSynthPlatformBridge: NSObject, FlutterStreamHandler, UIDocumentPi
     if let program = (settings["program"] as? NSNumber)?.intValue {
       previewPrograms = Array(repeating: program.clamped(to: 0...127), count: 16)
     }
+    setMidiInputEnabled((settings["midiInputEnabled"] as? Bool) ?? true)
+    midiOutput.setOutputEnabled((settings["midiOutputEnabled"] as? Bool) ?? true)
+    midiOutput.configureNetwork(
+      enabled: (settings["networkMidiEnabled"] as? Bool) ?? false,
+      host: settings["networkMidiHost"] as? String ?? "",
+      port: ((settings["networkMidiPort"] as? NSNumber)?.intValue ?? 5004)
+        .clamped(to: 1...65_535)
+    )
+    midiOutput.setBluetoothDestinationIds(
+      stringList(from: settings["bluetoothMidiOutputIds"]) ?? []
+    )
+  }
+
+  private func setMidiInputEnabled(_ enabled: Bool) {
+    midiController.setInputEnabled(enabled)
+    guard enabled, midiEventSink != nil else { return }
+    do {
+      try midiController.start()
+    } catch {
+      midiEventSink?(flutterError(error))
+    }
   }
 
   private func loadSettings(keys: [String]?) -> [String: Any] {
@@ -599,7 +644,7 @@ final class XenSynthPlatformBridge: NSObject, FlutterStreamHandler, UIDocumentPi
   ) -> FlutterError? {
     midiEventSink = events
     do {
-      try midiController.start()
+      if midiController.inputEnabled { try midiController.start() }
       pitchRecognitionManager.emitCurrentState()
       return nil
     } catch {
@@ -633,6 +678,12 @@ final class XenSynthPlatformBridge: NSObject, FlutterStreamHandler, UIDocumentPi
     "audioLatencyMs": 0.0,
     "program": 0,
     "externalMidiControlsProgram": false,
+    "midiInputEnabled": true,
+    "midiOutputEnabled": true,
+    "networkMidiEnabled": false,
+    "networkMidiHost": "",
+    "networkMidiPort": 5004,
+    "bluetoothMidiOutputIds": [String](),
     "keyboardLayoutMode": "linear",
     "hexColumns": 35,
     "hexRows": 8,

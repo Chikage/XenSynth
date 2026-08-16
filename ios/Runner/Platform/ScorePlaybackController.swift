@@ -75,6 +75,11 @@ final class ScorePlaybackController {
     let noteNumber: UInt8
   }
 
+  private struct ActivePreviewNote {
+    let audioNote: ActiveNote
+    let midiToken: Int
+  }
+
   private struct PlayableNote {
     let key: VoiceKey
     let start: Double
@@ -106,10 +111,12 @@ final class ScorePlaybackController {
   }
 
   private let synth = FluidSynthEngine.shared
+  private let midiOutput: MIDIOutputRouter
   private var events: [ScheduledEvent] = []
   private var nextEventIndex = 0
   private var activeNotes: Set<ActiveNote> = []
-  private var activePreviewNotes: [Int: ActiveNote] = [:]
+  private var activePreviewNotes: [Int: ActivePreviewNote] = [:]
+  private var activeMidiTokens: [ActiveNote: Int] = [:]
   private var nextPreviewToken = 1
   private var playbackTimer: DispatchSourceTimer?
   private var scoreStartTime = 0.0
@@ -119,6 +126,10 @@ final class ScorePlaybackController {
   private var onFinished: (() -> Void)?
   private var volumeGain = ScorePlaybackController.defaultVolumeGain
   private var reverbMixIntensity = ScorePlaybackController.defaultReverbMixIntensity
+
+  init(midiOutput: MIDIOutputRouter = MIDIOutputRouter()) {
+    self.midiOutput = midiOutput
+  }
 
   func initializeAudio() throws {
     try prepareAudio()
@@ -163,8 +174,10 @@ final class ScorePlaybackController {
       synth.noteOff(noteNumber: note.noteNumber, channel: note.playbackChannel)
     }
     activeNotes.removeAll()
+    activeMidiTokens.removeAll()
     stopAllPreviewNotes()
     synth.allNotesOff()
+    midiOutput.allNotesOff()
   }
 
   func setVolumeGain(_ gain: Float) {
@@ -199,19 +212,32 @@ final class ScorePlaybackController {
       instrument: key.fluidInstrument,
       pitchBend: pitchBend
     )
-    activePreviewNotes[token] = activeNote
+    let midiToken = midiOutput.noteOn(
+      id: nil,
+      pitch: pitch,
+      velocity: velocity,
+      channel: channel,
+      program: program,
+      bankMsb: bankMsb,
+      bankLsb: bankLsb
+    )
+    activePreviewNotes[token] = ActivePreviewNote(
+      audioNote: activeNote,
+      midiToken: midiToken
+    )
     return token
   }
 
   func stopPreviewNote(_ token: Int) {
     guard let note = activePreviewNotes.removeValue(forKey: token) else { return }
-    synth.noteOff(noteNumber: note.noteNumber, channel: note.playbackChannel)
+    synth.noteOff(noteNumber: note.audioNote.noteNumber, channel: note.audioNote.playbackChannel)
+    midiOutput.noteOff(note.midiToken)
   }
 
   func setPreviewExpression(_ token: Int, expression: Int) {
     guard let note = activePreviewNotes[token] else { return }
     synth.controlChange(
-      channel: note.playbackChannel,
+      channel: note.audioNote.playbackChannel,
       controller: 11,
       value: UInt8(clamping: expression.clamped(to: 0...127))
     )
@@ -339,9 +365,21 @@ final class ScorePlaybackController {
         pitchBend: event.pitchBend
       )
       activeNotes.insert(activeNote)
+      activeMidiTokens[activeNote] = midiOutput.noteOn(
+        id: nil,
+        pitch: Double(event.noteNumber) + Self.semitones(for: event.pitchBend),
+        velocity: Int(event.velocity),
+        channel: Int(event.playbackChannel),
+        program: Int(event.key.program),
+        bankMsb: Int(event.key.midiBank.msb),
+        bankLsb: Int(event.key.midiBank.lsb)
+      )
     case .noteOff:
       synth.noteOff(noteNumber: event.noteNumber, channel: event.playbackChannel)
       activeNotes.remove(activeNote)
+      if let midiToken = activeMidiTokens.removeValue(forKey: activeNote) {
+        midiOutput.noteOff(midiToken)
+      }
     }
   }
 
@@ -353,8 +391,10 @@ final class ScorePlaybackController {
     onFinished = nil
     for note in activeNotes {
       synth.noteOff(noteNumber: note.noteNumber, channel: note.playbackChannel)
+      if let midiToken = activeMidiTokens[note] { midiOutput.noteOff(midiToken) }
     }
     activeNotes.removeAll()
+    activeMidiTokens.removeAll()
   }
 
   private func makePreviewToken() -> Int {
@@ -365,7 +405,11 @@ final class ScorePlaybackController {
 
   private func stopAllPreviewNotes() {
     for note in activePreviewNotes.values {
-      synth.noteOff(noteNumber: note.noteNumber, channel: note.playbackChannel)
+      synth.noteOff(
+        noteNumber: note.audioNote.noteNumber,
+        channel: note.audioNote.playbackChannel
+      )
+      midiOutput.noteOff(note.midiToken)
     }
     activePreviewNotes.removeAll()
   }
@@ -419,6 +463,10 @@ final class ScorePlaybackController {
     let normalized = (cents / pitchBendRangeCents).clamped(to: -1...1)
     let value = Int(centerPitchBend) + Int((normalized * 8_191).rounded())
     return UInt16(clamping: value)
+  }
+
+  private static func semitones(for pitchBend: UInt16) -> Double {
+    Double(Int(pitchBend) - Int(centerPitchBend)) / Double(centerPitchBend) * 2.0
   }
 
   private static func fluidGain(for gain: Float) -> Float {

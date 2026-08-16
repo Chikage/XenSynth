@@ -244,6 +244,30 @@ void main() {
       );
     });
 
+    test('round-trips MIDI input, output, network, and Bluetooth settings', () {
+      const configured = XenSynthSettings(
+        midiInputEnabled: false,
+        midiOutputEnabled: false,
+        networkMidiEnabled: true,
+        networkMidiHost: '192.168.1.48',
+        networkMidiPort: 5005,
+        bluetoothMidiOutputIds: ['bluetooth:42:0'],
+      );
+
+      final restored = XenSynthSettings.fromMap(configured.toMap());
+
+      expect(restored.midiInputEnabled, isFalse);
+      expect(restored.midiOutputEnabled, isFalse);
+      expect(restored.networkMidiEnabled, isTrue);
+      expect(restored.networkMidiHost, '192.168.1.48');
+      expect(restored.networkMidiPort, 5005);
+      expect(restored.bluetoothMidiOutputIds, ['bluetooth:42:0']);
+      expect(
+        configured.copyWith(networkMidiPort: 70_000).networkMidiPort,
+        65535,
+      );
+    });
+
     test('applies pitch offset with the opposite sign', () {
       const positive = XenSynthSettings(pitchOffsetCents: 3);
       const negative = XenSynthSettings(pitchOffsetCents: -3);

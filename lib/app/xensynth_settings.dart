@@ -23,6 +23,12 @@ class XenSynthSettings {
     this.audioLatencyMs = 0,
     this.program = 0,
     this.externalMidiControlsProgram = false,
+    this.midiInputEnabled = true,
+    this.midiOutputEnabled = true,
+    this.networkMidiEnabled = false,
+    this.networkMidiHost = '',
+    this.networkMidiPort = defaultNetworkMidiPort,
+    this.bluetoothMidiOutputIds = const <String>[],
     this.pitchRecognitionMode = PitchRecognitionMode.yin,
     this.microphoneSensitivity = 1,
     this.hapticFeedbackStrength = defaultHapticFeedbackStrength,
@@ -53,6 +59,7 @@ class XenSynthSettings {
   static const double microphoneSensitivityMin = 0.5;
   static const double microphoneSensitivityMax = 2.0;
   static const double defaultHapticFeedbackStrength = 2 / 3;
+  static const int defaultNetworkMidiPort = 5004;
 
   final KeyboardLayoutMode layoutMode;
   final double playbackSpeed;
@@ -63,6 +70,12 @@ class XenSynthSettings {
   final double audioLatencyMs;
   final int program;
   final bool externalMidiControlsProgram;
+  final bool midiInputEnabled;
+  final bool midiOutputEnabled;
+  final bool networkMidiEnabled;
+  final String networkMidiHost;
+  final int networkMidiPort;
+  final List<String> bluetoothMidiOutputIds;
   final PitchRecognitionMode pitchRecognitionMode;
   final double microphoneSensitivity;
   final double hapticFeedbackStrength;
@@ -171,6 +184,25 @@ class XenSynthSettings {
         map['externalMidiControlsProgram'],
         defaults.externalMidiControlsProgram,
       ),
+      midiInputEnabled: _bool(
+        map['midiInputEnabled'],
+        defaults.midiInputEnabled,
+      ),
+      midiOutputEnabled: _bool(
+        map['midiOutputEnabled'],
+        defaults.midiOutputEnabled,
+      ),
+      networkMidiEnabled: _bool(
+        map['networkMidiEnabled'],
+        defaults.networkMidiEnabled,
+      ),
+      networkMidiHost:
+          map['networkMidiHost']?.toString().trim() ?? defaults.networkMidiHost,
+      networkMidiPort: _int(
+        map['networkMidiPort'],
+        defaults.networkMidiPort,
+      ).clamp(1, 65535),
+      bluetoothMidiOutputIds: _stringList(map['bluetoothMidiOutputIds']),
       pitchRecognitionMode: pitchRecognitionMode,
       microphoneSensitivity: _double(
         map['microphoneSensitivity'],
@@ -244,6 +276,12 @@ class XenSynthSettings {
     'audioLatencyMs': audioLatencyMs,
     'program': program,
     'externalMidiControlsProgram': externalMidiControlsProgram,
+    'midiInputEnabled': midiInputEnabled,
+    'midiOutputEnabled': midiOutputEnabled,
+    'networkMidiEnabled': networkMidiEnabled,
+    'networkMidiHost': networkMidiHost.trim(),
+    'networkMidiPort': networkMidiPort.clamp(1, 65535),
+    'bluetoothMidiOutputIds': bluetoothMidiOutputIds,
     'pitchRecognitionMode': pitchRecognitionMode.name,
     'microphoneSensitivity': microphoneSensitivity.clamp(
       microphoneSensitivityMin,
@@ -284,6 +322,12 @@ class XenSynthSettings {
     double? audioLatencyMs,
     int? program,
     bool? externalMidiControlsProgram,
+    bool? midiInputEnabled,
+    bool? midiOutputEnabled,
+    bool? networkMidiEnabled,
+    String? networkMidiHost,
+    int? networkMidiPort,
+    List<String>? bluetoothMidiOutputIds,
     PitchRecognitionMode? pitchRecognitionMode,
     double? microphoneSensitivity,
     double? hapticFeedbackStrength,
@@ -320,6 +364,16 @@ class XenSynthSettings {
       program: program ?? this.program,
       externalMidiControlsProgram:
           externalMidiControlsProgram ?? this.externalMidiControlsProgram,
+      midiInputEnabled: midiInputEnabled ?? this.midiInputEnabled,
+      midiOutputEnabled: midiOutputEnabled ?? this.midiOutputEnabled,
+      networkMidiEnabled: networkMidiEnabled ?? this.networkMidiEnabled,
+      networkMidiHost: networkMidiHost ?? this.networkMidiHost,
+      networkMidiPort: (networkMidiPort ?? this.networkMidiPort).clamp(
+        1,
+        65535,
+      ),
+      bluetoothMidiOutputIds:
+          bluetoothMidiOutputIds ?? this.bluetoothMidiOutputIds,
       pitchRecognitionMode: nextPitchRecognitionMode,
       microphoneSensitivity:
           (microphoneSensitivity ?? this.microphoneSensitivity).clamp(
@@ -412,5 +466,14 @@ class XenSynthSettings {
       'false' || 'no' || '0' => false,
       _ => fallback,
     };
+  }
+
+  static List<String> _stringList(Object? value) {
+    if (value is! List) return const <String>[];
+    return value
+        .map((item) => item.toString().trim())
+        .where((item) => item.isNotEmpty)
+        .toSet()
+        .toList(growable: false);
   }
 }

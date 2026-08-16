@@ -30,6 +30,8 @@
 	<true/>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>Xen Synth uses the microphone to record and recognize musical pitch.</string>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>Xen Synth sends MIDI messages to devices on your local network.</string>
 	<key>UIFileSharingEnabled</key>
 	<true/>
 	<key>UIRequiresFullScreen</key>

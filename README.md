@@ -11,6 +11,7 @@ XenSynth 的 iOS / Android 跨平台版本。界面、乐谱解析、瀑布流�
 - JSON 调律、EDO、音高偏移、速度、音量、混响和延迟设置
 - USB / 系统 MIDI 键盘输入，支持延音踏板与音色切换
 - Android 系统虚拟 MIDI 输出，其他应用可接收键盘和乐谱播放的 MIDI 流
+- 可分别开关 MIDI 输入和输出；输出可同时发送到局域网 UDP MIDI 与已配对的蓝牙 / 系统 MIDI 目的地
 - Android 后台乐谱播放与 MediaSession 通知栏控制（播放、暂停、停止、进度拖动）
 - iOS / Android 麦克风录音与实时分析：钢琴音符、YIN 连续基频和 FFT 频谱模式
 - FluidSynth SoundFont 合成；Android 使用 Oboe，iOS 使用原生音频排程
@@ -34,6 +35,12 @@ EventChannel   icu.ringona.xensynth/platform/midi
 Android 安装后会向系统注册 `XenSynth MIDI Output`（设备支持 Android MIDI 时可见），包含一个 `Output` 端口。其他应用通过系统 MIDI 设备列表连接该端口即可接收实时键盘和乐谱播放事件。微分音使用每个活动音符独立 MIDI 通道的 Pitch Bend 表示，并在音符开始前声明标准 ±2 半音弯音范围；这样同一和弦中的不同音分不会互相改变音高。
 
 Android 乐谱播放由 `XenSynthPlaybackService` 持有 Android MediaSession。开始播放后会显示媒体通知，返回桌面或锁屏不会停止乐谱；通知栏和耳机媒体按键可以播放、暂停、停止和拖动进度。Android 13 及以上首次开始播放时需要允许通知权限。关闭应用任务会按 Android 媒体应用惯例停止播放并清理通知。
+
+## MIDI 输出
+
+设置面板的 `MIDI` 区域提供独立的 `MIDI input` 和 `MIDI output` 开关。关闭输入会断开外接 MIDI 接收，关闭输出会立即向已输出的音符发送 Note Off / All Notes Off，然后阻止键盘和乐谱继续向外发送。
+
+`Network MIDI (UDP)` 向设置的局域网主机和端口发送 MIDI 1.0 字节流，每个完整 MIDI 消息使用一个 UDP 数据报；接收端需要配置为相同的 raw UDP MIDI 约定。蓝牙输出列表来自系统已连接的 MIDI 目的地：Android 会请求蓝牙连接权限并通过 BLE MIDI 端口发送；iOS 使用当前可见的 CoreMIDI 目的地，其中包括已连接的蓝牙 MIDI 设备。两类输出可与 Android 的现有虚拟 MIDI 输出同时启用。
 
 ## 环境要求
 

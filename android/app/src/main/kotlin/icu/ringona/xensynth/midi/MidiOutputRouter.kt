@@ -4,7 +4,7 @@ import android.media.midi.MidiReceiver
 import android.util.Log
 import kotlin.math.roundToInt
 
-/** Routes app note events to the Android virtual MIDI device output port. */
+/** Routes app note events to Android virtual, Bluetooth, and UDP MIDI outputs. */
 internal object MidiOutputRouter {
     private const val TAG = "XenSynthMidiOutput"
     private const val CHANNEL_COUNT = 16
@@ -15,23 +15,50 @@ internal object MidiOutputRouter {
     private const val PITCH_BEND_RANGE_SEMITONES = 2.0
 
     private val lock = Any()
-    private var outputReceivers: Array<MidiReceiver> = emptyArray()
+    private var virtualOutputReceivers: Array<MidiReceiver> = emptyArray()
+    private var bluetoothOutputReceivers: Array<MidiReceiver> = emptyArray()
+    private var outputEnabled = true
+    private val networkOutput = UdpMidiOutput()
     private val activeNotes = LinkedHashMap<Int, ActiveNote>()
     private val activeIds = HashMap<Int, Int>()
     private var nextToken = 1
 
     fun attach(receivers: Array<MidiReceiver>) {
         synchronized(lock) {
-            outputReceivers = receivers.copyOf()
+            virtualOutputReceivers = receivers.copyOf()
         }
     }
 
     fun detach() {
         synchronized(lock) {
-            outputReceivers = emptyArray()
-            activeNotes.clear()
-            activeIds.clear()
+            virtualOutputReceivers = emptyArray()
         }
+    }
+
+    fun setBluetoothReceivers(receivers: Array<MidiReceiver>) {
+        synchronized(lock) {
+            bluetoothOutputReceivers = receivers.copyOf()
+        }
+    }
+
+    fun setOutputEnabled(enabled: Boolean) {
+        if (!enabled) allNotesOff()
+        synchronized(lock) {
+            outputEnabled = enabled
+        }
+    }
+
+    fun configureNetworkOutput(enabled: Boolean, host: String, port: Int) {
+        networkOutput.configure(enabled, host, port)
+    }
+
+    fun close() {
+        allNotesOff()
+        synchronized(lock) {
+            virtualOutputReceivers = emptyArray()
+            bluetoothOutputReceivers = emptyArray()
+        }
+        networkOutput.close()
     }
 
     fun noteOn(
@@ -129,16 +156,21 @@ internal object MidiOutputRouter {
 
     private fun sendMessages(messages: List<ByteArray>) {
         if (messages.isEmpty()) return
-        val receivers = synchronized(lock) { outputReceivers.copyOf() }
-        if (receivers.isEmpty()) return
+        val targets = synchronized(lock) {
+            if (!outputEnabled) null else OutputTargets(
+                receivers = virtualOutputReceivers + bluetoothOutputReceivers,
+                networkOutput = networkOutput,
+            )
+        } ?: return
         val timestamp = System.nanoTime()
         messages.forEach { message ->
-            receivers.forEach { receiver ->
+            targets.receivers.forEach { receiver ->
                 runCatching { receiver.send(message, 0, message.size, timestamp) }
                     .onFailure { error ->
                         Log.w(TAG, "Could not send MIDI message", error)
                     }
             }
+            targets.networkOutput.send(message)
         }
     }
 
@@ -178,5 +210,10 @@ internal object MidiOutputRouter {
         val id: Int?,
         val channel: Int,
         val key: Int,
+    )
+
+    private data class OutputTargets(
+        val receivers: Array<MidiReceiver>,
+        val networkOutput: UdpMidiOutput,
     )
 }

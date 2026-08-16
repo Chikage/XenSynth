@@ -55,6 +55,7 @@ class XenSynthController extends ChangeNotifier {
   bool audioReady = false;
   bool playing = false;
   bool pitchRecognitionAvailable = false;
+  List<NativeMidiOutput> bluetoothMidiOutputs = const <NativeMidiOutput>[];
   bool pitchRecognitionModelReady = false;
   bool pitchRecognizing = false;
   bool pitchRecognitionBusy = false;
@@ -141,6 +142,11 @@ class XenSynthController extends ChangeNotifier {
       );
       if (saved.isNotEmpty) settings = XenSynthSettings.fromMap(saved);
       try {
+        await _configureMidi(settings);
+      } catch (error) {
+        debugPrint('Native MIDI configuration failed: $error');
+      }
+      try {
         audioReady = await _native.initializeAudio();
         await Future.wait([
           _native.setGain(settings.volumeGain),
@@ -157,6 +163,7 @@ class XenSynthController extends ChangeNotifier {
           _handleMidiEvent,
           onError: (Object error) => _setStatus('MIDI UNAVAILABLE'),
         );
+        await refreshBluetoothMidiOutputs(notify: false);
         final pitchRecognitionState = await _native.getPitchRecognitionState();
         if (pitchRecognitionState.isNotEmpty) {
           _applyPitchRecognitionState(pitchRecognitionState, notify: false);
@@ -769,6 +776,27 @@ class XenSynthController extends ChangeNotifier {
     if (next.program != previous.program) {
       await _native.setProgram(program: next.program);
     }
+    if (next.midiInputEnabled != previous.midiInputEnabled) {
+      await _native.setMidiInputEnabled(next.midiInputEnabled);
+    }
+    if (next.midiOutputEnabled != previous.midiOutputEnabled) {
+      await _native.setMidiOutputEnabled(next.midiOutputEnabled);
+    }
+    if (next.networkMidiEnabled != previous.networkMidiEnabled ||
+        next.networkMidiHost != previous.networkMidiHost ||
+        next.networkMidiPort != previous.networkMidiPort) {
+      await _native.configureNetworkMidiOutput(
+        enabled: next.networkMidiEnabled,
+        host: next.networkMidiHost,
+        port: next.networkMidiPort,
+      );
+    }
+    if (!listEquals(
+      next.bluetoothMidiOutputIds,
+      previous.bluetoothMidiOutputIds,
+    )) {
+      await _native.setBluetoothMidiOutputIds(next.bluetoothMidiOutputIds);
+    }
     if (next.microphoneSensitivity != previous.microphoneSensitivity) {
       await _native.setPitchRecognitionSensitivity(next.microphoneSensitivity);
     }
@@ -794,6 +822,29 @@ class XenSynthController extends ChangeNotifier {
     final nextGain = gain.clamp(0.0, 1.0).toDouble();
     if ((settings.volumeGain - nextGain).abs() < 0.0001) return;
     unawaited(updateSettings(settings.copyWith(volumeGain: nextGain)));
+  }
+
+  Future<void> refreshBluetoothMidiOutputs({bool notify = true}) async {
+    try {
+      bluetoothMidiOutputs = await _native.getBluetoothMidiOutputs();
+      if (notify) notifyListeners();
+    } catch (error) {
+      debugPrint('Bluetooth MIDI output refresh failed: $error');
+      if (notify) _setStatus('MIDI OUTPUTS UNAVAILABLE');
+    }
+  }
+
+  Future<void> _configureMidi(XenSynthSettings value) async {
+    await Future.wait([
+      _native.setMidiInputEnabled(value.midiInputEnabled),
+      _native.setMidiOutputEnabled(value.midiOutputEnabled),
+      _native.configureNetworkMidiOutput(
+        enabled: value.networkMidiEnabled,
+        host: value.networkMidiHost,
+        port: value.networkMidiPort,
+      ),
+      _native.setBluetoothMidiOutputIds(value.bluetoothMidiOutputIds),
+    ]);
   }
 
   Future<void> resetSettings() async {

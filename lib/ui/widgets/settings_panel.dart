@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import '../../app/xensynth_settings.dart';
+import '../../platform/native_bridge.dart';
 import '../app_palette.dart';
 
 class SettingsPanel extends StatelessWidget {
@@ -10,6 +11,8 @@ class SettingsPanel extends StatelessWidget {
     required this.onChanged,
     required this.onReset,
     this.pitchRecognitionAvailable = false,
+    this.bluetoothMidiOutputs = const <NativeMidiOutput>[],
+    this.onRefreshBluetoothMidiOutputs,
     super.key,
   });
 
@@ -17,6 +20,8 @@ class SettingsPanel extends StatelessWidget {
   final ValueChanged<XenSynthSettings> onChanged;
   final VoidCallback onReset;
   final bool pitchRecognitionAvailable;
+  final List<NativeMidiOutput> bluetoothMidiOutputs;
+  final VoidCallback? onRefreshBluetoothMidiOutputs;
 
   static const double width = 300;
 
@@ -144,6 +149,75 @@ class SettingsPanel extends StatelessWidget {
                         settings.copyWith(externalMidiControlsProgram: value),
                       ),
                     ),
+                    const _SectionLabel('MIDI'),
+                    _SwitchRow(
+                      label: 'MIDI input',
+                      value: settings.midiInputEnabled,
+                      onChanged: (value) =>
+                          onChanged(settings.copyWith(midiInputEnabled: value)),
+                    ),
+                    _SwitchRow(
+                      label: 'MIDI output',
+                      value: settings.midiOutputEnabled,
+                      onChanged: (value) => onChanged(
+                        settings.copyWith(midiOutputEnabled: value),
+                      ),
+                    ),
+                    _SwitchRow(
+                      label: 'Network MIDI (UDP)',
+                      value: settings.networkMidiEnabled,
+                      onChanged: (value) => onChanged(
+                        settings.copyWith(networkMidiEnabled: value),
+                      ),
+                    ),
+                    if (settings.networkMidiEnabled) ...[
+                      _TextInputRow(
+                        label: 'Network host',
+                        value: settings.networkMidiHost,
+                        hintText: '192.168.1.20',
+                        fieldKey: const ValueKey('network-midi-host-input'),
+                        onChanged: (value) => onChanged(
+                          settings.copyWith(networkMidiHost: value),
+                        ),
+                      ),
+                      _IntegerInputRow(
+                        label: 'Network port',
+                        value: settings.networkMidiPort,
+                        min: 1,
+                        max: 65535,
+                        fieldKey: const ValueKey('network-midi-port-input'),
+                        onChanged: (value) => onChanged(
+                          settings.copyWith(networkMidiPort: value),
+                        ),
+                      ),
+                    ],
+                    _BluetoothMidiHeader(
+                      onRefresh: onRefreshBluetoothMidiOutputs,
+                    ),
+                    if (bluetoothMidiOutputs.isEmpty)
+                      const _MidiStatusRow('NO MIDI OUTPUT DESTINATION')
+                    else
+                      ...bluetoothMidiOutputs.map(
+                        (output) => _MidiOutputRow(
+                          label: output.name,
+                          selected: settings.bluetoothMidiOutputIds.contains(
+                            output.id,
+                          ),
+                          onChanged: (selected) {
+                            final ids = settings.bluetoothMidiOutputIds.toSet();
+                            if (selected) {
+                              ids.add(output.id);
+                            } else {
+                              ids.remove(output.id);
+                            }
+                            onChanged(
+                              settings.copyWith(
+                                bluetoothMidiOutputIds: ids.toList()..sort(),
+                              ),
+                            );
+                          },
+                        ),
+                      ),
                     if (pitchRecognitionAvailable) ...[
                       const _SectionLabel('MIC INPUT'),
                       _SpacedControl(
@@ -422,6 +496,221 @@ String _hapticStrengthLabel(double strength) {
   if (strength <= 1 / 3) return 'LIGHT';
   if (strength <= 2 / 3) return 'MED';
   return 'STRONG';
+}
+
+class _BluetoothMidiHeader extends StatelessWidget {
+  const _BluetoothMidiHeader({this.onRefresh});
+
+  final VoidCallback? onRefresh;
+
+  @override
+  Widget build(BuildContext context) {
+    return _SpacedControl(
+      child: SizedBox(
+        height: 28,
+        child: Row(
+          children: [
+            const Expanded(
+              child: Text(
+                'BLUETOOTH / SYSTEM MIDI OUTPUTS',
+                style: TextStyle(color: AppPalette.secondaryText, fontSize: 9),
+              ),
+            ),
+            _CompactIconButton(
+              buttonKey: const ValueKey('refresh-bluetooth-midi-outputs'),
+              tooltip: 'Refresh Bluetooth MIDI outputs',
+              onPressed: onRefresh,
+              icon: Icons.refresh_rounded,
+              dimension: 26,
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _MidiOutputRow extends StatelessWidget {
+  const _MidiOutputRow({
+    required this.label,
+    required this.selected,
+    required this.onChanged,
+  });
+
+  final String label;
+  final bool selected;
+  final ValueChanged<bool> onChanged;
+
+  @override
+  Widget build(BuildContext context) {
+    return _SpacedControl(
+      child: SizedBox(
+        height: 30,
+        child: Row(
+          children: [
+            SizedBox(
+              width: 28,
+              height: 28,
+              child: Checkbox(
+                value: selected,
+                onChanged: (value) => onChanged(value ?? false),
+                visualDensity: VisualDensity.compact,
+              ),
+            ),
+            Expanded(
+              child: Text(
+                label,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: const TextStyle(
+                  color: AppPalette.primaryText,
+                  fontSize: 9,
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _MidiStatusRow extends StatelessWidget {
+  const _MidiStatusRow(this.label);
+
+  final String label;
+
+  @override
+  Widget build(BuildContext context) {
+    return _SpacedControl(
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 5),
+        child: Text(
+          label,
+          style: const TextStyle(color: AppPalette.secondaryText, fontSize: 8),
+        ),
+      ),
+    );
+  }
+}
+
+class _TextInputRow extends StatefulWidget {
+  const _TextInputRow({
+    required this.label,
+    required this.value,
+    required this.onChanged,
+    this.hintText,
+    this.fieldKey,
+  });
+
+  final String label;
+  final String value;
+  final ValueChanged<String> onChanged;
+  final String? hintText;
+  final Key? fieldKey;
+
+  @override
+  State<_TextInputRow> createState() => _TextInputRowState();
+}
+
+class _TextInputRowState extends State<_TextInputRow> {
+  late final TextEditingController _controller;
+  late final FocusNode _focusNode;
+
+  @override
+  void initState() {
+    super.initState();
+    _controller = TextEditingController(text: widget.value);
+    _focusNode = FocusNode()..addListener(_handleFocusChange);
+  }
+
+  @override
+  void didUpdateWidget(_TextInputRow oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (widget.value != oldWidget.value && !_focusNode.hasFocus) {
+      _controller.text = widget.value;
+    }
+  }
+
+  void _handleFocusChange() {
+    if (!_focusNode.hasFocus) _commit();
+  }
+
+  void _commit() {
+    final value = _controller.text.trim();
+    if (value != widget.value) widget.onChanged(value);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return _SpacedControl(
+      child: ToolSurface(
+        color: AppPalette.raisedSurface,
+        child: SizedBox(
+          height: 32,
+          child: Row(
+            children: [
+              SizedBox(
+                width: 84,
+                child: Padding(
+                  padding: const EdgeInsets.only(left: 7),
+                  child: Text(
+                    widget.label,
+                    maxLines: 1,
+                    overflow: TextOverflow.fade,
+                    softWrap: false,
+                    style: const TextStyle(
+                      color: AppPalette.secondaryText,
+                      fontSize: 9,
+                    ),
+                  ),
+                ),
+              ),
+              Expanded(
+                child: TextField(
+                  key: widget.fieldKey,
+                  controller: _controller,
+                  focusNode: _focusNode,
+                  keyboardType: TextInputType.url,
+                  textInputAction: TextInputAction.done,
+                  autocorrect: false,
+                  enableSuggestions: false,
+                  style: const TextStyle(
+                    color: AppPalette.primaryText,
+                    fontSize: 10,
+                    fontWeight: FontWeight.w700,
+                  ),
+                  decoration: InputDecoration(
+                    isDense: true,
+                    hintText: widget.hintText,
+                    hintStyle: const TextStyle(
+                      color: AppPalette.secondaryText,
+                      fontSize: 9,
+                    ),
+                    contentPadding: const EdgeInsets.symmetric(
+                      horizontal: 6,
+                      vertical: 7,
+                    ),
+                    border: InputBorder.none,
+                  ),
+                  onSubmitted: (_) => _commit(),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  @override
+  void dispose() {
+    _focusNode
+      ..removeListener(_handleFocusChange)
+      ..dispose();
+    _controller.dispose();
+    super.dispose();
+  }
 }
 
 class _SliderRow extends StatelessWidget {
