@@ -8,7 +8,7 @@ internal class AppleMidiSession(
     val id: String,
     var peerId: String?,
     var peerName: String,
-    val address: InetAddress,
+    val advertisedAddress: InetAddress,
     var remoteControlPort: Int,
     var remoteDataPort: Int,
     val initiatorToken: Long,
@@ -21,6 +21,8 @@ internal class AppleMidiSession(
     var nextSequence: Int,
     localClock: RtpMidiClock,
     jitterBufferMillis: Long,
+    var transportAddress: InetAddress = advertisedAddress,
+    val advertisedControlPort: Int = remoteControlPort,
 ) {
     var controlAccepted: Boolean = false
     var dataAccepted: Boolean = false
@@ -36,7 +38,7 @@ internal class AppleMidiSession(
     val sustainDown = BooleanArray(16)
     private val jitterBuffer = RtpMidiJitterBuffer<ByteArray>(
         sessionClock = sessionClock,
-        initialDelayNanos = jitterBufferMillis.coerceIn(8, 40) * NANOS_PER_MILLI,
+        initialDelayNanos = jitterBufferMillis.coerceIn(24, 120) * NANOS_PER_MILLI,
     )
     private data class RecoveryEvent(
         val targetTimeNanos: Long,
@@ -50,13 +52,63 @@ internal class AppleMidiSession(
     private var nextRecoveryInsertionOrder = 0L
 
     val controlAddress: InetSocketAddress
-        get() = InetSocketAddress(address, remoteControlPort)
+        get() = InetSocketAddress(transportAddress, remoteControlPort)
 
     val dataAddress: InetSocketAddress
-        get() = InetSocketAddress(address, remoteDataPort)
+        get() = InetSocketAddress(transportAddress, remoteDataPort)
 
     fun connectsTo(service: ResolvedAppleMidiService): Boolean =
-        address == service.host && remoteControlPort == service.controlPort
+        advertisedAddress.sameNetworkHost(service.host) &&
+            advertisedControlPort == service.controlPort
+
+    fun matchesInvitationResponse(
+        remote: InetSocketAddress,
+        token: Long,
+        responseSsrc: Long,
+        dataChannel: Boolean,
+    ): Boolean {
+        val expectedPort = if (dataChannel) remoteDataPort else remoteControlPort
+        if (!initiatedLocally || initiatorToken != token || remote.port != expectedPort) {
+            return false
+        }
+        return if (dataChannel) {
+            controlAccepted && !dataAccepted && remoteSsrc == responseSsrc &&
+                transportAddress.sameNetworkHost(remote.address)
+        } else {
+            !controlAccepted
+        }
+    }
+
+    fun applyInvitationResponse(
+        packet: AppleMidiControlPacket.Invitation,
+        remote: InetSocketAddress,
+        dataChannel: Boolean,
+        nowNanos: Long,
+    ) {
+        require(packet.command == AppleMidiInvitationCommand.OK) {
+            "Only accepted invitations can advance a session"
+        }
+        check(
+            matchesInvitationResponse(
+                remote = remote,
+                token = packet.initiatorToken,
+                responseSsrc = packet.ssrc,
+                dataChannel = dataChannel,
+            ),
+        ) { "Invitation response no longer matches this session" }
+        transportAddress = remote.address
+        remoteSsrc = packet.ssrc
+        peerName = packet.name.ifBlank { peerName }
+        lastActivityNanos = nowNanos
+        if (dataChannel) {
+            remoteDataPort = remote.port
+            dataAccepted = true
+            state = AppleMidiSessionState.SYNCHRONIZING
+        } else {
+            remoteControlPort = remote.port
+            controlAccepted = true
+        }
+    }
 
     fun observeMidi(message: ByteArray) {
         if (message.isEmpty()) return

@@ -298,15 +298,15 @@ data class RtpMidiJitterBufferStatistics(
 )
 
 /**
- * Timestamp-ordered adaptive jitter buffer. It starts at 20 ms by default and converges within
- * an 8-40 ms window using the RFC 3550 inter-arrival jitter estimator.
+ * Timestamp-ordered adaptive jitter buffer. It starts at 60 ms by default and converges within
+ * a 24-120 ms window using the RFC 3550 inter-arrival jitter estimator.
  */
 class RtpMidiJitterBuffer<T>(
     private val sessionClock: RtpMidiSessionClock,
-    initialDelayNanos: Long = 20_000_000L,
-    private val minimumDelayNanos: Long = 8_000_000L,
-    private val maximumDelayNanos: Long = 40_000_000L,
-    private val maximumQueueSize: Int = 2_048,
+    initialDelayNanos: Long = 60_000_000L,
+    private val minimumDelayNanos: Long = 24_000_000L,
+    private val maximumDelayNanos: Long = 120_000_000L,
+    private val maximumQueueSize: Int = 6_144,
 ) {
     private data class Queued<T>(
         val scheduled: ScheduledRtpMidiValue<T>,

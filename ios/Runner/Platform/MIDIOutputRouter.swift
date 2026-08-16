@@ -1,6 +1,18 @@
 import CoreMIDI
 import Foundation
 
+enum AppleMIDIPortPolicy {
+  // CoreMIDI exposes the AppleMIDI control port; it owns the adjacent data port.
+  static let fixedControlPort = 5_004
+
+  static func allowsActiveTransport(
+    sessionEnabled: Bool,
+    networkPort: Int
+  ) -> Bool {
+    sessionEnabled && networkPort == fixedControlPort
+  }
+}
+
 /// Routes generated MIDI 1.0 events to local CoreMIDI destinations and AppleMIDI peers.
 final class MIDIOutputRouter {
   private static let channelCount = 16
@@ -163,7 +175,10 @@ final class MIDIOutputRouter {
 
   private func sendNetworkMessages(_ messages: [[UInt8]]) {
     let networkDestination = networkSession.destinationEndpoint
-    guard outputEnabled, networkEnabled, networkDestination != 0 else { return }
+    guard outputEnabled,
+          networkEnabled,
+          networkSession.allowsActiveTransport,
+          networkDestination != 0 else { return }
     send(messages, to: networkDestination)
   }
 
@@ -291,6 +306,13 @@ private final class AppleMIDINetworkSession: NSObject {
     session.destinationEndpoint()
   }
 
+  var allowsActiveTransport: Bool {
+    AppleMIDIPortPolicy.allowsActiveTransport(
+      sessionEnabled: session.isEnabled,
+      networkPort: session.networkPort
+    )
+  }
+
   override init() {
     super.init()
     browser.delegate = self
@@ -415,6 +437,10 @@ private final class AppleMIDINetworkSession: NSObject {
 
   private func reconcileConnections() {
     guard !closed, enabled, session.isEnabled else { return }
+    guard allowsActiveTransport else {
+      disconnectInitiatedConnections()
+      return
+    }
     let liveConnections = session.connections()
     let staleIds = initiatedConnections.compactMap { id, connection in
       liveConnections.contains(where: { $0 === connection }) ? nil : id
@@ -440,6 +466,14 @@ private final class AppleMIDINetworkSession: NSObject {
       _ = session.removeConnection(connection)
     }
     initiatedConnections.removeAll()
+  }
+
+  private func disconnectInitiatedConnections() {
+    let connections = Array(initiatedConnections.values)
+    initiatedConnections.removeAll()
+    for connection in connections {
+      _ = session.removeConnection(connection)
+    }
   }
 
   private func connectionExists(for service: NetService) -> Bool {
@@ -479,7 +513,12 @@ extension AppleMIDINetworkSession: NetServiceBrowserDelegate {
     moreComing: Bool
   ) {
     guard !closed, !isLocalService(service) else { return }
-    servicesById[destinationId(for: service)] = service
+    let id = destinationId(for: service)
+    let previous = servicesById.updateValue(service, forKey: id)
+    if let previous, previous !== service,
+       let connection = initiatedConnections.removeValue(forKey: id) {
+      _ = session.removeConnection(connection)
+    }
     reconcileConnections()
   }
 
@@ -489,6 +528,7 @@ extension AppleMIDINetworkSession: NetServiceBrowserDelegate {
     moreComing: Bool
   ) {
     let id = destinationId(for: service)
+    guard servicesById[id] === service else { return }
     servicesById.removeValue(forKey: id)
     if let connection = initiatedConnections.removeValue(forKey: id) {
       _ = session.removeConnection(connection)

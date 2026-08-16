@@ -133,10 +133,10 @@ class RtpMidiTimingTest {
         buffer.offer(remoteTimestamp = 110, arrivalNanos = 101_000_000, value = Unit)
 
         assertTrue(buffer.estimatedJitterNanos > 0)
-        assertTrue(buffer.playoutDelayNanos > 20_000_000)
-        assertTrue(buffer.playoutDelayNanos <= 40_000_000)
+        assertTrue(buffer.playoutDelayNanos > 60_000_000)
+        assertTrue(buffer.playoutDelayNanos <= 120_000_000)
         buffer.clear()
-        assertEquals(20_000_000L, buffer.playoutDelayNanos)
+        assertEquals(60_000_000L, buffer.playoutDelayNanos)
     }
 
     @Test
@@ -193,7 +193,7 @@ class RtpMidiTimingTest {
         val sessionClock = RtpMidiSessionClock(localClock)
         val buffer = RtpMidiJitterBuffer<String>(
             sessionClock = sessionClock,
-            initialDelayNanos = 20_000_000,
+            initialDelayNanos = 60_000_000,
             maximumQueueSize = 2,
         )
 
@@ -216,6 +216,24 @@ class RtpMidiTimingTest {
         )
         assertEquals(listOf("first", "second"), buffer.drainReady(Long.MAX_VALUE).map { it.value })
         assertEquals(2L, buffer.statistics.playedValues)
+    }
+
+    @Test
+    fun defaultJitterBufferCapacityIsSixThousandOneHundredFortyFourEvents() {
+        val localClock = RtpMidiClock(initialTimestampTicks = 0) { 0L }
+        val sessionClock = RtpMidiSessionClock(localClock)
+        val buffer = RtpMidiJitterBuffer<Int>(sessionClock)
+
+        repeat(6_145) { index ->
+            buffer.offer(
+                remoteTimestamp = index.toLong(),
+                arrivalNanos = 0L,
+                value = index,
+            )
+        }
+
+        assertEquals(6_144, buffer.size)
+        assertEquals(1L, buffer.statistics.droppedOverflowValues)
     }
 
     @Test
@@ -259,7 +277,7 @@ class RtpMidiTimingTest {
             )
         }
         assertTrue(buffer.playoutDelayNanos < risenDelay)
-        assertTrue(buffer.playoutDelayNanos >= 8_000_000L)
+        assertTrue(buffer.playoutDelayNanos >= 24_000_000L)
     }
 
     @Test
@@ -268,7 +286,7 @@ class RtpMidiTimingTest {
             id = "test-session",
             peerId = null,
             peerName = "loopback",
-            address = java.net.InetAddress.getLoopbackAddress(),
+            advertisedAddress = java.net.InetAddress.getLoopbackAddress(),
             remoteControlPort = 5004,
             remoteDataPort = 5005,
             initiatorToken = 1L,
@@ -280,7 +298,7 @@ class RtpMidiTimingTest {
             lastActivityNanos = 0L,
             nextSequence = 0,
             localClock = RtpMidiClock(initialTimestampTicks = 0) { 0L },
-            jitterBufferMillis = 20L,
+            jitterBufferMillis = 60L,
         )
 
         session.observeMidi(byteArrayOf(0x90.toByte(), 60, 100))

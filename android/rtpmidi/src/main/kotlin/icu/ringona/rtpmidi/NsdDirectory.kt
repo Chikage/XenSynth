@@ -18,6 +18,7 @@ internal data class ResolvedAppleMidiService(
     val type: String,
     val host: InetAddress,
     val controlPort: Int,
+    val model: String?,
 )
 
 /** Android DNS-SD adapter. All NsdManager calls are serialized on the main looper. */
@@ -25,13 +26,22 @@ internal class NsdDirectory(
     context: Context,
     private val requestedName: String,
     private val controlPort: Int,
+    private val deviceModel: String?,
     private val onResolved: (ResolvedAppleMidiService) -> Unit,
     private val onLost: (String) -> Unit,
 ) : AutoCloseable {
+    private data class PendingResolution(
+        val serviceInfo: NsdServiceInfo,
+        val identity: String,
+        val generation: Long,
+    )
+
     private val nsdManager = context.getSystemService(NsdManager::class.java)
     private val wifiManager = context.applicationContext.getSystemService(WifiManager::class.java)
     private val mainHandler = Handler(Looper.getMainLooper())
-    private val resolutionQueue = ArrayDeque<NsdServiceInfo>()
+    private val resolutionQueue = ArrayDeque<PendingResolution>()
+    private val discoveryGenerations = HashMap<String, Long>()
+    private var nextDiscoveryGeneration = 0L
     private var registeredName: String? = null
     private var registrationRequested = false
     private var registrationActive = false
@@ -81,15 +91,19 @@ internal class NsdDirectory(
 
         override fun onServiceFound(serviceInfo: NsdServiceInfo) {
             if (!serviceInfo.serviceType.isAppleMidiServiceType()) return
-            resolutionQueue.removeAll { queued ->
-                queued.serviceName == serviceInfo.serviceName && queued.serviceType == serviceInfo.serviceType
-            }
-            resolutionQueue.addLast(serviceInfo)
+            val identity = serviceIdentity(serviceInfo.serviceName, serviceInfo.serviceType)
+            val generation = ++nextDiscoveryGeneration
+            discoveryGenerations[identity] = generation
+            resolutionQueue.removeAll { it.identity == identity }
+            resolutionQueue.addLast(PendingResolution(serviceInfo, identity, generation))
             resolveNext()
         }
 
         override fun onServiceLost(serviceInfo: NsdServiceInfo) {
-            onLost(serviceIdentity(serviceInfo.serviceName, serviceInfo.serviceType))
+            val identity = serviceIdentity(serviceInfo.serviceName, serviceInfo.serviceType)
+            discoveryGenerations.remove(identity)
+            resolutionQueue.removeAll { it.identity == identity }
+            onLost(identity)
         }
 
         override fun onDiscoveryStopped(serviceType: String) {
@@ -119,6 +133,9 @@ internal class NsdDirectory(
                     serviceName = requestedName
                     serviceType = SERVICE_TYPE
                     port = controlPort
+                    AppleMidiBonjourMetadata.modelForPublishing(deviceModel)?.let { model ->
+                        setAttribute(AppleMidiBonjourMetadata.MODEL_KEY, model)
+                    }
                 }
                 registrationRequested = true
                 runCatching {
@@ -147,7 +164,8 @@ internal class NsdDirectory(
     @Suppress("DEPRECATION")
     private fun resolveNext() {
         if (closed || resolving) return
-        val service = resolutionQueue.pollFirst() ?: return
+        val pending = resolutionQueue.pollFirst() ?: return
+        val service = pending.serviceInfo
         resolving = true
         runCatching {
             nsdManager.resolveService(
@@ -164,19 +182,21 @@ internal class NsdDirectory(
                         val host = serviceInfo.host
                         val port = serviceInfo.port
                         val localName = registeredName
-                        if (host != null && port in 1 until 65_535 &&
+                        val resolutionIsCurrent =
+                            discoveryGenerations[pending.identity] == pending.generation
+                        if (resolutionIsCurrent && host != null && port in 1 until 65_535 &&
                             !isThisParticipant(serviceInfo.serviceName, host, port, localName)
                         ) {
                             onResolved(
                                 ResolvedAppleMidiService(
-                                    id = serviceIdentity(
-                                        serviceInfo.serviceName,
-                                        serviceInfo.serviceType,
-                                    ),
+                                    id = pending.identity,
                                     name = serviceInfo.serviceName,
                                     type = serviceInfo.serviceType,
                                     host = host,
                                     controlPort = port,
+                                    model = runCatching {
+                                        AppleMidiBonjourMetadata.parseModel(serviceInfo.attributes)
+                                    }.getOrNull(),
                                 ),
                             )
                         }
@@ -208,12 +228,15 @@ internal class NsdDirectory(
         port: Int,
         localName: String?,
     ): Boolean {
-        if (port != controlPort) return false
-        if (name == localName) return true
+        val logicalNameMatches = localName?.let {
+            AppleMidiServiceRegistry.logicalName(name) ==
+                AppleMidiServiceRegistry.logicalName(it)
+        } == true
+        if (port != controlPort && !logicalNameMatches) return false
         return runCatching {
             NetworkInterface.getNetworkInterfaces()?.toList().orEmpty()
                 .flatMap { network -> network.inetAddresses.toList() }
-                .any { localAddress -> localAddress == host }
+                .any { localAddress -> localAddress.sameNetworkHost(host) }
         }.getOrDefault(false)
     }
 
@@ -222,6 +245,7 @@ internal class NsdDirectory(
             if (closed) return@post
             closed = true
             resolutionQueue.clear()
+            discoveryGenerations.clear()
             if (discoveryActive) runCatching { nsdManager.stopServiceDiscovery(discoveryListener) }
             if (registrationActive) runCatching { nsdManager.unregisterService(registrationListener) }
             discoveryActive = false

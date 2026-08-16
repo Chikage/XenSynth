@@ -1,5 +1,298 @@
 import CoreMIDI
+import Darwin
 import Foundation
+
+final class NetworkMIDIEventBuffer {
+  private struct PendingEvent {
+    let event: [String: Any]
+    let targetUptimeNanoseconds: UInt64
+    let insertionOrder: UInt64
+  }
+
+  // The Android receiver uses the same 60 ms / 6144-event capacity after the
+  // requested threefold expansion. CoreMIDI already maps AppleMIDI timestamps
+  // onto the local host clock; this queue absorbs delivery jitter after that mapping.
+  static let defaultPlayoutDelayNanoseconds: UInt64 = 60_000_000
+  static let defaultMaximumTimestampSkewNanoseconds: UInt64 = 120_000_000
+  static let defaultMaximumPendingEvents = 6_144
+  private static let maximumEventsPerDrain = 256
+  private static let timerLeeway = DispatchTimeInterval.milliseconds(1)
+  private static let timebase: mach_timebase_info_data_t = {
+    var info = mach_timebase_info_data_t()
+    mach_timebase_info(&info)
+    return info
+  }()
+
+  var onEvents: (([[String: Any]]) -> Void)?
+
+  private let playoutDelayNanoseconds: UInt64
+  private let maximumTimestampSkewNanoseconds: UInt64
+  private let maximumPendingEvents: Int
+  private let queue = DispatchQueue(
+    label: "icu.ringona.xensynth.network-midi-buffer",
+    qos: .userInteractive
+  )
+  private let lifecycleLock = NSLock()
+  private var lifecycleEpoch: UInt64 = 0
+  private var lifecycleClosed = false
+  private var timer: DispatchSourceTimer!
+  private var pending: [PendingEvent] = []
+  private var pendingStartIndex = 0
+  private var nextInsertionOrder: UInt64 = 0
+  private var activeEpoch: UInt64 = 0
+  private var queueClosed = false
+
+  init(
+    playoutDelayNanoseconds: UInt64 = NetworkMIDIEventBuffer.defaultPlayoutDelayNanoseconds,
+    maximumTimestampSkewNanoseconds: UInt64 = NetworkMIDIEventBuffer.defaultMaximumTimestampSkewNanoseconds,
+    maximumPendingEvents: Int = NetworkMIDIEventBuffer.defaultMaximumPendingEvents
+  ) {
+    precondition(maximumPendingEvents > 0)
+    self.playoutDelayNanoseconds = playoutDelayNanoseconds
+    self.maximumTimestampSkewNanoseconds = maximumTimestampSkewNanoseconds
+    self.maximumPendingEvents = maximumPendingEvents
+    timer = DispatchSource.makeTimerSource(queue: queue)
+    timer.setEventHandler { [weak self] in
+      self?.drainDueEvents()
+    }
+    timer.schedule(deadline: .distantFuture)
+    timer.resume()
+  }
+
+  func captureIngressEpoch() -> UInt64? {
+    lifecycleLock.lock()
+    defer { lifecycleLock.unlock() }
+    return lifecycleClosed ? nil : lifecycleEpoch
+  }
+
+  func enqueue(_ events: [[String: Any]], ingressEpoch: UInt64? = nil) {
+    guard !events.isEmpty,
+          let expectedEpoch = ingressEpoch ?? captureIngressEpoch() else { return }
+    let arrivalUptimeNanoseconds = DispatchTime.now().uptimeNanoseconds
+    let currentHostTime = mach_absolute_time()
+    let scheduled = events.map { event in
+      (
+        event,
+        Self.targetUptimeNanoseconds(
+          for: (event["midiTimestamp"] as? NSNumber)?.uint64Value ?? 0,
+          arrivalUptimeNanoseconds: arrivalUptimeNanoseconds,
+          currentHostTime: currentHostTime,
+          playoutDelayNanoseconds: playoutDelayNanoseconds,
+          maximumTimestampSkewNanoseconds: maximumTimestampSkewNanoseconds
+        )
+      )
+    }
+    queue.async { [weak self] in
+      guard let self,
+            !self.queueClosed,
+            self.activeEpoch == expectedEpoch,
+            self.isCurrent(epoch: expectedEpoch) else { return }
+      var additions: [PendingEvent] = []
+      additions.reserveCapacity(scheduled.count)
+      for (event, target) in scheduled {
+        additions.append(PendingEvent(
+          event: event,
+          targetUptimeNanoseconds: target,
+          insertionOrder: self.nextInsertionOrder
+        ))
+        self.nextInsertionOrder &+= 1
+      }
+      additions.sort(by: Self.isOrderedBefore)
+      self.insertSorted(additions)
+      if self.pendingCount > self.maximumPendingEvents {
+        self.pending = Array(self.pending.suffix(self.maximumPendingEvents))
+        self.pendingStartIndex = 0
+        self.deliver(
+          [["type": "allNotesOff", "source": "network"]],
+          epoch: expectedEpoch
+        )
+      }
+      self.scheduleNextDrain()
+    }
+  }
+
+  func clear() {
+    guard let nextEpoch = invalidateLifecycle(closing: false) else { return }
+    queue.sync {
+      guard !queueClosed else { return }
+      activeEpoch = nextEpoch
+      pending.removeAll(keepingCapacity: true)
+      pendingStartIndex = 0
+      timer.schedule(deadline: .distantFuture)
+    }
+  }
+
+  func close() {
+    guard let nextEpoch = invalidateLifecycle(closing: true) else { return }
+    queue.sync {
+      guard !queueClosed else { return }
+      queueClosed = true
+      activeEpoch = nextEpoch
+      pending.removeAll()
+      pendingStartIndex = 0
+      timer.cancel()
+    }
+  }
+
+  private func drainDueEvents() {
+    guard !queueClosed, pendingCount > 0 else {
+      timer.schedule(deadline: .distantFuture)
+      return
+    }
+    let now = DispatchTime.now().uptimeNanoseconds
+    let deliveryLimit = min(
+      pending.count,
+      pendingStartIndex + Self.maximumEventsPerDrain
+    )
+    var dueEndIndex = pendingStartIndex
+    while dueEndIndex < deliveryLimit,
+          pending[dueEndIndex].targetUptimeNanoseconds <= now {
+      dueEndIndex += 1
+    }
+    guard dueEndIndex > pendingStartIndex else {
+      scheduleNextDrain()
+      return
+    }
+    let dueEvents = pending[pendingStartIndex..<dueEndIndex].map(\.event)
+    pendingStartIndex = dueEndIndex
+    let deliveryEpoch = activeEpoch
+    compactPendingIfNeeded()
+    scheduleNextDrain()
+    deliver(dueEvents, epoch: deliveryEpoch)
+  }
+
+  private func scheduleNextDrain() {
+    guard pendingStartIndex < pending.count else {
+      timer.schedule(deadline: .distantFuture)
+      return
+    }
+    let first = pending[pendingStartIndex]
+    timer.schedule(
+      deadline: DispatchTime(uptimeNanoseconds: first.targetUptimeNanoseconds),
+      leeway: Self.timerLeeway
+    )
+  }
+
+  private func deliver(_ events: [[String: Any]], epoch deliveryEpoch: UInt64) {
+    DispatchQueue.main.async { [weak self] in
+      guard let self, self.isCurrent(epoch: deliveryEpoch) else { return }
+      self.onEvents?(events)
+    }
+  }
+
+  private var pendingCount: Int {
+    pending.count - pendingStartIndex
+  }
+
+  private func insertSorted(_ additions: [PendingEvent]) {
+    guard !additions.isEmpty else { return }
+    guard pendingStartIndex < pending.count else {
+      pending = additions
+      pendingStartIndex = 0
+      return
+    }
+    if let last = pending.last,
+       let firstAddition = additions.first,
+       !Self.isOrderedBefore(firstAddition, last) {
+      pending.append(contentsOf: additions)
+      return
+    }
+
+    let existing = pending[pendingStartIndex...]
+    var merged: [PendingEvent] = []
+    merged.reserveCapacity(existing.count + additions.count)
+    var existingIndex = existing.startIndex
+    var additionIndex = additions.startIndex
+    while existingIndex < existing.endIndex, additionIndex < additions.endIndex {
+      if Self.isOrderedBefore(additions[additionIndex], existing[existingIndex]) {
+        merged.append(additions[additionIndex])
+        additionIndex += 1
+      } else {
+        merged.append(existing[existingIndex])
+        existing.formIndex(after: &existingIndex)
+      }
+    }
+    if existingIndex < existing.endIndex {
+      merged.append(contentsOf: existing[existingIndex...])
+    }
+    if additionIndex < additions.endIndex {
+      merged.append(contentsOf: additions[additionIndex...])
+    }
+    pending = merged
+    pendingStartIndex = 0
+  }
+
+  private func compactPendingIfNeeded() {
+    guard pendingStartIndex > 0 else { return }
+    if pendingStartIndex == pending.count {
+      pending.removeAll(keepingCapacity: true)
+      pendingStartIndex = 0
+    } else if pendingStartIndex >= 1_024,
+              pendingStartIndex >= pending.count / 2 {
+      pending = Array(pending[pendingStartIndex...])
+      pendingStartIndex = 0
+    }
+  }
+
+  private static func isOrderedBefore(_ lhs: PendingEvent, _ rhs: PendingEvent) -> Bool {
+    if lhs.targetUptimeNanoseconds == rhs.targetUptimeNanoseconds {
+      return lhs.insertionOrder < rhs.insertionOrder
+    }
+    return lhs.targetUptimeNanoseconds < rhs.targetUptimeNanoseconds
+  }
+
+  private func invalidateLifecycle(closing: Bool) -> UInt64? {
+    lifecycleLock.lock()
+    defer { lifecycleLock.unlock() }
+    guard !lifecycleClosed else { return nil }
+    lifecycleEpoch &+= 1
+    if closing { lifecycleClosed = true }
+    return lifecycleEpoch
+  }
+
+  private func isCurrent(epoch expected: UInt64) -> Bool {
+    lifecycleLock.lock()
+    defer { lifecycleLock.unlock() }
+    return !lifecycleClosed && lifecycleEpoch == expected
+  }
+
+  static func targetUptimeNanoseconds(
+    for midiTimestamp: MIDITimeStamp,
+    arrivalUptimeNanoseconds: UInt64,
+    currentHostTime: UInt64,
+    playoutDelayNanoseconds: UInt64,
+    maximumTimestampSkewNanoseconds: UInt64
+  ) -> UInt64 {
+    let bufferedArrival = addingWithoutOverflow(
+      arrivalUptimeNanoseconds,
+      playoutDelayNanoseconds
+    )
+    guard midiTimestamp != 0 else { return bufferedArrival }
+    if midiTimestamp >= currentHostTime {
+      let offset = min(
+        hostTicksToNanoseconds(midiTimestamp - currentHostTime),
+        maximumTimestampSkewNanoseconds
+      )
+      return addingWithoutOverflow(bufferedArrival, offset)
+    }
+    let offset = min(
+      hostTicksToNanoseconds(currentHostTime - midiTimestamp),
+      maximumTimestampSkewNanoseconds
+    )
+    return max(arrivalUptimeNanoseconds, bufferedArrival > offset ? bufferedArrival - offset : 0)
+  }
+
+  private static func hostTicksToNanoseconds(_ ticks: UInt64) -> UInt64 {
+    let value = Double(ticks) * Double(timebase.numer) / Double(timebase.denom)
+    if !value.isFinite || value >= Double(UInt64.max) { return UInt64.max }
+    return UInt64(value.rounded())
+  }
+
+  private static func addingWithoutOverflow(_ lhs: UInt64, _ rhs: UInt64) -> UInt64 {
+    let (value, overflow) = lhs.addingReportingOverflow(rhs)
+    return overflow ? UInt64.max : value
+  }
+}
 
 final class MIDIKeyboardController {
   var onEvent: (([String: Any]) -> Void)?
@@ -19,9 +312,21 @@ final class MIDIKeyboardController {
   private var isStarted = false
   private var networkSessionObserver: NSObjectProtocol?
   private var networkConnectionIds = Set<ObjectIdentifier>()
-  private(set) var inputEnabled = true
+  private let networkEventBuffer = NetworkMIDIEventBuffer()
+  private let inputEnabledLock = NSLock()
+  private var storedInputEnabled = true
+
+  var inputEnabled: Bool {
+    inputEnabledLock.lock()
+    defer { inputEnabledLock.unlock() }
+    return storedInputEnabled
+  }
 
   init() {
+    networkEventBuffer.onEvents = { [weak self] events in
+      guard let self, self.inputEnabled else { return }
+      events.forEach(self.emit)
+    }
     let session = MIDINetworkSession.default()
     networkConnectionIds = Set(session.connections().map(ObjectIdentifier.init))
     networkSessionObserver = NotificationCenter.default.addObserver(
@@ -34,7 +339,9 @@ final class MIDIKeyboardController {
   }
 
   func setInputEnabled(_ enabled: Bool) {
-    inputEnabled = enabled
+    inputEnabledLock.lock()
+    storedInputEnabled = enabled
+    inputEnabledLock.unlock()
     if !enabled { stop() }
   }
 
@@ -76,6 +383,7 @@ final class MIDIKeyboardController {
   }
 
   func stop() {
+    networkEventBuffer.clear()
     guard isStarted else { return }
     for source in sourceContexts.keys {
       MIDIPortDisconnectSource(inputPort, source)
@@ -116,16 +424,24 @@ final class MIDIKeyboardController {
     sourceContext: SourceContext?
   ) {
     guard inputEnabled else { return }
+    let isNetwork = sourceContext?.isNetwork == true
+    let ingressEpoch = isNetwork ? networkEventBuffer.captureIngressEpoch() : nil
+    if isNetwork, ingressEpoch == nil { return }
     var runningStatus = sourceContext?.runningStatus
     let parsed = Self.events(
       from: packetList,
       runningStatus: &runningStatus,
-      isNetwork: sourceContext?.isNetwork == true
+      isNetwork: isNetwork
     )
     sourceContext?.runningStatus = runningStatus
     guard !parsed.isEmpty else { return }
+    if isNetwork {
+      networkEventBuffer.enqueue(parsed, ingressEpoch: ingressEpoch)
+      return
+    }
     DispatchQueue.main.async { [weak self] in
-      for event in parsed { self?.emit(event) }
+      guard let self, self.inputEnabled else { return }
+      for event in parsed { self.emit(event) }
     }
   }
 
@@ -138,6 +454,7 @@ final class MIDIKeyboardController {
     let connectionWasRemoved = !networkConnectionIds.subtracting(next).isEmpty
     networkConnectionIds = next
     if inputEnabled && connectionWasRemoved {
+      networkEventBuffer.clear()
       emit(["type": "allNotesOff", "source": "network"])
     }
   }
@@ -314,6 +631,7 @@ final class MIDIKeyboardController {
       NotificationCenter.default.removeObserver(networkSessionObserver)
     }
     stop()
+    networkEventBuffer.close()
   }
 }
 

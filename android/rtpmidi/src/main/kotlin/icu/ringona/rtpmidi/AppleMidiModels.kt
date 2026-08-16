@@ -5,9 +5,11 @@ data class AppleMidiConfiguration @JvmOverloads constructor(
     val serviceName: String,
     val invitationTimeoutMillis: Long = 12_000,
     val clockSyncIntervalMillis: Long = 10_000,
-    /** Initial playout delay for a normal Wi-Fi LAN; the adaptive buffer may move within 8-40 ms. */
-    val jitterBufferMillis: Long = 20,
+    /** Initial playout delay for a normal Wi-Fi LAN; the adaptive buffer may move within 24-120 ms. */
+    val jitterBufferMillis: Long = 60,
     val maximumSessions: Int = 16,
+    /** Optional Bonjour TXT model. Android callers may leave this null to publish Build.MODEL. */
+    val deviceModel: String? = null,
 ) {
     init {
         require(serviceName.isNotBlank()) { "serviceName must not be blank" }
@@ -19,18 +21,22 @@ data class AppleMidiConfiguration @JvmOverloads constructor(
         require(clockSyncIntervalMillis in 1_000..59_000) {
             "clockSyncIntervalMillis must remain below the AppleMIDI timeout"
         }
-        require(jitterBufferMillis in 8..40) { "jitterBufferMillis must be between 8 and 40" }
+        require(jitterBufferMillis in 24..120) {
+            "jitterBufferMillis must be between 24 and 120"
+        }
         require(maximumSessions > 0) { "maximumSessions must be positive" }
     }
 }
 
-/** A Bonjour-advertised AppleMIDI participant. The id is independent of its current IP address. */
+/** A Bonjour-advertised AppleMIDI participant, deduplicated across conflict-renamed aliases. */
 data class AppleMidiPeer(
     val id: String,
     val name: String,
     val hostAddress: String,
     val controlPort: Int,
     val state: AppleMidiSessionState,
+    /** Remote Bonjour model, or the participant name when the TXT record is unavailable. */
+    val model: String,
 )
 
 enum class AppleMidiSessionState {

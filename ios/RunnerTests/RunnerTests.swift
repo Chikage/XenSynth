@@ -111,6 +111,166 @@ class RunnerTests: XCTestCase {
     wait(for: [completed], timeout: 2)
   }
 
+  func testAppleMIDIPortPolicyAllowsActiveTransportOnFixedPorts() {
+    XCTAssertTrue(AppleMIDIPortPolicy.allowsActiveTransport(
+      sessionEnabled: true,
+      networkPort: 5_004
+    ))
+  }
+
+  func testAppleMIDIPortPolicyRejectsDisabledOrFallbackSessions() {
+    XCTAssertFalse(AppleMIDIPortPolicy.allowsActiveTransport(
+      sessionEnabled: false,
+      networkPort: 5_004
+    ))
+    XCTAssertFalse(AppleMIDIPortPolicy.allowsActiveTransport(
+      sessionEnabled: true,
+      networkPort: 0
+    ))
+    XCTAssertFalse(AppleMIDIPortPolicy.allowsActiveTransport(
+      sessionEnabled: true,
+      networkPort: 54_618
+    ))
+  }
+
+  func testNetworkMidiEventBufferUsesThreefoldDefaults() {
+    XCTAssertEqual(NetworkMIDIEventBuffer.defaultPlayoutDelayNanoseconds, 60_000_000)
+    XCTAssertEqual(NetworkMIDIEventBuffer.defaultMaximumTimestampSkewNanoseconds, 120_000_000)
+    XCTAssertEqual(NetworkMIDIEventBuffer.defaultMaximumPendingEvents, 6_144)
+  }
+
+  func testNetworkMidiEventBufferPreservesBatchOrder() {
+    let buffer = NetworkMIDIEventBuffer(
+      playoutDelayNanoseconds: 1_000_000,
+      maximumTimestampSkewNanoseconds: 2_000_000,
+      maximumPendingEvents: 8
+    )
+    let delivered = expectation(description: "Buffered MIDI batch delivered")
+    var sequences: [Int] = []
+    buffer.onEvents = { events in
+      sequences.append(contentsOf: events.compactMap { $0["sequence"] as? Int })
+      delivered.fulfill()
+    }
+    defer { buffer.close() }
+
+    buffer.enqueue([
+      ["type": "noteOn", "sequence": 1, "midiTimestamp": 0],
+      ["type": "noteOn", "sequence": 2, "midiTimestamp": 0],
+      ["type": "noteOff", "sequence": 3, "midiTimestamp": 0],
+    ])
+
+    wait(for: [delivered], timeout: 1)
+    XCTAssertEqual(sequences, [1, 2, 3])
+  }
+
+  func testNetworkMidiEventBufferBoundsBacklogAndSignalsPanic() {
+    let buffer = NetworkMIDIEventBuffer(
+      playoutDelayNanoseconds: 2_000_000,
+      maximumTimestampSkewNanoseconds: 4_000_000,
+      maximumPendingEvents: 2
+    )
+    let delivered = expectation(description: "Overflow panic and retained MIDI delivered")
+    delivered.expectedFulfillmentCount = 2
+    var batches: [[[String: Any]]] = []
+    buffer.onEvents = { events in
+      batches.append(events)
+      delivered.fulfill()
+    }
+    defer { buffer.close() }
+
+    buffer.enqueue([
+      ["type": "noteOn", "sequence": 1, "midiTimestamp": 0],
+      ["type": "noteOn", "sequence": 2, "midiTimestamp": 0],
+      ["type": "noteOff", "sequence": 3, "midiTimestamp": 0],
+    ])
+
+    wait(for: [delivered], timeout: 1)
+    XCTAssertEqual(batches.first?.first?["type"] as? String, "allNotesOff")
+    XCTAssertEqual(
+      batches.last?.compactMap { $0["sequence"] as? Int },
+      [2, 3]
+    )
+  }
+
+  func testNetworkMidiEventBufferClearInvalidatesPendingDelivery() {
+    let buffer = NetworkMIDIEventBuffer(
+      playoutDelayNanoseconds: 20_000_000,
+      maximumTimestampSkewNanoseconds: 40_000_000,
+      maximumPendingEvents: 8
+    )
+    let delivered = expectation(description: "Cleared MIDI is not delivered")
+    delivered.isInverted = true
+    buffer.onEvents = { _ in delivered.fulfill() }
+    defer { buffer.close() }
+
+    buffer.enqueue([["type": "noteOn", "midiTimestamp": 0]])
+    buffer.clear()
+
+    wait(for: [delivered], timeout: 0.1)
+  }
+
+  func testNetworkMidiEventBufferRejectsIngressCapturedBeforeClear() throws {
+    let buffer = NetworkMIDIEventBuffer(
+      playoutDelayNanoseconds: 1_000_000,
+      maximumTimestampSkewNanoseconds: 2_000_000,
+      maximumPendingEvents: 8
+    )
+    let delivered = expectation(description: "Stale network ingress is rejected")
+    delivered.isInverted = true
+    buffer.onEvents = { _ in delivered.fulfill() }
+    defer { buffer.close() }
+
+    let staleEpoch = try XCTUnwrap(buffer.captureIngressEpoch())
+    buffer.clear()
+    buffer.enqueue(
+      [["type": "noteOn", "midiTimestamp": 0]],
+      ingressEpoch: staleEpoch
+    )
+
+    wait(for: [delivered], timeout: 0.1)
+  }
+
+  func testNetworkMidiEventBufferDoesNotInvalidatePanicOnRepeatedOverflow() throws {
+    let buffer = NetworkMIDIEventBuffer(
+      playoutDelayNanoseconds: 50_000_000,
+      maximumTimestampSkewNanoseconds: 100_000_000,
+      maximumPendingEvents: 1
+    )
+    let panics = expectation(description: "Each overflow can release sounding notes")
+    panics.expectedFulfillmentCount = 2
+    buffer.onEvents = { events in
+      if events.first?["type"] as? String == "allNotesOff" {
+        panics.fulfill()
+      }
+    }
+    defer { buffer.close() }
+
+    let epoch = try XCTUnwrap(buffer.captureIngressEpoch())
+    buffer.enqueue([
+      ["type": "noteOn", "sequence": 1, "midiTimestamp": 0],
+      ["type": "noteOn", "sequence": 2, "midiTimestamp": 0],
+    ], ingressEpoch: epoch)
+    buffer.enqueue([
+      ["type": "noteOn", "sequence": 3, "midiTimestamp": 0],
+      ["type": "noteOff", "sequence": 4, "midiTimestamp": 0],
+    ], ingressEpoch: epoch)
+
+    wait(for: [panics], timeout: 1)
+  }
+
+  func testNetworkMidiTargetAppliesConfiguredPlayoutDelay() {
+    XCTAssertEqual(
+      NetworkMIDIEventBuffer.targetUptimeNanoseconds(
+        for: 0,
+        arrivalUptimeNanoseconds: 100,
+        currentHostTime: 50,
+        playoutDelayNanoseconds: 60,
+        maximumTimestampSkewNanoseconds: 120
+      ),
+      160
+    )
+  }
+
   private func sineWave(
     frequency: Double,
     sampleRate: Double,

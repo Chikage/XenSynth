@@ -7,6 +7,7 @@ import java.security.SecureRandom
 internal data class UdpPortPair(
     val control: DatagramSocket,
     val data: DatagramSocket,
+    val isFixedPortCapable: Boolean,
 ) : AutoCloseable {
     val controlPort: Int get() = control.localPort
     val dataPort: Int get() = data.localPort
@@ -17,20 +18,28 @@ internal data class UdpPortPair(
     }
 
     companion object {
+        const val FIXED_CONTROL_PORT = 5_004
+        const val FIXED_DATA_PORT = 5_005
         private const val FIRST_DYNAMIC_PORT = 49_152
         private const val LAST_CONTROL_PORT = 65_534
 
-        /** Binds N and N+1 before returning, so the published SRV port always has its data mate. */
+        /** Prefers 5004/5005, then reserves a passive-receive fallback pair if they are occupied. */
         fun bind(random: SecureRandom = SecureRandom()): UdpPortPair {
+            bindPair(FIXED_CONTROL_PORT, isFixedPortCapable = true)?.let { return it }
             repeat(512) {
                 val controlPort = FIRST_DYNAMIC_PORT +
                     random.nextInt(LAST_CONTROL_PORT - FIRST_DYNAMIC_PORT + 1)
-                val control = bindOne(controlPort) ?: return@repeat
-                val data = bindOne(controlPort + 1)
-                if (data != null) return UdpPortPair(control, data)
-                control.close()
+                bindPair(controlPort, isFixedPortCapable = false)?.let { return it }
             }
             throw IllegalStateException("Could not reserve consecutive UDP ports for AppleMIDI")
+        }
+
+        private fun bindPair(controlPort: Int, isFixedPortCapable: Boolean): UdpPortPair? {
+            val control = bindOne(controlPort) ?: return null
+            val data = bindOne(controlPort + 1)
+            if (data != null) return UdpPortPair(control, data, isFixedPortCapable)
+            control.close()
+            return null
         }
 
         private fun bindOne(port: Int): DatagramSocket? = runCatching {
