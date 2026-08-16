@@ -56,6 +56,8 @@ class XenSynthController extends ChangeNotifier {
   bool playing = false;
   bool pitchRecognitionAvailable = false;
   List<NativeMidiOutput> bluetoothMidiOutputs = const <NativeMidiOutput>[];
+  List<NativeMidiOutput> networkMidiOutputs = const <NativeMidiOutput>[];
+  bool networkMidiScanning = false;
   bool pitchRecognizing = false;
   bool pitchRecognitionBusy = false;
   String pitchRecognitionPhase = 'unavailable';
@@ -162,6 +164,7 @@ class XenSynthController extends ChangeNotifier {
           onError: (Object error) => _setStatus('MIDI UNAVAILABLE'),
         );
         await refreshBluetoothMidiOutputs(notify: false);
+        await refreshNetworkMidiOutputs(notify: false);
         final pitchRecognitionState = await _native.getPitchRecognitionState();
         if (pitchRecognitionState.isNotEmpty) {
           _applyPitchRecognitionState(pitchRecognitionState, notify: false);
@@ -777,13 +780,9 @@ class XenSynthController extends ChangeNotifier {
     if (next.midiOutputEnabled != previous.midiOutputEnabled) {
       await _native.setMidiOutputEnabled(next.midiOutputEnabled);
     }
-    if (next.networkMidiEnabled != previous.networkMidiEnabled ||
-        next.networkMidiHost != previous.networkMidiHost ||
-        next.networkMidiPort != previous.networkMidiPort) {
+    if (next.networkMidiEnabled != previous.networkMidiEnabled) {
       await _native.configureNetworkMidiOutput(
         enabled: next.networkMidiEnabled,
-        host: next.networkMidiHost,
-        port: next.networkMidiPort,
       );
     }
     if (!listEquals(
@@ -791,6 +790,12 @@ class XenSynthController extends ChangeNotifier {
       previous.bluetoothMidiOutputIds,
     )) {
       await _native.setBluetoothMidiOutputIds(next.bluetoothMidiOutputIds);
+    }
+    if (!listEquals(
+      next.networkMidiDestinationIds,
+      previous.networkMidiDestinationIds,
+    )) {
+      await _native.setNetworkMidiOutputIds(next.networkMidiDestinationIds);
     }
     if (next.microphoneSensitivity != previous.microphoneSensitivity) {
       await _native.setPitchRecognitionSensitivity(next.microphoneSensitivity);
@@ -829,16 +834,28 @@ class XenSynthController extends ChangeNotifier {
     }
   }
 
+  Future<void> refreshNetworkMidiOutputs({bool notify = true}) async {
+    if (networkMidiScanning) return;
+    networkMidiScanning = true;
+    if (notify) notifyListeners();
+    try {
+      networkMidiOutputs = await _native.scanNetworkMidiOutputs();
+    } catch (error) {
+      debugPrint('Network MIDI output scan failed: $error');
+      if (notify) _setStatus('NETWORK MIDI SCAN FAILED');
+    } finally {
+      networkMidiScanning = false;
+      if (notify) notifyListeners();
+    }
+  }
+
   Future<void> _configureMidi(XenSynthSettings value) async {
     await Future.wait([
       _native.setMidiInputEnabled(value.midiInputEnabled),
       _native.setMidiOutputEnabled(value.midiOutputEnabled),
-      _native.configureNetworkMidiOutput(
-        enabled: value.networkMidiEnabled,
-        host: value.networkMidiHost,
-        port: value.networkMidiPort,
-      ),
+      _native.configureNetworkMidiOutput(enabled: value.networkMidiEnabled),
       _native.setBluetoothMidiOutputIds(value.bluetoothMidiOutputIds),
+      _native.setNetworkMidiOutputIds(value.networkMidiDestinationIds),
     ]);
   }
 
@@ -847,16 +864,27 @@ class XenSynthController extends ChangeNotifier {
     _setStatus('DEFAULTS RESTORED');
   }
 
-  void noteDown(int pointer, double pitch, int velocity) {
+  void noteDown(
+    int pointer,
+    double pitch,
+    int velocity, {
+    bool networkOutput = true,
+  }) {
     final playbackPitch = _playbackPitch(pitch, settings);
-    _noteDownAtPlaybackPitch(pointer, playbackPitch, velocity);
+    _noteDownAtPlaybackPitch(
+      pointer,
+      playbackPitch,
+      velocity,
+      networkOutput: networkOutput,
+    );
   }
 
   void _noteDownAtPlaybackPitch(
     int pointer,
     double playbackPitch,
-    int velocity,
-  ) {
+    int velocity, {
+    bool networkOutput = true,
+  }) {
     _scoreVisualizationSuppressed = true;
     final targetPitch = playbackPitch + settings.appliedPitchOffsetCents / 100;
     final nextActive = Map<int, double>.from(activePitches)
@@ -881,6 +909,7 @@ class XenSynthController extends ChangeNotifier {
         velocity: velocity.clamp(1, 127),
         channel: 0,
         program: settings.program,
+        networkOutput: networkOutput,
       );
       if (token == null) return;
       if (_noteEpochs[pointer] == epoch && activePitches.containsKey(pointer)) {
@@ -941,7 +970,7 @@ class XenSynthController extends ChangeNotifier {
     if (token != null) unawaited(_native.noteOff(token));
   }
 
-  Future<void> releaseAllNotes() async {
+  Future<void> releaseAllNotes({bool networkOutput = true}) async {
     _noteEpochs.updateAll((key, value) => value + 1);
     _noteTokens.clear();
     for (final entry in activePitches.entries) {
@@ -957,7 +986,7 @@ class XenSynthController extends ChangeNotifier {
     _sustainedMidiPointers.clear();
     _deferredMidiOffs.clear();
     notifyListeners();
-    await _native.allNotesOff();
+    await _native.allNotesOff(networkOutput: networkOutput);
   }
 
   Future<void> _loadBundledDemo() async {
@@ -1009,6 +1038,7 @@ class XenSynthController extends ChangeNotifier {
     final channel = event.intValue('channel').clamp(0, 15);
     final midiPitch = event.intValue('pitch').clamp(0, 127);
     final fromMicrophone = event.payload['source'] == 'microphone';
+    final fromNetwork = event.payload['source'] == 'network';
     final pointer = fromMicrophone
         ? _microphonePointerBase + midiPitch
         : _midiPointerBase + channel * 128 + midiPitch;
@@ -1024,7 +1054,7 @@ class XenSynthController extends ChangeNotifier {
         if (fromMicrophone) {
           _recordMicrophoneNoteDown(pointer, mapped, velocity, microphoneTime);
         }
-        noteDown(pointer, mapped, velocity);
+        noteDown(pointer, mapped, velocity, networkOutput: !fromNetwork);
       case 'noteOff':
         if (!fromMicrophone && _sustainByChannel[channel] == true) {
           _deferredMidiOffs.add(pointer);
@@ -1054,7 +1084,7 @@ class XenSynthController extends ChangeNotifier {
           unawaited(updateSettings(settings.copyWith(program: program)));
         }
       case 'allNotesOff':
-        unawaited(releaseAllNotes());
+        unawaited(releaseAllNotes(networkOutput: !fromNetwork));
       case 'document':
         final bytes = event.payload['bytes'];
         if (bytes is Uint8List) {

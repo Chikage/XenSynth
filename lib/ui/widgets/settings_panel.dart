@@ -12,7 +12,10 @@ class SettingsPanel extends StatelessWidget {
     required this.onReset,
     this.pitchRecognitionAvailable = false,
     this.bluetoothMidiOutputs = const <NativeMidiOutput>[],
+    this.networkMidiOutputs = const <NativeMidiOutput>[],
+    this.networkMidiScanning = false,
     this.onRefreshBluetoothMidiOutputs,
+    this.onRefreshNetworkMidiOutputs,
     super.key,
   });
 
@@ -21,7 +24,10 @@ class SettingsPanel extends StatelessWidget {
   final VoidCallback onReset;
   final bool pitchRecognitionAvailable;
   final List<NativeMidiOutput> bluetoothMidiOutputs;
+  final List<NativeMidiOutput> networkMidiOutputs;
+  final bool networkMidiScanning;
   final VoidCallback? onRefreshBluetoothMidiOutputs;
+  final VoidCallback? onRefreshNetworkMidiOutputs;
 
   static const double width = 300;
 
@@ -158,33 +164,41 @@ class SettingsPanel extends StatelessWidget {
                       ),
                     ),
                     _SwitchRow(
-                      label: 'Network MIDI (UDP)',
+                      label: 'RTP-MIDI / AppleMIDI',
                       value: settings.networkMidiEnabled,
                       onChanged: (value) => onChanged(
                         settings.copyWith(networkMidiEnabled: value),
                       ),
                     ),
-                    if (settings.networkMidiEnabled) ...[
-                      _TextInputRow(
-                        label: 'Network host',
-                        value: settings.networkMidiHost,
-                        hintText: '192.168.1.20',
-                        fieldKey: const ValueKey('network-midi-host-input'),
-                        onChanged: (value) => onChanged(
-                          settings.copyWith(networkMidiHost: value),
+                    _NetworkMidiHeader(
+                      scanning: networkMidiScanning,
+                      onRefresh: onRefreshNetworkMidiOutputs,
+                    ),
+                    if (networkMidiOutputs.isEmpty)
+                      const _MidiStatusRow('NO NETWORK MIDI RECEIVER')
+                    else
+                      ...networkMidiOutputs.map(
+                        (output) => _MidiOutputRow(
+                          label: output.name,
+                          selected: settings.networkMidiDestinationIds.contains(
+                            output.id,
+                          ),
+                          onChanged: (selected) {
+                            final ids = settings.networkMidiDestinationIds
+                                .toSet();
+                            if (selected) {
+                              ids.add(output.id);
+                            } else {
+                              ids.remove(output.id);
+                            }
+                            onChanged(
+                              settings.copyWith(
+                                networkMidiDestinationIds: ids.toList()..sort(),
+                              ),
+                            );
+                          },
                         ),
                       ),
-                      _IntegerInputRow(
-                        label: 'Network port',
-                        value: settings.networkMidiPort,
-                        min: 1,
-                        max: 65535,
-                        fieldKey: const ValueKey('network-midi-port-input'),
-                        onChanged: (value) => onChanged(
-                          settings.copyWith(networkMidiPort: value),
-                        ),
-                      ),
-                    ],
                     _BluetoothMidiHeader(
                       onRefresh: onRefreshBluetoothMidiOutputs,
                     ),
@@ -474,6 +488,45 @@ class _BluetoothMidiHeader extends StatelessWidget {
               icon: Icons.refresh_rounded,
               dimension: 26,
             ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _NetworkMidiHeader extends StatelessWidget {
+  const _NetworkMidiHeader({required this.scanning, this.onRefresh});
+
+  final bool scanning;
+  final VoidCallback? onRefresh;
+
+  @override
+  Widget build(BuildContext context) {
+    return _SpacedControl(
+      child: SizedBox(
+        height: 28,
+        child: Row(
+          children: [
+            const Expanded(
+              child: Text(
+                'NETWORK MIDI DESTINATIONS',
+                style: TextStyle(color: AppPalette.secondaryText, fontSize: 9),
+              ),
+            ),
+            if (scanning)
+              const SizedBox.square(
+                dimension: 15,
+                child: CircularProgressIndicator(strokeWidth: 1.5),
+              )
+            else
+              _CompactIconButton(
+                buttonKey: const ValueKey('scan-network-midi-outputs'),
+                tooltip: 'Scan network MIDI receivers',
+                onPressed: onRefresh,
+                icon: Icons.wifi_find_rounded,
+                dimension: 26,
+              ),
           ],
         ),
       ),

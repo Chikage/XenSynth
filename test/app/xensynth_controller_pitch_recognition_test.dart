@@ -170,6 +170,56 @@ void main() {
     await pumpEventQueue();
   });
 
+  test('does not echo received network MIDI back to network outputs', () async {
+    final controller = XenSynthController();
+    await controller.initialize();
+    calls.clear();
+
+    Future<void> emit(Map<String, Object?> payload) async {
+      await messenger.handlePlatformMessage(
+        midiChannelName,
+        codec.encodeSuccessEnvelope(payload),
+        (_) {},
+      );
+      await pumpEventQueue();
+    }
+
+    await emit(<String, Object?>{
+      'type': 'noteOn',
+      'source': 'network',
+      'channel': 0,
+      'pitch': 60,
+      'velocity': 100,
+    });
+    final noteOn = calls.lastWhere((call) => call.method == 'noteOn');
+    expect(
+      Map<Object?, Object?>.from(noteOn.arguments! as Map)['networkOutput'],
+      isFalse,
+    );
+
+    await emit(<String, Object?>{
+      'type': 'noteOff',
+      'source': 'network',
+      'channel': 0,
+      'pitch': 60,
+    });
+    await emit(<String, Object?>{
+      'type': 'allNotesOff',
+      'source': 'network',
+      'channel': 0,
+    });
+    final allNotesOff = calls.lastWhere((call) => call.method == 'allNotesOff');
+    expect(
+      Map<Object?, Object?>.from(
+        allNotesOff.arguments! as Map,
+      )['networkOutput'],
+      isFalse,
+    );
+
+    controller.dispose();
+    await pumpEventQueue();
+  });
+
   test('records microphone note timing and replays captured audio', () async {
     stopDuration = 0.8;
     final controller = XenSynthController()..pitchRecognitionAvailable = true;

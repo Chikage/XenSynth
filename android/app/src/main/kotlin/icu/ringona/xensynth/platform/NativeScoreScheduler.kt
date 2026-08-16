@@ -150,10 +150,10 @@ internal class NativeScoreScheduler(
 
     fun duration(): Double = durationSeconds
 
-    fun allNotesOff() {
-        releaseScheduledNotes(immediate = true)
+    fun allNotesOff(sendToNetwork: Boolean = true) {
+        releaseScheduledNotes(immediate = true, sendToNetwork = sendToNetwork)
         nativeAudio.allSoundOff()
-        midiOutput.allNotesOff()
+        midiOutput.allNotesOff(sendToNetwork)
     }
 
     fun dispose() {
@@ -260,7 +260,10 @@ internal class NativeScoreScheduler(
         }
     }
 
-    private fun releaseScheduledNotes(immediate: Boolean) {
+    private fun releaseScheduledNotes(
+        immediate: Boolean,
+        sendToNetwork: Boolean = true,
+    ) {
         val noteIds = activeNotes.values.map { it.noteId }
         activeNotes.clear()
         noteIds.forEach { noteId ->
@@ -272,7 +275,7 @@ internal class NativeScoreScheduler(
         }
         val midiTokens = activeMidiNotes.values.map { it.midiToken }
         activeMidiNotes.clear()
-        midiTokens.forEach(midiOutput::noteOff)
+        midiTokens.forEach { token -> midiOutput.noteOff(token, sendToNetwork) }
     }
 
     private fun resetCursor(audioPositionSeconds: Double) {

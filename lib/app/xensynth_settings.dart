@@ -25,9 +25,8 @@ class XenSynthSettings {
     this.externalMidiControlsProgram = false,
     this.midiInputEnabled = true,
     this.midiOutputEnabled = true,
-    this.networkMidiEnabled = false,
-    this.networkMidiHost = '',
-    this.networkMidiPort = defaultNetworkMidiPort,
+    this.networkMidiEnabled = true,
+    this.networkMidiDestinationIds = const <String>[],
     this.bluetoothMidiOutputIds = const <String>[],
     this.pitchRecognitionMode = PitchRecognitionMode.hybrid,
     this.microphoneSensitivity = 1,
@@ -59,7 +58,6 @@ class XenSynthSettings {
   static const double microphoneSensitivityMin = 0.5;
   static const double microphoneSensitivityMax = 2.0;
   static const double defaultHapticFeedbackStrength = 2 / 3;
-  static const int defaultNetworkMidiPort = 5004;
 
   final KeyboardLayoutMode layoutMode;
   final double playbackSpeed;
@@ -73,8 +71,7 @@ class XenSynthSettings {
   final bool midiInputEnabled;
   final bool midiOutputEnabled;
   final bool networkMidiEnabled;
-  final String networkMidiHost;
-  final int networkMidiPort;
+  final List<String> networkMidiDestinationIds;
   final List<String> bluetoothMidiOutputIds;
   final PitchRecognitionMode pitchRecognitionMode;
   final double microphoneSensitivity;
@@ -192,12 +189,7 @@ class XenSynthSettings {
         map['networkMidiEnabled'],
         defaults.networkMidiEnabled,
       ),
-      networkMidiHost:
-          map['networkMidiHost']?.toString().trim() ?? defaults.networkMidiHost,
-      networkMidiPort: _int(
-        map['networkMidiPort'],
-        defaults.networkMidiPort,
-      ).clamp(1, 65535),
+      networkMidiDestinationIds: _stringList(map['networkMidiDestinationIds']),
       bluetoothMidiOutputIds: _stringList(map['bluetoothMidiOutputIds']),
       pitchRecognitionMode: pitchRecognitionMode,
       microphoneSensitivity: _double(
@@ -275,8 +267,7 @@ class XenSynthSettings {
     'midiInputEnabled': midiInputEnabled,
     'midiOutputEnabled': midiOutputEnabled,
     'networkMidiEnabled': networkMidiEnabled,
-    'networkMidiHost': networkMidiHost.trim(),
-    'networkMidiPort': networkMidiPort.clamp(1, 65535),
+    'networkMidiDestinationIds': networkMidiDestinationIds,
     'bluetoothMidiOutputIds': bluetoothMidiOutputIds,
     'pitchRecognitionMode': pitchRecognitionMode.name,
     'microphoneSensitivity': microphoneSensitivity.clamp(
@@ -321,8 +312,7 @@ class XenSynthSettings {
     bool? midiInputEnabled,
     bool? midiOutputEnabled,
     bool? networkMidiEnabled,
-    String? networkMidiHost,
-    int? networkMidiPort,
+    List<String>? networkMidiDestinationIds,
     List<String>? bluetoothMidiOutputIds,
     PitchRecognitionMode? pitchRecognitionMode,
     double? microphoneSensitivity,
@@ -359,11 +349,8 @@ class XenSynthSettings {
       midiInputEnabled: midiInputEnabled ?? this.midiInputEnabled,
       midiOutputEnabled: midiOutputEnabled ?? this.midiOutputEnabled,
       networkMidiEnabled: networkMidiEnabled ?? this.networkMidiEnabled,
-      networkMidiHost: networkMidiHost ?? this.networkMidiHost,
-      networkMidiPort: (networkMidiPort ?? this.networkMidiPort).clamp(
-        1,
-        65535,
-      ),
+      networkMidiDestinationIds:
+          networkMidiDestinationIds ?? this.networkMidiDestinationIds,
       bluetoothMidiOutputIds:
           bluetoothMidiOutputIds ?? this.bluetoothMidiOutputIds,
       pitchRecognitionMode: pitchRecognitionMode ?? this.pitchRecognitionMode,

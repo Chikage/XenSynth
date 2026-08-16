@@ -67,6 +67,8 @@ class NativeMidiOutput {
   final String id;
   final String name;
 
+  bool get isNetwork => id.startsWith('applemidi:');
+
   static NativeMidiOutput? fromMessage(Object? message) {
     if (message is! Map) return null;
     final map = Map<Object?, Object?>.from(message);
@@ -188,6 +190,7 @@ class XenSynthNativeBridge {
     int program = 0,
     int bankMsb = 0,
     int bankLsb = 0,
+    bool networkOutput = true,
   }) async {
     final result = await _invoke('noteOn', <String, Object?>{
       'id': ?id,
@@ -197,6 +200,7 @@ class XenSynthNativeBridge {
       'program': program,
       'bankMsb': bankMsb,
       'bankLsb': bankLsb,
+      'networkOutput': networkOutput,
     });
     return result is num ? result.toInt() : int.tryParse('$result');
   }
@@ -205,7 +209,11 @@ class XenSynthNativeBridge {
     return _invokeVoid('noteOff', <String, Object?>{'token': token});
   }
 
-  Future<void> allNotesOff() => _invokeVoid('allNotesOff');
+  Future<void> allNotesOff({bool networkOutput = true}) {
+    return _invokeVoid('allNotesOff', <String, Object?>{
+      'networkOutput': networkOutput,
+    });
+  }
 
   Future<void> setMidiInputEnabled(bool enabled) {
     return _invokeVoid('setMidiInputEnabled', <String, Object?>{
@@ -219,15 +227,24 @@ class XenSynthNativeBridge {
     });
   }
 
-  Future<void> configureNetworkMidiOutput({
-    required bool enabled,
-    required String host,
-    required int port,
-  }) {
+  Future<void> configureNetworkMidiOutput({required bool enabled}) {
     return _invokeVoid('configureNetworkMidiOutput', <String, Object?>{
       'enabled': enabled,
-      'host': host,
-      'port': port,
+    });
+  }
+
+  Future<List<NativeMidiOutput>> scanNetworkMidiOutputs() async {
+    final result = await _invoke('scanNetworkMidiOutputs');
+    if (result is! List) return const <NativeMidiOutput>[];
+    return result
+        .map(NativeMidiOutput.fromMessage)
+        .whereType<NativeMidiOutput>()
+        .toList(growable: false);
+  }
+
+  Future<void> setNetworkMidiOutputIds(List<String> ids) {
+    return _invokeVoid('setNetworkMidiOutputIds', <String, Object?>{
+      'ids': ids,
     });
   }
 

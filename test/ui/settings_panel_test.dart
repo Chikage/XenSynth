@@ -151,28 +151,18 @@ void main() {
       );
       expect(find.text('MIDI output'), findsOneWidget);
       await tester.scrollUntilVisible(
-        find.text('Network MIDI (UDP)'),
+        find.text('RTP-MIDI / AppleMIDI'),
         100,
         scrollable: scrollable,
       );
-      expect(find.text('Network MIDI (UDP)'), findsOneWidget);
-      await tester.scrollUntilVisible(
-        find.byKey(const ValueKey('network-midi-host-input')),
-        100,
-        scrollable: scrollable,
-      );
+      expect(find.text('RTP-MIDI / AppleMIDI'), findsOneWidget);
       expect(
         find.byKey(const ValueKey('network-midi-host-input')),
-        findsOneWidget,
-      );
-      await tester.scrollUntilVisible(
-        find.byKey(const ValueKey('network-midi-port-input')),
-        100,
-        scrollable: scrollable,
+        findsNothing,
       );
       expect(
         find.byKey(const ValueKey('network-midi-port-input')),
-        findsOneWidget,
+        findsNothing,
       );
       await tester.scrollUntilVisible(
         find.text('Controller'),
@@ -186,6 +176,64 @@ void main() {
       expect(settings.bluetoothMidiOutputIds, ['bluetooth:9:0']);
     },
   );
+
+  testWidgets('network scan results are selectable destinations', (
+    tester,
+  ) async {
+    await tester.binding.setSurfaceSize(const Size(874, 402));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+
+    var settings = const XenSynthSettings();
+    var scans = 0;
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: AppPalette.theme(),
+        home: Scaffold(
+          body: Align(
+            alignment: Alignment.topRight,
+            child: SizedBox(
+              height: 330,
+              child: StatefulBuilder(
+                builder: (context, setState) => SettingsPanel(
+                  settings: settings,
+                  networkMidiOutputs: const [
+                    NativeMidiOutput(
+                      id: 'applemidi:WGVuU3ludGg',
+                      name: 'XenSynth iPhone',
+                    ),
+                  ],
+                  onRefreshNetworkMidiOutputs: () => scans++,
+                  onChanged: (value) => setState(() => settings = value),
+                  onReset: () {},
+                ),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+
+    final scrollable = find.byWidgetPredicate(
+      (widget) =>
+          widget is Scrollable && widget.axisDirection == AxisDirection.down,
+    );
+    await tester.scrollUntilVisible(
+      find.byKey(const ValueKey('scan-network-midi-outputs')),
+      100,
+      scrollable: scrollable,
+    );
+    await tester.scrollUntilVisible(
+      find.text('XenSynth iPhone'),
+      100,
+      scrollable: scrollable,
+    );
+    expect(find.text('XenSynth iPhone'), findsOneWidget);
+    await tester.tap(find.byKey(const ValueKey('scan-network-midi-outputs')));
+    expect(scans, 1);
+    await tester.tap(find.byType(Checkbox).first);
+    await tester.pump();
+    expect(settings.networkMidiDestinationIds, ['applemidi:WGVuU3ludGg']);
+  });
 
   testWidgets('settings controls keep clear vertical separation', (
     tester,

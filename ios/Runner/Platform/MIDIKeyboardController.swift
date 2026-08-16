@@ -4,11 +4,34 @@ import Foundation
 final class MIDIKeyboardController {
   var onEvent: (([String: Any]) -> Void)?
 
+  private final class SourceContext {
+    let isNetwork: Bool
+    var runningStatus: UInt8?
+
+    init(isNetwork: Bool) {
+      self.isNetwork = isNetwork
+    }
+  }
+
   private var client = MIDIClientRef()
   private var inputPort = MIDIPortRef()
-  private var connectedSources = Set<MIDIEndpointRef>()
+  private var sourceContexts: [MIDIEndpointRef: SourceContext] = [:]
   private var isStarted = false
+  private var networkSessionObserver: NSObjectProtocol?
+  private var networkConnectionIds = Set<ObjectIdentifier>()
   private(set) var inputEnabled = true
+
+  init() {
+    let session = MIDINetworkSession.default()
+    networkConnectionIds = Set(session.connections().map(ObjectIdentifier.init))
+    networkSessionObserver = NotificationCenter.default.addObserver(
+      forName: NSNotification.Name(rawValue: MIDINetworkNotificationSessionDidChange),
+      object: session,
+      queue: .main
+    ) { [weak self] _ in
+      self?.networkSessionDidChange()
+    }
+  }
 
   func setInputEnabled(_ enabled: Bool) {
     inputEnabled = enabled
@@ -54,10 +77,10 @@ final class MIDIKeyboardController {
 
   func stop() {
     guard isStarted else { return }
-    for source in connectedSources {
+    for source in sourceContexts.keys {
       MIDIPortDisconnectSource(inputPort, source)
     }
-    connectedSources.removeAll()
+    sourceContexts.removeAll()
     MIDIPortDispose(inputPort)
     MIDIClientDispose(client)
     inputPort = MIDIPortRef()
@@ -72,17 +95,34 @@ final class MIDIKeyboardController {
       let source = MIDIGetSource(index)
       return source == 0 ? nil : source
     })
-    connectedSources.formIntersection(sources)
-    for source in sources where !connectedSources.contains(source) {
-      if MIDIPortConnectSource(inputPort, source, nil) == noErr {
-        connectedSources.insert(source)
+    for source in Array(sourceContexts.keys) where !sources.contains(source) {
+      MIDIPortDisconnectSource(inputPort, source)
+      sourceContexts.removeValue(forKey: source)
+    }
+    let networkSource = MIDINetworkSession.default().sourceEndpoint()
+    for source in sources where sourceContexts[source] == nil {
+      let context = SourceContext(
+        isNetwork: networkSource != 0 && source == networkSource
+      )
+      let sourceRefCon = Unmanaged.passUnretained(context).toOpaque()
+      if MIDIPortConnectSource(inputPort, source, sourceRefCon) == noErr {
+        sourceContexts[source] = context
       }
     }
   }
 
-  private func handle(packetList: UnsafePointer<MIDIPacketList>) {
+  private func handle(
+    packetList: UnsafePointer<MIDIPacketList>,
+    sourceContext: SourceContext?
+  ) {
     guard inputEnabled else { return }
-    let parsed = Self.events(from: packetList)
+    var runningStatus = sourceContext?.runningStatus
+    let parsed = Self.events(
+      from: packetList,
+      runningStatus: &runningStatus,
+      isNetwork: sourceContext?.isNetwork == true
+    )
+    sourceContext?.runningStatus = runningStatus
     guard !parsed.isEmpty else { return }
     DispatchQueue.main.async { [weak self] in
       for event in parsed { self?.emit(event) }
@@ -91,6 +131,15 @@ final class MIDIKeyboardController {
 
   private func emit(_ event: [String: Any]) {
     onEvent?(event)
+  }
+
+  private func networkSessionDidChange() {
+    let next = Set(MIDINetworkSession.default().connections().map(ObjectIdentifier.init))
+    let connectionWasRemoved = !networkConnectionIds.subtracting(next).isEmpty
+    networkConnectionIds = next
+    if inputEnabled && connectionWasRemoved {
+      emit(["type": "allNotesOff", "source": "network"])
+    }
   }
 
   private static let notifyProc: MIDINotifyProc = { notification, refCon in
@@ -109,24 +158,39 @@ final class MIDIKeyboardController {
     }
   }
 
-  private static let readProc: MIDIReadProc = { packetList, refCon, _ in
+  private static let readProc: MIDIReadProc = { packetList, refCon, sourceConnectionRefCon in
     guard let refCon else { return }
     let controller = Unmanaged<MIDIKeyboardController>.fromOpaque(refCon).takeUnretainedValue()
-    controller.handle(packetList: packetList)
+    let sourceContext = sourceConnectionRefCon.map {
+      Unmanaged<SourceContext>.fromOpaque($0).takeUnretainedValue()
+    }
+    controller.handle(packetList: packetList, sourceContext: sourceContext)
   }
 
-  private static func events(from packetList: UnsafePointer<MIDIPacketList>) -> [[String: Any]] {
+  private static func events(
+    from packetList: UnsafePointer<MIDIPacketList>,
+    runningStatus: inout UInt8?,
+    isNetwork: Bool
+  ) -> [[String: Any]] {
     var parsed: [[String: Any]] = []
-    var runningStatus: UInt8?
 
-    withUnsafePointer(to: packetList.pointee.packet) { firstPacket in
-      var packet = UnsafeMutablePointer(mutating: firstPacket)
+    let mutableList = UnsafeMutablePointer(mutating: packetList)
+    withUnsafeMutablePointer(to: &mutableList.pointee.packet) { firstPacket in
+      var packet = firstPacket
       for _ in 0..<packetList.pointee.numPackets {
         let current = packet.pointee
         let bytes = withUnsafeBytes(of: current.data) { rawBuffer in
           Array(rawBuffer.prefix(Int(current.length)))
         }
-        parse(bytes, runningStatus: &runningStatus, into: &parsed)
+        var packetEvents: [[String: Any]] = []
+        parse(bytes, runningStatus: &runningStatus, into: &packetEvents)
+        for var event in packetEvents {
+          // AppleMIDI's clock synchronization is represented by this CoreMIDI
+          // host-time value. Keep it intact across the platform boundary.
+          event["midiTimestamp"] = NSNumber(value: current.timeStamp)
+          if isNetwork { event["source"] = "network" }
+          parsed.append(event)
+        }
         packet = MIDIPacketNext(packet)
       }
     }
@@ -246,6 +310,9 @@ final class MIDIKeyboardController {
   }
 
   deinit {
+    if let networkSessionObserver {
+      NotificationCenter.default.removeObserver(networkSessionObserver)
+    }
     stop()
   }
 }

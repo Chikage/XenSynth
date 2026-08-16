@@ -11,7 +11,7 @@ XenSynth 的 iOS / Android 跨平台版本。界面、乐谱解析、瀑布流�
 - JSON 调律、EDO、音高偏移、速度、音量、混响和延迟设置
 - USB / 系统 MIDI 键盘输入，支持延音踏板与音色切换
 - Android 系统虚拟 MIDI 输出，其他应用可接收键盘和乐谱播放的 MIDI 流
-- 可分别开关 MIDI 输入和输出；输出可同时发送到局域网 UDP MIDI 与已配对的蓝牙 / 系统 MIDI 目的地
+- 可分别开关 MIDI 输入和输出；输出可同时发送到局域网 RTP-MIDI/AppleMIDI 与已配对的蓝牙 / 系统 MIDI 目的地
 - Android 后台乐谱播放与 MediaSession 通知栏控制（播放、暂停、停止、进度拖动）
 - iOS / Android 麦克风录音与实时分析：钢琴音符、YIN 连续基频和 FFT 频谱模式
 - FluidSynth SoundFont 合成；Android 使用 Oboe，iOS 使用原生音频排程
@@ -40,7 +40,7 @@ Android 乐谱播放由 `XenSynthPlaybackService` 持有 Android MediaSession。
 
 设置面板的 `MIDI` 区域提供独立的 `MIDI input` 和 `MIDI output` 开关。关闭输入会断开外接 MIDI 接收，关闭输出会立即向已输出的音符发送 Note Off / All Notes Off，然后阻止键盘和乐谱继续向外发送。
 
-`Network MIDI (UDP)` 向设置的局域网主机和端口发送 MIDI 1.0 字节流，每个完整 MIDI 消息使用一个 UDP 数据报；接收端需要配置为相同的 raw UDP MIDI 约定。蓝牙输出列表来自系统已连接的 MIDI 目的地：Android 会请求蓝牙连接权限并通过 BLE MIDI 端口发送；iOS 使用当前可见的 CoreMIDI 目的地，其中包括已连接的蓝牙 MIDI 设备。两类输出可与 Android 的现有虚拟 MIDI 输出同时启用。
+`RTP-MIDI / AppleMIDI` 使用 Bonjour `_apple-midi._udp` 自动发现，并通过动态连续 UDP 控制/数据端口建立双向会话。发现的 XenSynth、JustPiano 或系统 AppleMIDI 端点会显示在 `NETWORK MIDI DESTINATIONS` 中，可同时选择多个目标；不再提供固定 host/port 或裸 UDP 兼容路径。Android 使用内置 RTP-MIDI 会话库，iOS 使用系统 CoreMIDI Network Session。蓝牙输出列表仍来自系统已连接的 MIDI 目的地，各类输出可同时启用。
 
 ## 环境要求
 

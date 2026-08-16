@@ -93,6 +93,7 @@ flutter {
 }
 
 dependencies {
+    implementation(project(":rtpmidi"))
     implementation("androidx.media:media:1.8.0")
     implementation("com.github.wendykierp:JTransforms:3.1")
     testImplementation("junit:junit:4.13.2")

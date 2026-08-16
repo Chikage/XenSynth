@@ -169,7 +169,7 @@ final class ScorePlaybackController {
     stopAllPreviewNotes()
   }
 
-  func allNotesOff() {
+  func allNotesOff(sendToNetwork: Bool = true) {
     for note in activeNotes {
       synth.noteOff(noteNumber: note.noteNumber, channel: note.playbackChannel)
     }
@@ -177,7 +177,7 @@ final class ScorePlaybackController {
     activeMidiTokens.removeAll()
     stopAllPreviewNotes()
     synth.allNotesOff()
-    midiOutput.allNotesOff()
+    midiOutput.allNotesOff(sendToNetwork: sendToNetwork)
   }
 
   func setVolumeGain(_ gain: Float) {
@@ -196,7 +196,8 @@ final class ScorePlaybackController {
     channel: Int = 0,
     program: Int = 0,
     bankMsb: Int = 0,
-    bankLsb: Int = 0
+    bankLsb: Int = 0,
+    sendToNetwork: Bool = true
   ) throws -> Int {
     try prepareAudio()
     let key = VoiceKey(channel: channel, program: program, bankMsb: bankMsb, bankLsb: bankLsb)
@@ -219,7 +220,8 @@ final class ScorePlaybackController {
       channel: channel,
       program: program,
       bankMsb: bankMsb,
-      bankLsb: bankLsb
+      bankLsb: bankLsb,
+      sendToNetwork: sendToNetwork
     )
     activePreviewNotes[token] = ActivePreviewNote(
       audioNote: activeNote,

@@ -4,7 +4,7 @@ import android.media.midi.MidiReceiver
 import android.util.Log
 import kotlin.math.roundToInt
 
-/** Routes app note events to Android virtual, Bluetooth, and UDP MIDI outputs. */
+/** Routes app note events to Android virtual, system, and AppleMIDI outputs. */
 internal object MidiOutputRouter {
     private const val TAG = "XenSynthMidiOutput"
     private const val CHANNEL_COUNT = 16
@@ -18,7 +18,8 @@ internal object MidiOutputRouter {
     private var virtualOutputReceivers: Array<MidiReceiver> = emptyArray()
     private var bluetoothOutputReceivers: Array<MidiReceiver> = emptyArray()
     private var outputEnabled = true
-    private val networkOutput = UdpMidiOutput()
+    private var networkOutputEnabled = false
+    private var networkSender: ((List<ByteArray>, Long) -> Unit)? = null
     private val activeNotes = LinkedHashMap<Int, ActiveNote>()
     private val activeIds = HashMap<Int, Int>()
     private var nextToken = 1
@@ -48,8 +49,27 @@ internal object MidiOutputRouter {
         }
     }
 
-    fun configureNetworkOutput(enabled: Boolean, host: String, port: Int) {
-        networkOutput.configure(enabled, host, port)
+    fun setNetworkOutputEnabled(enabled: Boolean) {
+        val safetySender = synchronized(lock) {
+            val sender = networkSender.takeIf { networkOutputEnabled && !enabled }
+            networkOutputEnabled = enabled
+            sender
+        }
+        safetySender?.invoke(
+            (0 until CHANNEL_COUNT).flatMap { channel ->
+                listOf(
+                    controlChange(channel, 120, 0),
+                    controlChange(channel, 123, 0),
+                )
+            },
+            System.nanoTime(),
+        )
+    }
+
+    fun setNetworkSender(sender: ((List<ByteArray>, Long) -> Unit)?) {
+        synchronized(lock) {
+            networkSender = sender
+        }
     }
 
     fun close() {
@@ -58,7 +78,10 @@ internal object MidiOutputRouter {
             virtualOutputReceivers = emptyArray()
             bluetoothOutputReceivers = emptyArray()
         }
-        networkOutput.close()
+        synchronized(lock) {
+            networkSender = null
+            networkOutputEnabled = false
+        }
     }
 
     fun noteOn(
@@ -69,6 +92,7 @@ internal object MidiOutputRouter {
         program: Int,
         bankMsb: Int,
         bankLsb: Int,
+        sendToNetwork: Boolean = true,
     ): Int {
         require(pitch.isFinite()) { "MIDI pitch must be finite" }
         val key = pitch.roundToInt().coerceIn(MIDI_MIN, MIDI_MAX)
@@ -95,7 +119,7 @@ internal object MidiOutputRouter {
             val token = nextToken.also {
                 nextToken = if (nextToken == Int.MAX_VALUE) 1 else nextToken + 1
             }
-            active = ActiveNote(token, id, outputChannel, key)
+            active = ActiveNote(token, id, outputChannel, key, sendToNetwork)
             activeNotes[token] = active
             id?.let { activeIds[it] = token }
         }
@@ -110,33 +134,35 @@ internal object MidiOutputRouter {
             add(pitchBend(active.channel, pitchBendValue(pitch, key)))
             add(byteArrayOf((0x90 or active.channel).toByte(), key.toByte(), safeVelocity.toByte()))
         }
-        sendMessages(messages)
+        sendMessages(messages, sendToNetwork)
         return active.token
     }
 
-    fun noteOff(token: Int) {
+    fun noteOff(token: Int, sendToNetwork: Boolean? = null) {
         val active = synchronized(lock) {
             val removed = activeNotes.remove(token)
             removed?.id?.let(activeIds::remove)
             removed
         } ?: return
-        sendNoteOff(active)
+        sendNoteOff(active, sendToNetwork ?: active.sendToNetwork)
     }
 
-    fun allNotesOff() {
+    fun allNotesOff(sendToNetwork: Boolean = true) {
         val notes = synchronized(lock) {
             val snapshot = activeNotes.values.toList()
             activeNotes.clear()
             activeIds.clear()
             snapshot
         }
-        notes.forEach(::sendNoteOff)
+        notes.forEach { active ->
+            sendNoteOff(active, sendToNetwork && active.sendToNetwork)
+        }
         sendMessages((0 until CHANNEL_COUNT).map { channel ->
             listOf(
                 controlChange(channel, 120, 0),
                 controlChange(channel, 123, 0),
             )
-        }.flatten())
+        }.flatten(), sendToNetwork)
     }
 
     private fun chooseChannel(preferred: Int): Int {
@@ -145,21 +171,25 @@ internal object MidiOutputRouter {
         return (0 until CHANNEL_COUNT).firstOrNull { it !in occupied } ?: preferred
     }
 
-    private fun sendNoteOff(active: ActiveNote) {
+    private fun sendNoteOff(
+        active: ActiveNote,
+        sendToNetwork: Boolean = active.sendToNetwork,
+    ) {
         sendMessages(
             listOf(
                 byteArrayOf((0x80 or active.channel).toByte(), active.key.toByte(), 0),
                 pitchBend(active.channel, PITCH_BEND_CENTER),
             ),
+            sendToNetwork,
         )
     }
 
-    private fun sendMessages(messages: List<ByteArray>) {
+    private fun sendMessages(messages: List<ByteArray>, sendToNetwork: Boolean = true) {
         if (messages.isEmpty()) return
         val targets = synchronized(lock) {
             if (!outputEnabled) null else OutputTargets(
                 receivers = virtualOutputReceivers + bluetoothOutputReceivers,
-                networkOutput = networkOutput,
+                networkSender = networkSender.takeIf { networkOutputEnabled && sendToNetwork },
             )
         } ?: return
         val timestamp = System.nanoTime()
@@ -170,8 +200,8 @@ internal object MidiOutputRouter {
                         Log.w(TAG, "Could not send MIDI message", error)
                     }
             }
-            targets.networkOutput.send(message)
         }
+        targets.networkSender?.invoke(messages.map { it.copyOf() }, timestamp)
     }
 
     private fun controlChange(channel: Int, controller: Int, value: Int): ByteArray = byteArrayOf(
@@ -210,10 +240,11 @@ internal object MidiOutputRouter {
         val id: Int?,
         val channel: Int,
         val key: Int,
+        val sendToNetwork: Boolean,
     )
 
     private data class OutputTargets(
         val receivers: Array<MidiReceiver>,
-        val networkOutput: UdpMidiOutput,
+        val networkSender: ((List<ByteArray>, Long) -> Unit)?,
     )
 }

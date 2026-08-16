@@ -170,7 +170,8 @@ final class XenSynthPlatformBridge: NSObject, FlutterStreamHandler, UIDocumentPi
           channel: channel,
           program: arguments.int(forAnyKey: ["program", "programNumber"]) ?? previewPrograms[channel],
           bankMsb: arguments.int(forAnyKey: ["bankMsb", "bankMSB"]) ?? 0,
-          bankLsb: arguments.int(forAnyKey: ["bankLsb", "bankLSB"]) ?? 0
+          bankLsb: arguments.int(forAnyKey: ["bankLsb", "bankLSB"]) ?? 0,
+          sendToNetwork: arguments.bool(forAnyKey: ["networkOutput"]) ?? true
         )
         result(token)
 
@@ -182,7 +183,9 @@ final class XenSynthPlatformBridge: NSObject, FlutterStreamHandler, UIDocumentPi
         result(true)
 
       case "allNotesOff":
-        playbackController.allNotesOff()
+        playbackController.allNotesOff(
+          sendToNetwork: arguments.bool(forAnyKey: ["networkOutput"]) ?? true
+        )
         result(true)
 
       case "setMidiInputEnabled":
@@ -195,10 +198,17 @@ final class XenSynthPlatformBridge: NSObject, FlutterStreamHandler, UIDocumentPi
 
       case "configureNetworkMidiOutput":
         midiOutput.configureNetwork(
-          enabled: arguments.bool(forAnyKey: ["enabled"]) ?? false,
-          host: arguments["host"] as? String ?? "",
-          port: (arguments.int(forAnyKey: ["port"]) ?? 5004).clamped(to: 1...65_535)
+          enabled: arguments.bool(forAnyKey: ["enabled"]) ?? true
         )
+        result(true)
+
+      case "scanNetworkMidiOutputs":
+        midiOutput.scanNetworkDestinations { destinations in
+          result(destinations)
+        }
+
+      case "setNetworkMidiOutputIds":
+        midiOutput.setNetworkDestinationIds(stringList(from: arguments["ids"]) ?? [])
         result(true)
 
       case "getBluetoothMidiOutputs":
@@ -484,13 +494,13 @@ final class XenSynthPlatformBridge: NSObject, FlutterStreamHandler, UIDocumentPi
     setMidiInputEnabled((settings["midiInputEnabled"] as? Bool) ?? true)
     midiOutput.setOutputEnabled((settings["midiOutputEnabled"] as? Bool) ?? true)
     midiOutput.configureNetwork(
-      enabled: (settings["networkMidiEnabled"] as? Bool) ?? false,
-      host: settings["networkMidiHost"] as? String ?? "",
-      port: ((settings["networkMidiPort"] as? NSNumber)?.intValue ?? 5004)
-        .clamped(to: 1...65_535)
+      enabled: (settings["networkMidiEnabled"] as? Bool) ?? true
     )
     midiOutput.setBluetoothDestinationIds(
       stringList(from: settings["bluetoothMidiOutputIds"]) ?? []
+    )
+    midiOutput.setNetworkDestinationIds(
+      stringList(from: settings["networkMidiDestinationIds"]) ?? []
     )
   }
 
@@ -680,9 +690,8 @@ final class XenSynthPlatformBridge: NSObject, FlutterStreamHandler, UIDocumentPi
     "externalMidiControlsProgram": false,
     "midiInputEnabled": true,
     "midiOutputEnabled": true,
-    "networkMidiEnabled": false,
-    "networkMidiHost": "",
-    "networkMidiPort": 5004,
+    "networkMidiEnabled": true,
+    "networkMidiDestinationIds": [String](),
     "bluetoothMidiOutputIds": [String](),
     "keyboardLayoutMode": "linear",
     "hexColumns": 35,

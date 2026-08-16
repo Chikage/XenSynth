@@ -19,8 +19,13 @@ import icu.ringona.xensynth.audio.NativeAudioEngine
 import icu.ringona.xensynth.midi.MidiDeviceInputManager
 import icu.ringona.xensynth.midi.MidiInputDevice
 import icu.ringona.xensynth.midi.MidiInputEvent
+import icu.ringona.xensynth.midi.MidiInputParser
 import icu.ringona.xensynth.midi.MidiOutputDestinationManager
 import icu.ringona.xensynth.midi.MidiOutputRouter
+import icu.ringona.rtpmidi.AppleMidiConfiguration
+import icu.ringona.rtpmidi.AppleMidiEvent
+import icu.ringona.rtpmidi.AppleMidiListener
+import icu.ringona.rtpmidi.AppleMidiManager
 import icu.ringona.xensynth.playback.XenSynthPlaybackService
 import icu.ringona.xensynth.pitch.PitchRecognitionManager
 import icu.ringona.xensynth.pitch.PitchRecognitionMode
@@ -33,6 +38,7 @@ import java.io.File
 import java.io.FileOutputStream
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
+import java.util.concurrent.ConcurrentHashMap
 import org.json.JSONArray
 import org.json.JSONObject
 import org.json.JSONTokener
@@ -115,9 +121,11 @@ internal class XenSynthPlatformBridge(
     private var pendingDocumentResult: MethodChannel.Result? = null
     private var pendingViewUri: Uri? = null
     private var hostResumed = false
+    @Volatile
     private var midiInputEnabled = true
     private var audioInitialized = false
     private var audioInitializing = false
+    @Volatile
     private var closed = false
     private var gain = DEFAULT_GAIN
     private var reverb = DEFAULT_REVERB
@@ -127,6 +135,40 @@ internal class XenSynthPlatformBridge(
     private var pendingBluetoothMidiOutputIds = emptyList<String>()
     private val manualNoteTokens = mutableMapOf<Int, ManualNoteToken>()
     private var nextManualNoteToken = 1
+    private val networkMidiParsers = ConcurrentHashMap<String, MidiInputParser>()
+    private val appleMidiManager = AppleMidiManager(
+        context = activity.applicationContext,
+        configuration = AppleMidiConfiguration(
+            serviceName = "XenSynth - ${Build.MODEL.orEmpty().ifBlank { "Android" }}",
+        ),
+        listener = object : AppleMidiListener {
+            override fun onMidiEvent(event: AppleMidiEvent) {
+                if (!midiInputEnabled || closed) return
+                val parser = networkMidiParsers.computeIfAbsent(event.sessionId) {
+                    MidiInputParser { midiEvent ->
+                        if (midiInputEnabled && !closed) {
+                            deliverMidiEvent(midiEvent, source = "network")
+                        }
+                    }
+                }
+                parser.send(event.bytes)
+            }
+
+            override fun onSessionClosed(sessionId: String) {
+                networkMidiParsers.remove(sessionId)?.reset()
+                if (midiInputEnabled && !closed) {
+                    (0 until 16).forEach { channel ->
+                        deliverMidiEvent(MidiInputEvent.AllNotesOff(channel), source = "network")
+                    }
+                }
+            }
+        },
+    )
+
+    init {
+        appleMidiManager.start()
+        MidiOutputRouter.setNetworkSender(appleMidiManager::send)
+    }
 
     fun attachMethodChannel(channel: MethodChannel) {
         methodChannel = channel
@@ -210,7 +252,9 @@ internal class XenSynthPlatformBridge(
                     result.success(true)
                 }
                 "allNotesOff" -> {
-                    XenSynthPlaybackCoordinator.allNotesOff()
+                    XenSynthPlaybackCoordinator.allNotesOff(
+                        sendToNetwork = boolean(arguments, "networkOutput", defaultValue = true),
+                    )
                     releaseManualNotes()
                     result.success(true)
                 }
@@ -225,11 +269,15 @@ internal class XenSynthPlatformBridge(
                     result.success(true)
                 }
                 "configureNetworkMidiOutput" -> {
-                    MidiOutputRouter.configureNetworkOutput(
-                        enabled = boolean(arguments, "enabled"),
-                        host = arguments["host"]?.toString().orEmpty(),
-                        port = integer(arguments, "port", 5004).coerceIn(1, 65535),
+                    // AppleMIDI destinations come exclusively from Bonjour service identities.
+                    MidiOutputRouter.setNetworkOutputEnabled(
+                        boolean(arguments, "enabled"),
                     )
+                    result.success(true)
+                }
+                "scanNetworkMidiOutputs" -> scanNetworkMidiOutputs(result)
+                "setNetworkMidiOutputIds", "setNetworkMidiDestinationIds" -> {
+                    appleMidiManager.setDestinationIds(stringList(arguments["ids"]))
                     result.success(true)
                 }
                 "getBluetoothMidiOutputs" -> result.success(
@@ -383,6 +431,7 @@ internal class XenSynthPlatformBridge(
             program = program,
             bankMsb = bankMsb,
             bankLsb = bankLsb,
+            sendToNetwork = boolean(arguments, "networkOutput", defaultValue = true),
         )
         val audioToken = runCatching {
             nativeAudio.noteOn(
@@ -416,6 +465,23 @@ internal class XenSynthPlatformBridge(
             midiInputManager.stop()
         } else if (hostResumed && midiEventSink != null && midiInputManager.isSupported) {
             midiInputManager.start()
+        }
+    }
+
+    private fun scanNetworkMidiOutputs(result: MethodChannel.Result) {
+        worker.execute {
+            val destinations = runCatching {
+                appleMidiManager.scan().map { peer ->
+                    mapOf(
+                        "id" to peer.id,
+                        "name" to "${peer.name} (${peer.hostAddress}:${peer.controlPort})",
+                        "state" to peer.state.name.lowercase(),
+                    )
+                }
+            }.getOrElse { emptyList() }
+            mainHandler.post {
+                if (!closed) result.success(destinations) else result.success(emptyList<Map<String, Any>>())
+            }
         }
     }
 
@@ -769,6 +835,14 @@ internal class XenSynthPlatformBridge(
     override fun onDeviceDisconnected(device: MidiInputDevice) = Unit
 
     override fun onMidiEvent(event: MidiInputEvent) {
+        deliverMidiEvent(event)
+    }
+
+    private fun deliverMidiEvent(event: MidiInputEvent, source: String? = null) {
+        if (Looper.myLooper() != Looper.getMainLooper()) {
+            mainHandler.post { deliverMidiEvent(event, source) }
+            return
+        }
         val payload: Map<String, Any> = when (event) {
             is MidiInputEvent.NoteOn -> mapOf(
                 "type" to "noteOn",
@@ -802,7 +876,8 @@ internal class XenSynthPlatformBridge(
                 "channel" to event.channel,
             )
         }
-        midiEventSink?.success(payload)
+        val sourcedPayload = if (source == null) payload else payload + ("source" to source)
+        midiEventSink?.success(sourcedPayload)
     }
 
     fun onHostResume() {
@@ -833,10 +908,14 @@ internal class XenSynthPlatformBridge(
         pendingDocumentResult = null
         midiEventSink = null
         midiInputManager.close()
+        MidiOutputRouter.setNetworkSender(null)
+        appleMidiManager.close()
+        networkMidiParsers.clear()
         midiOutputDestinationManager.close()
         pitchRecognitionManager.close()
         releaseManualNotes()
         if (!XenSynthPlaybackService.isRunning()) {
+            MidiOutputRouter.close()
             XenSynthPlaybackCoordinator.dispose()
             nativeAudio.allSoundOff()
             nativeAudio.teardown()

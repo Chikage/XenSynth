@@ -67,7 +67,7 @@ internal object XenSynthPlaybackCoordinator {
 
     fun stop() = scheduler.stop()
 
-    fun allNotesOff() = scheduler.allNotesOff()
+    fun allNotesOff(sendToNetwork: Boolean = true) = scheduler.allNotesOff(sendToNetwork)
 
     fun snapshot(): NativePlaybackSnapshot = NativePlaybackSnapshot(
         title = title,

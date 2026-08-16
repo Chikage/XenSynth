@@ -238,8 +238,7 @@ void main() {
         midiInputEnabled: false,
         midiOutputEnabled: false,
         networkMidiEnabled: true,
-        networkMidiHost: '192.168.1.48',
-        networkMidiPort: 5005,
+        networkMidiDestinationIds: ['applemidi:SnVzdFBpYW5v'],
         bluetoothMidiOutputIds: ['bluetooth:42:0'],
       );
 
@@ -248,13 +247,10 @@ void main() {
       expect(restored.midiInputEnabled, isFalse);
       expect(restored.midiOutputEnabled, isFalse);
       expect(restored.networkMidiEnabled, isTrue);
-      expect(restored.networkMidiHost, '192.168.1.48');
-      expect(restored.networkMidiPort, 5005);
+      expect(restored.networkMidiDestinationIds, ['applemidi:SnVzdFBpYW5v']);
       expect(restored.bluetoothMidiOutputIds, ['bluetooth:42:0']);
-      expect(
-        configured.copyWith(networkMidiPort: 70_000).networkMidiPort,
-        65535,
-      );
+      expect(restored.toMap(), isNot(contains('networkMidiHost')));
+      expect(restored.toMap(), isNot(contains('networkMidiPort')));
     });
 
     test('applies pitch offset with the opposite sign', () {
