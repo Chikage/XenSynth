@@ -114,15 +114,30 @@ class AppleMidiServiceRegistryTest {
         )
     }
 
+    @Test
+    fun serviceTypeLeadingDotDoesNotChangePeerIdentity() {
+        val registry = AppleMidiServiceRegistry()
+        val normal = registry.upsert(
+            service("normal", "iPhone", "192.168.1.20", 5_004, "_apple-midi._udp."),
+        )
+        val leadingDot = registry.upsert(
+            service("leading-dot", "iPhone", "192.168.1.20", 5_004, "._apple-midi._udp."),
+        )
+
+        assertEquals(normal, leadingDot)
+        assertEquals(1, registry.snapshots().size)
+    }
+
     private fun service(
         id: String,
         name: String,
         host: String,
         port: Int,
+        type: String = NsdDirectory.SERVICE_TYPE,
     ) = ResolvedAppleMidiService(
         id = id,
         name = name,
-        type = NsdDirectory.SERVICE_TYPE,
+        type = type,
         host = InetAddress.getByName(host),
         controlPort = port,
         model = "Test Model",

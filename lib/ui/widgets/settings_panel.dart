@@ -169,7 +169,13 @@ class SettingsPanel extends StatelessWidget {
                       ),
                     ),
                     const _SectionLabel('MIDI'),
-                    const _SectionLabel('MIDI输入设备'),
+                    _SwitchRow(
+                      label: 'RTP-MIDI / AppleMIDI',
+                      value: settings.networkMidiEnabled,
+                      onChanged: (value) => onChanged(
+                        settings.copyWith(networkMidiEnabled: value),
+                      ),
+                    ),
                     _SwitchRow(
                       label: 'MIDI input',
                       value: settings.midiInputEnabled,
@@ -213,19 +219,11 @@ class SettingsPanel extends StatelessWidget {
                           },
                         ),
                       ),
-                    const _SectionLabel('MIDI输出设备'),
                     _SwitchRow(
                       label: 'MIDI output',
                       value: settings.midiOutputEnabled,
                       onChanged: (value) => onChanged(
                         settings.copyWith(midiOutputEnabled: value),
-                      ),
-                    ),
-                    _SwitchRow(
-                      label: 'RTP-MIDI / AppleMIDI',
-                      value: settings.networkMidiEnabled,
-                      onChanged: (value) => onChanged(
-                        settings.copyWith(networkMidiEnabled: value),
                       ),
                     ),
                     _MidiDeviceHeader(

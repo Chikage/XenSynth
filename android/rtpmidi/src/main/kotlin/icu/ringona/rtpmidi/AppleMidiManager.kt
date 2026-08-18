@@ -86,9 +86,11 @@ class AppleMidiManager(
     val controlPort: Int?
         get() = synchronized(lock) { portPair?.controlPort }
 
-    /** False when 5004/5005 were occupied and this instance is passive-receive only. */
+    /** Whether the active transport is using the preferred 5004/5005 pair. */
     val isFixedPortCapable: Boolean
-        get() = synchronized(lock) { activeMidiTransportAllowedLocked() }
+        get() = synchronized(lock) {
+            running && transportHealthy && portPair?.isFixedPortCapable == true
+        }
 
     fun sessionStatistics(): List<AppleMidiSessionStatistics> = synchronized(lock) {
         sessions.values.map(AppleMidiSession::statistics)
@@ -118,7 +120,7 @@ class AppleMidiManager(
             if (closed) return false
             if (running) return true
             val pair = runCatching {
-                UdpPortPair.bind(random = random, ipv4Only = configuration.ipv4Only)
+                UdpPortPair.bind(ipv4Only = configuration.ipv4Only)
             }
                 .onFailure { error -> Log.e(TAG, "Could not bind AppleMIDI UDP ports", error) }
                 .getOrNull()
@@ -132,7 +134,7 @@ class AppleMidiManager(
                 Log.w(
                     TAG,
                     "UDP $FIXED_CONTROL_PORT/$FIXED_DATA_PORT unavailable; " +
-                        "AppleMIDI is passive-receive only on " +
+                        "AppleMIDI active transport moved to UDP " +
                         "${pair.controlPort}/${pair.dataPort}",
                 )
             }
@@ -190,8 +192,9 @@ class AppleMidiManager(
             selectedPeerIds.clear()
             selectedPeerIds += ids.filter { it.startsWith(DESTINATION_PREFIX) }
             val connectedEndpoints = connectedEndpointsLocked()
+            val selectedConnections = selectedConnectionPeerIdsLocked()
             servicesToConnect = if (activeMidiTransportAllowedLocked()) {
-                selectedConnectionPeerIdsLocked()
+                selectedConnections
                     .mapNotNull { discovered.snapshot(it, connectedEndpoints) }
             } else {
                 emptyList()
@@ -199,7 +202,7 @@ class AppleMidiManager(
             sessionsToClose = sessions.values.filter { session ->
                 session.initiatedLocally &&
                     session.peerId != null &&
-                    session.peerId !in selectedConnectionPeerIdsLocked()
+                    session.peerId !in selectedConnections
             }
         }
         sessionsToClose.forEach { closeSession(it, notifyRemote = true) }
@@ -438,8 +441,7 @@ class AppleMidiManager(
                 findSession(remote.address, packet.initiatorToken, packet.ssrc)
                     ?.let { closeSession(it, notifyRemote = false) }
             }
-            is AppleMidiControlPacket.ClockSynchronization ->
-                handleClockSynchronization(packet, remote)
+            is AppleMidiControlPacket.ClockSynchronization -> handleClockSynchronization(packet, remote)
             is AppleMidiControlPacket.ReceiverFeedback -> {
                 synchronized(lock) {
                     selectReceiverFeedbackSession(
@@ -1056,6 +1058,7 @@ class AppleMidiManager(
         session: AppleMidiSession,
         output: MidiOutputDrain,
     ) {
+        // Apple CoreMIDI expects RTP-MIDI command packets with the RTP marker bit clear.
         var cursor = 0
         while (cursor < output.messages.size) {
             if (!synchronized(lock) { midiOutputAllowedLocked(session) }) return
@@ -1066,7 +1069,7 @@ class AppleMidiManager(
                 batchWindowNanos = output.batchWindowNanos,
                 maximumDatagramBytes = MAX_RTP_DATAGRAM_BYTES,
                 encodedSize = { candidate ->
-                    prepareRtpPacket(session, candidate, marker = true)?.bytes?.size
+                    prepareRtpPacket(session, candidate, marker = false)?.bytes?.size
                         ?: Int.MAX_VALUE
                 },
             )
@@ -1077,7 +1080,7 @@ class AppleMidiManager(
             val accepted = prepareRtpPacket(
                 session,
                 output.messages.subList(cursor, endExclusive),
-                marker = true,
+                marker = false,
             ) ?: return
             if (!transmitPreparedRtpPacket(session, accepted)) return
             cursor = endExclusive
@@ -1189,7 +1192,7 @@ class AppleMidiManager(
             session.resetOutgoingRecoveryForPanic(session.nextOutgoingExtendedSequence)
         }
         val panic = MidiOutputAccumulator.fullPanic(timestampNanos)
-        val prepared = prepareRtpPacket(session, panic, marker = true) ?: return false
+        val prepared = prepareRtpPacket(session, panic, marker = false) ?: return false
         if (prepared.bytes.size > MAX_RTP_DATAGRAM_BYTES) {
             Log.e(TAG, "A complete RTP-MIDI panic exceeds the datagram limit")
             return false
@@ -1530,7 +1533,7 @@ internal fun activeMidiTransportAllowed(
     running: Boolean,
     portPair: UdpPortPair?,
     transportHealthy: Boolean,
-): Boolean = running && transportHealthy && portPair?.isFixedPortCapable == true
+): Boolean = running && transportHealthy && portPair != null
 
 internal fun appleMidiDeliveryLookaheadNanos(
     configuration: AppleMidiConfiguration,

@@ -10,126 +10,39 @@ const _degreeNames = <String, String>{
   '7': 'B',
 };
 
-// Chordle uses explicit diatonic spellings for the 7n EDOs where the
-// general POTD search would produce less readable equivalent accidentals.
-const _simpleExtraPitchNameTables = <int, List<String>>{
-  7: <String>['C', 'D', 'E', 'F', 'G', 'A', 'B'],
-  14: <String>[
-    'C',
-    '^C',
-    'D',
-    '^D',
-    'E',
-    '^E',
-    'F',
-    '^F',
-    'G',
-    '^G',
-    'A',
-    '^A',
-    'B',
-    '^B',
-  ],
-  21: <String>[
-    'C',
-    '^C',
-    'vD',
-    'D',
-    '^D',
-    'vE',
-    'E',
-    '^E',
-    'vF',
-    'F',
-    '^F',
-    'vG',
-    'G',
-    '^G',
-    'vA',
-    'A',
-    '^A',
-    'vB',
-    'B',
-    '^B',
-    'vC',
-  ],
-  28: <String>[
-    'C',
-    '^C',
-    '^^C',
-    'vD',
-    'D',
-    '^D',
-    '^^D',
-    'vE',
-    'E',
-    '^E',
-    '^^E',
-    'vF',
-    'F',
-    '^F',
-    '^^F',
-    'vG',
-    'G',
-    '^G',
-    '^^G',
-    'vA',
-    'A',
-    '^A',
-    '^^A',
-    'vB',
-    'B',
-    '^B',
-    '^^B',
-    'vC',
-  ],
-  35: <String>[
-    'C',
-    '^C',
-    '^^C',
-    'vvD',
-    'vD',
-    'D',
-    '^D',
-    '^^D',
-    'vvE',
-    'vE',
-    'E',
-    '^E',
-    '^^E',
-    'vvF',
-    'vF',
-    'F',
-    '^F',
-    '^^F',
-    'vvG',
-    'vG',
-    'G',
-    '^G',
-    '^^G',
-    'vvA',
-    'vA',
-    'A',
-    '^A',
-    '^^A',
-    'vvB',
-    'vB',
-    'B',
-    '^B',
-    '^^B',
-    'vvC',
-    'vC',
-  ],
-};
+const _diatonicNames = <String>['C', 'D', 'E', 'F', 'G', 'A', 'B'];
+
+// Chordle's 7n spellings divide each natural-note interval into n steps.
+// The first half uses sharps on the lower degree; the remainder uses flats
+// on the next degree.  At the 14-EDO midpoint the established spelling is
+// the upper (flat) degree, while the 28-EDO midpoint stays on the lower one.
+String? _sevenNedoName(int octaveStep, int edo) {
+  if (edo % 7 != 0) return null;
+  final subdivisions = edo ~/ 7;
+  if (subdivisions < 1 || subdivisions > 5) return null;
+
+  final degree = octaveStep ~/ subdivisions;
+  final offset = octaveStep % subdivisions;
+  final lowerName = _diatonicNames[degree];
+  if (offset == 0) return lowerName;
+
+  final sharpLimit = subdivisions == 2 ? 0 : subdivisions ~/ 2;
+  if (offset <= sharpLimit) {
+    return '${_repeat('^', offset)}$lowerName';
+  }
+
+  final upperName = _diatonicNames[(degree + 1) % _diatonicNames.length];
+  return '${_repeat('v', subdivisions - offset)}$upperName';
+}
 
 String potdNoteNameForPitch({required double pitch, required int edo}) {
   final normalizedEdo = edo > 0 ? edo : 12;
   final step = (pitch * normalizedEdo / 12).round();
   final octave = _floorDiv(step, normalizedEdo) - 1;
   final octaveStep = _floorMod(step, normalizedEdo);
-  final simpleName = _simpleExtraPitchNameTables[normalizedEdo];
+  final simpleName = _sevenNedoName(octaveStep, normalizedEdo);
   if (simpleName != null) {
-    return '${simpleName[octaveStep]}$octave';
+    return '$simpleName$octave';
   }
   final numericName = _potdNumericName(octaveStep, normalizedEdo);
   final parsed = _parseNumericName(numericName);

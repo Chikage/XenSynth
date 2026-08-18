@@ -116,7 +116,8 @@ internal class AppleMidiServiceRegistry {
         return "applemidi:$encoded"
     }
 
-    private fun normalizeType(type: String): String = type.trimEnd('.').lowercase()
+    /** Android NSD has returned both `_apple-midi._udp.` and `._apple-midi._udp.`. */
+    private fun normalizeType(type: String): String = type.trim('.').lowercase()
 
     companion object {
         private val CONFLICT_SUFFIX = Regex("^(.*) \\((\\d+)\\)$")

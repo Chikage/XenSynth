@@ -3,14 +3,19 @@ import Darwin
 import Foundation
 
 enum AppleMIDIPortPolicy {
-  // CoreMIDI exposes the AppleMIDI control port; it owns the adjacent data port.
+  // CoreMIDI exposes a read-only AppleMIDI control port and owns the adjacent data port. It starts
+  // at 5004/5005 and advances by one port pair when an earlier pair is unavailable.
   static let fixedControlPort = 5_004
+  private static let lastControlPort = Int(UInt16.max) - 1
 
   static func allowsActiveTransport(
     sessionEnabled: Bool,
     networkPort: Int
   ) -> Bool {
-    sessionEnabled && networkPort == fixedControlPort
+    sessionEnabled
+      && networkPort >= fixedControlPort
+      && networkPort <= lastControlPort
+      && (networkPort - fixedControlPort).isMultiple(of: 2)
   }
 }
 
@@ -887,7 +892,7 @@ final class MIDIOutputRouter {
 /// Owns the system AppleMIDI session and the Bonjour services used to initiate it.
 ///
 /// CoreMIDI implements the AppleMIDI control channel, RTP-MIDI payloads, clock
-/// synchronization, packet recovery, and the dynamic control/data UDP port pair.
+/// synchronization, packet recovery, and sequential control/data UDP port fallback.
 private final class AppleMIDINetworkSession: NSObject {
   private static let destinationIdPrefix = "applemidi:"
   // NetService may report the IPv6 address first and deliver the IPv4 A

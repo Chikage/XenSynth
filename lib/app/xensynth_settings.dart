@@ -140,7 +140,10 @@ class XenSynthSettings {
       touchSensitivity.clamp(0.0, 1.0) *
           (touchSensitivityPercentMax - touchSensitivityPercentMin);
 
-  static int hexStepMaximumForEdo(int edo) => edo > 1 ? edo - 1 : 1;
+  static int hexStepMaximumForEdo(int edo) {
+    final period = edo > 0 ? edo : 12;
+    return period > 1 ? period - 1 : 1;
+  }
 
   static double touchSensitivityFromPercent(double percent) {
     return ((percent - touchSensitivityPercentMin) /
@@ -323,7 +326,14 @@ class XenSynthSettings {
     'spatialProjection': spatialProjection.name,
   };
 
-  XenSynthSettings withEdo(int value) => copyWith(edo: value);
+  XenSynthSettings withEdo(int value) {
+    final nextEdo = value.clamp(0, 72);
+    if (!layoutMode.usesHexKeyboard || nextEdo == edo) {
+      return copyWith(edo: nextEdo);
+    }
+    final steps = _recommendedHexStepsForEdo(nextEdo);
+    return copyWith(edo: nextEdo, hexStepQ: steps.q, hexStepR: steps.r);
+  }
 
   XenSynthSettings copyWith({
     KeyboardLayoutMode? layoutMode,
@@ -434,6 +444,53 @@ class XenSynthSettings {
 
   static int _normalizeHexStep(int value, int maximum) {
     return value.clamp(-maximum, maximum).toInt();
+  }
+
+  static ({int q, int r}) _recommendedHexStepsForEdo(int edo) {
+    final period = edo > 0 ? edo : 12;
+    final maximum = hexStepMaximumForEdo(edo);
+    final primes = <int>[
+      for (var candidate = 2; candidate <= maximum; candidate++)
+        if (_isPrime(candidate)) candidate,
+    ];
+
+    if (primes.length < 2) {
+      return switch (primes) {
+        [final only] => (q: only, r: 1),
+        _ => (q: 1, r: -1),
+      };
+    }
+
+    // Scale the established 26-EDO 9/4 layout before snapping to primes.
+    final q = _closestValue(primes, period * 9 / 26);
+    final r = _closestValue(
+      primes.where((candidate) => candidate != q),
+      period * 4 / 26,
+    );
+    return (q: q, r: r);
+  }
+
+  static int _closestValue(Iterable<int> values, double target) {
+    int? closest;
+    var closestDistance = double.infinity;
+    for (final value in values) {
+      final distance = (value - target).abs();
+      if (closest == null ||
+          distance < closestDistance ||
+          (distance == closestDistance && value > closest)) {
+        closest = value;
+        closestDistance = distance;
+      }
+    }
+    return closest!;
+  }
+
+  static bool _isPrime(int value) {
+    if (value < 2) return false;
+    for (var divisor = 2; divisor * divisor <= value; divisor++) {
+      if (value % divisor == 0) return false;
+    }
+    return true;
   }
 
   static double _double(Object? value, double fallback) {

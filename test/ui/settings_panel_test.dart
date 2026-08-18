@@ -177,6 +177,49 @@ void main() {
     },
   );
 
+  testWidgets('MIDI settings omit standalone input and output headings', (
+    tester,
+  ) async {
+    await tester.binding.setSurfaceSize(const Size(874, 900));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: AppPalette.theme(),
+        home: Scaffold(
+          body: Align(
+            alignment: Alignment.topRight,
+            child: SizedBox(
+              height: 800,
+              child: SettingsPanel(
+                settings: const XenSynthSettings(),
+                onChanged: (_) {},
+                onReset: () {},
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+
+    final midiHeading = find.text('MIDI');
+    final networkMidiToggle = find.text('RTP-MIDI / AppleMIDI');
+    final midiInputToggle = find.text('MIDI input');
+
+    expect(find.text('MIDI INPUT'), findsNothing);
+    expect(find.text('MIDI OUTPUT'), findsNothing);
+    expect(midiInputToggle, findsOneWidget);
+    expect(find.text('MIDI output'), findsOneWidget);
+    expect(
+      tester.getTopLeft(networkMidiToggle).dy,
+      greaterThan(tester.getTopLeft(midiHeading).dy),
+    );
+    expect(
+      tester.getTopLeft(networkMidiToggle).dy,
+      lessThan(tester.getTopLeft(midiInputToggle).dy),
+    );
+  });
+
   testWidgets('MIDI input and output devices use separate selectable lists', (
     tester,
   ) async {
@@ -230,11 +273,11 @@ void main() {
         )
         .first;
     await tester.scrollUntilVisible(
-      find.text('MIDI输入设备'),
+      find.text('MIDI input'),
       100,
       scrollable: scrollable,
     );
-    expect(find.text('MIDI输入设备'), findsOneWidget);
+    expect(find.text('MIDI input'), findsOneWidget);
     await tester.scrollUntilVisible(
       find.textContaining('USB Keyboard'),
       100,
@@ -247,11 +290,11 @@ void main() {
     expect(settings.midiInputDeviceIds, isEmpty);
 
     await tester.scrollUntilVisible(
-      find.text('MIDI输出设备'),
+      find.text('MIDI output'),
       100,
       scrollable: scrollable,
     );
-    expect(find.text('MIDI输出设备'), findsOneWidget);
+    expect(find.text('MIDI output'), findsOneWidget);
     await tester.scrollUntilVisible(
       find.textContaining('Studio iPad'),
       100,

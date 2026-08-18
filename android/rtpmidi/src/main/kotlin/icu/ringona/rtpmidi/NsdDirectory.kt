@@ -38,6 +38,7 @@ internal class NsdDirectory(
         val serviceInfo: NsdServiceInfo,
         val identity: String,
         val generation: Long,
+        val attempt: Int = 0,
     )
 
     private val nsdManager = context.getSystemService(NsdManager::class.java)
@@ -53,6 +54,8 @@ internal class NsdDirectory(
     private var registeredName: String? = null
     private var registrationRequested = false
     private var registrationActive = false
+    private var registrationRetryScheduled = false
+    private var registrationRetryAttempt = 0
     private var discoveryRequested = false
     private var discoveryActive = false
     private var resolving = false
@@ -69,6 +72,7 @@ internal class NsdDirectory(
             }
             registeredName = serviceInfo.serviceName
             registrationActive = true
+            registrationRetryAttempt = 0
             Log.i(
                 TAG,
                 "Published AppleMIDI service ${serviceInfo.serviceName} on $controlPort " +
@@ -80,11 +84,13 @@ internal class NsdDirectory(
             registrationRequested = false
             registrationActive = false
             Log.w(TAG, "Could not publish AppleMIDI service: NSD error $errorCode")
+            scheduleRegistrationRetry()
         }
 
         override fun onServiceUnregistered(serviceInfo: NsdServiceInfo) {
             registrationRequested = false
             registrationActive = false
+            if (!closed) scheduleRegistrationRetry()
         }
 
         override fun onUnregistrationFailed(serviceInfo: NsdServiceInfo, errorCode: Int) {
@@ -142,35 +148,7 @@ internal class NsdDirectory(
         mainHandler.post {
             if (closed) return@post
             acquireMulticastLock()
-            if (!registrationActive && !registrationRequested) {
-                val registrationHost = registrationHostAddress()
-                if (addressPolicy == AppleMidiAddressPolicy.IPV4_ONLY && registrationHost == null) {
-                    Log.w(TAG, "Could not publish AppleMIDI service: no private IPv4 LAN address")
-                } else {
-                    val info = NsdServiceInfo().apply {
-                        serviceName = requestedName
-                        serviceType = SERVICE_TYPE
-                        port = controlPort
-                        // Pin the service target to the selected IPv4 address. The device hostname
-                        // may still have an AAAA record; discovery applies the same IPv4 filter.
-                        registrationHost?.let(::setHost)
-                        AppleMidiBonjourMetadata.modelForPublishing(deviceModel)?.let { model ->
-                            setAttribute(AppleMidiBonjourMetadata.MODEL_KEY, model)
-                        }
-                    }
-                    registrationRequested = true
-                    runCatching {
-                        nsdManager.registerService(
-                            info,
-                            NsdManager.PROTOCOL_DNS_SD,
-                            registrationListener,
-                        )
-                    }.onFailure { error ->
-                        registrationRequested = false
-                        Log.w(TAG, "Could not start AppleMIDI publishing", error)
-                    }
-                }
-            }
+            requestRegistration()
             if (!discoveryActive && !discoveryRequested) {
                 discoveryRequested = true
                 runCatching {
@@ -187,6 +165,53 @@ internal class NsdDirectory(
         }
     }
 
+    /** Registration can race Wi-Fi address assignment during process boot. */
+    @Suppress("DEPRECATION")
+    private fun requestRegistration() {
+        if (closed || registrationActive || registrationRequested) return
+        val registrationHost = registrationHostAddress()
+        if (addressPolicy == AppleMidiAddressPolicy.IPV4_ONLY && registrationHost == null) {
+            Log.w(TAG, "Could not publish AppleMIDI service: no private IPv4 LAN address")
+            scheduleRegistrationRetry()
+            return
+        }
+        val info = NsdServiceInfo().apply {
+            serviceName = requestedName
+            serviceType = SERVICE_TYPE
+            port = controlPort
+            // Pin the service target to the selected IPv4 address. The device hostname
+            // may still have an AAAA record; discovery applies the same IPv4 filter.
+            registrationHost?.let(::setHost)
+            AppleMidiBonjourMetadata.modelForPublishing(deviceModel)?.let { model ->
+                setAttribute(AppleMidiBonjourMetadata.MODEL_KEY, model)
+            }
+        }
+        registrationRequested = true
+        runCatching {
+            nsdManager.registerService(
+                info,
+                NsdManager.PROTOCOL_DNS_SD,
+                registrationListener,
+            )
+        }.onFailure { error ->
+            registrationRequested = false
+            Log.w(TAG, "Could not start AppleMIDI publishing", error)
+            scheduleRegistrationRetry()
+        }
+    }
+
+    private fun scheduleRegistrationRetry() {
+        if (closed || registrationActive || registrationRequested || registrationRetryScheduled) return
+        val index = registrationRetryAttempt.coerceAtMost(REGISTRATION_RETRY_DELAYS_MILLIS.lastIndex)
+        registrationRetryAttempt = (registrationRetryAttempt + 1)
+            .coerceAtMost(REGISTRATION_RETRY_DELAYS_MILLIS.lastIndex)
+        registrationRetryScheduled = true
+        mainHandler.postDelayed({
+            registrationRetryScheduled = false
+            requestRegistration()
+        }, REGISTRATION_RETRY_DELAYS_MILLIS[index])
+    }
+
     @Suppress("DEPRECATION")
     private fun resolveNext() {
         if (closed || resolving) return
@@ -200,6 +225,7 @@ internal class NsdDirectory(
                     override fun onResolveFailed(serviceInfo: NsdServiceInfo, errorCode: Int) {
                         resolving = false
                         Log.d(TAG, "Could not resolve ${serviceInfo.serviceName}: NSD error $errorCode")
+                        retryResolution(pending)
                         resolveNext()
                     }
 
@@ -210,9 +236,11 @@ internal class NsdDirectory(
                             val host = selectAppleMidiAddress(addresses, addressPolicy)
                             val resolutionIsCurrent =
                                 discoveryGenerations[pending.identity] == pending.generation
-                            if (!closed && resolutionIsCurrent && host != null &&
+                            val isOwnParticipant = host != null &&
                                 port in 1 until 65_535 &&
-                                !isThisParticipant(serviceInfo.serviceName, host, port, localName)
+                                isThisParticipant(serviceInfo.serviceName, host, port, localName)
+                            if (!closed && resolutionIsCurrent && host != null &&
+                                port in 1 until 65_535 && !isOwnParticipant
                             ) {
                                 onResolved(
                                     ResolvedAppleMidiService(
@@ -226,11 +254,12 @@ internal class NsdDirectory(
                                         }.getOrNull(),
                                     ),
                                 )
-                            } else if (!closed && resolutionIsCurrent && host == null) {
+                            } else if (!closed && resolutionIsCurrent && !isOwnParticipant) {
                                 Log.d(
                                     TAG,
-                                    "Ignoring ${serviceInfo.serviceName}: no private IPv4 address",
+                                    "Ignoring ${serviceInfo.serviceName}: unresolved LAN address",
                                 )
+                                retryResolution(pending)
                             }
                             resolving = false
                             resolveNext()
@@ -241,8 +270,21 @@ internal class NsdDirectory(
         }.onFailure { error ->
             resolving = false
             Log.d(TAG, "Could not queue AppleMIDI resolution", error)
+            retryResolution(pending)
             resolveNext()
         }
+    }
+
+    private fun retryResolution(pending: PendingResolution) {
+        if (closed || discoveryGenerations[pending.identity] != pending.generation) return
+        val attempt = pending.attempt + 1
+        val delayIndex = attempt.coerceAtMost(RESOLUTION_RETRY_DELAYS_MILLIS.lastIndex)
+        mainHandler.postDelayed({
+            if (closed || discoveryGenerations[pending.identity] != pending.generation) return@postDelayed
+            resolutionQueue.removeAll { it.identity == pending.identity }
+            resolutionQueue.addLast(pending.copy(attempt = attempt))
+            resolveNext()
+        }, RESOLUTION_RETRY_DELAYS_MILLIS[delayIndex])
     }
 
     /**
@@ -256,24 +298,24 @@ internal class NsdDirectory(
         serviceInfo: NsdServiceInfo,
         callback: (List<InetAddress>) -> Unit,
     ) {
-        val advertised = if (Build.VERSION.SDK_INT >= 34) {
-            serviceInfo.hostAddresses
-        } else {
-            listOfNotNull(serviceInfo.host)
-        }
+        // Some Android releases report an empty hostAddresses list for an mDNS
+        // target even though the legacy host field already contains the resolved
+        // IPv4 address. Keep both sources so `.local` DNS resolution is only a
+        // fallback, not a prerequisite for discovering the peer.
+        val advertised = LinkedHashSet<InetAddress>().apply {
+            if (Build.VERSION.SDK_INT >= 34) addAll(serviceInfo.hostAddresses)
+            serviceInfo.host?.let(::add)
+        }.toList()
         val hostname = if (Build.VERSION.SDK_INT >= 34) serviceInfo.hostname else null
         runCatching {
             addressResolver.execute {
                 val expanded = LinkedHashSet<InetAddress>()
                 advertised.forEach { address ->
                     expanded += address
-                    expandHostname(address.hostName).forEach(expanded::add)
+                    expandHostnameVariants(address.hostName).forEach(expanded::add)
                 }
                 hostname?.takeIf(String::isNotBlank)?.let { name ->
-                    expandHostname(name).forEach(expanded::add)
-                    if (!name.endsWith(".local", ignoreCase = true)) {
-                        expandHostname("$name.local").forEach(expanded::add)
-                    }
+                    expandHostnameVariants(name).forEach(expanded::add)
                 }
                 mainHandler.post { callback(expanded.toList()) }
             }
@@ -288,6 +330,16 @@ internal class NsdDirectory(
         return runCatching { InetAddress.getAllByName(hostname).toList() }
             .onFailure { error -> Log.d(TAG, "Could not resolve AppleMIDI host $hostname", error) }
             .getOrDefault(emptyList())
+    }
+
+    private fun expandHostnameVariants(hostname: String): List<InetAddress> {
+        if (hostname.isBlank()) return emptyList()
+        val addresses = LinkedHashSet<InetAddress>()
+        expandHostname(hostname).forEach(addresses::add)
+        if (!hostname.endsWith(".local", ignoreCase = true)) {
+            expandHostname("$hostname.local").forEach(addresses::add)
+        }
+        return addresses.toList()
     }
 
     private fun acquireMulticastLock() {
@@ -351,6 +403,7 @@ internal class NsdDirectory(
             discoveryGenerations.clear()
             if (discoveryActive) runCatching { nsdManager.stopServiceDiscovery(discoveryListener) }
             if (registrationActive) runCatching { nsdManager.unregisterService(registrationListener) }
+            mainHandler.removeCallbacksAndMessages(null)
             discoveryActive = false
             registrationActive = false
             runCatching { multicastLock?.release() }
@@ -362,6 +415,8 @@ internal class NsdDirectory(
     companion object {
         const val SERVICE_TYPE = "_apple-midi._udp."
         private const val TAG = "AppleMidiNsd"
+        private val REGISTRATION_RETRY_DELAYS_MILLIS = longArrayOf(250, 1_000, 3_000, 10_000)
+        private val RESOLUTION_RETRY_DELAYS_MILLIS = longArrayOf(250, 1_000, 3_000, 10_000)
 
         fun serviceIdentity(name: String, type: String): String {
             val canonical = "$name\u0000${type.trimEnd('.').lowercase()}"

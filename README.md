@@ -40,7 +40,7 @@ Android 乐谱播放由 `XenSynthPlaybackService` 持有 Android MediaSession。
 
 设置面板的 `MIDI` 区域提供独立的 `MIDI input` 和 `MIDI output` 开关。关闭输入会断开外接 MIDI 接收，关闭输出会立即向已输出的音符发送 Note Off / All Notes Off，然后阻止键盘和乐谱继续向外发送。
 
-`RTP-MIDI / AppleMIDI` 使用 Bonjour `_apple-midi._udp` 自动发现，并通过动态连续 UDP 控制/数据端口建立双向会话。发现的 XenSynth、JustPiano 或系统 AppleMIDI 端点会显示在 `NETWORK MIDI DESTINATIONS` 中，可同时选择多个目标；不再提供固定 host/port 或裸 UDP 兼容路径。Android 使用内置 RTP-MIDI 会话库，iOS 使用系统 CoreMIDI Network Session。蓝牙输出列表仍来自系统已连接的 MIDI 目的地，各类输出可同时启用。
+`RTP-MIDI / AppleMIDI` 使用 Bonjour `_apple-midi._udp` 自动发现，并从 5004/5005 开始按序选择可用的连续 UDP 控制/数据端口建立双向会话。发现的 XenSynth、JustPiano 或系统 AppleMIDI 端点会显示在 `NETWORK MIDI DESTINATIONS` 中，可同时选择多个目标；不再提供固定 host/port 或裸 UDP 兼容路径。Android 使用内置 RTP-MIDI 会话库，iOS 使用系统 CoreMIDI Network Session。蓝牙输出列表仍来自系统已连接的 MIDI 目的地，各类输出可同时启用。
 
 ## 环境要求
 

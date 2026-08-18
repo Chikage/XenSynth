@@ -36,6 +36,7 @@ void main() {
 
       final titleFinder = find.text('UwU Funk in 26edo');
       final progressFinder = find.text('126.0 BPM | 4/4 | 0:12/2:01');
+      expect(find.text('UwU Funk in 26edo.midx'), findsNothing);
       final titleText = tester.widget<Text>(titleFinder);
       final progressText = tester.widget<Text>(progressFinder);
       for (final text in [titleText, progressText]) {
@@ -541,7 +542,7 @@ ControlToolbar _controlToolbar({
   VoidCallback? onHexKeyboardInteraction,
 }) {
   return ControlToolbar(
-    title: 'UwU Funk in 26edo',
+    title: 'UwU Funk in 26edo.midx',
     status: 'MIDX · 128 NOTES',
     playing: false,
     loading: false,

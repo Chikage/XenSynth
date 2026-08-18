@@ -5,7 +5,6 @@ import java.net.Inet4Address
 import java.net.InetSocketAddress
 import java.net.StandardProtocolFamily
 import java.nio.channels.DatagramChannel
-import java.security.SecureRandom
 
 internal data class UdpPortPair(
     val control: DatagramSocket,
@@ -23,26 +22,27 @@ internal data class UdpPortPair(
     companion object {
         const val FIXED_CONTROL_PORT = 5_004
         const val FIXED_DATA_PORT = 5_005
-        private const val FIRST_DYNAMIC_PORT = 49_152
+        private const val PORT_PAIR_SIZE = 2
         private const val LAST_CONTROL_PORT = 65_534
 
         /**
-         * Prefers 5004/5005, then reserves a passive-receive fallback pair if they are occupied.
+         * Tries consecutive control/data pairs in order: 5004/5005, 5006/5007, and so on.
+         * Every bound pair is a valid AppleMIDI transport; [isFixedPortCapable] only reports whether
+         * the preferred pair was available to help diagnose competing MIDI applications.
          *
          * [ipv4Only] deliberately defaults to true. Android's ordinary DatagramSocket wildcard
          * constructor can select an IPv6 socket, even when an IPv4 address is supplied to bind();
          * using an INET DatagramChannel makes the address family deterministic for both ports.
          */
         fun bind(
-            random: SecureRandom = SecureRandom(),
             ipv4Only: Boolean = true,
         ): UdpPortPair {
-            bindPair(FIXED_CONTROL_PORT, isFixedPortCapable = true, ipv4Only = ipv4Only)
-                ?.let { return it }
-            repeat(512) {
-                val controlPort = FIRST_DYNAMIC_PORT +
-                    random.nextInt(LAST_CONTROL_PORT - FIRST_DYNAMIC_PORT + 1)
-                bindPair(controlPort, isFixedPortCapable = false, ipv4Only = ipv4Only)
+            for (controlPort in FIXED_CONTROL_PORT..LAST_CONTROL_PORT step PORT_PAIR_SIZE) {
+                bindPair(
+                    controlPort = controlPort,
+                    isFixedPortCapable = controlPort == FIXED_CONTROL_PORT,
+                    ipv4Only = ipv4Only,
+                )
                     ?.let { return it }
             }
             throw IllegalStateException("Could not reserve consecutive UDP ports for AppleMIDI")

@@ -3,8 +3,9 @@
 `rtpmidi` is a reusable Android library for AppleMIDI sessions on a local network. It publishes
 and browses `_apple-midi._udp.`, prefers the standard UDP 5004/5005 control/data pair, and
 implements the AppleMIDI invitation, clock synchronization, receiver-feedback, and RTP-MIDI
-packet formats. If the fixed pair is occupied, it binds a random consecutive pair for passive
-receive sessions and disables locally initiated sessions and user MIDI output.
+packet formats. If that pair is occupied, it tries 5006/5007, 5008/5009, and subsequent pairs in
+order. Every successfully bound pair supports incoming sessions, locally initiated sessions, and
+user MIDI output.
 
 It does not implement or accept XenSynth's former raw UDP/JSON discovery protocol.
 
@@ -80,6 +81,7 @@ SysEx, or MIDI 2.0 UMP. Chapter C recovery protection is intentionally limited t
 and CC123-127; CC122 Local Control remains outside this subset. Chapter N does not add Chapter E
 protection for overlapping Note Ons on the same key. If a loss packet carries an unsupported or
 uncovered journal, the receiver falls back to releasing its
-tracked notes and sustain state. The manager prefers the standard 5004/5005 receive pair; if those
-ports are occupied it advertises a random consecutive pair in passive-receive mode and blocks
-active invitations and user MIDI output.
+tracked notes and sustain state. The manager prefers the standard 5004/5005 pair; if those ports
+are occupied it advertises the first available sequential pair and keeps active invitations and
+user MIDI output enabled. The `isFixedPortCapable` diagnostic only reports whether the preferred
+pair was available.

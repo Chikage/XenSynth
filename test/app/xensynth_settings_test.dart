@@ -102,8 +102,9 @@ void main() {
       expect(repaired.toMap()['hexRDirection'], repaired.hexRDirection.index);
     });
 
-    test('changing EDO synchronizes period and clamps both steps', () {
+    test('changing EDO in hex mode selects scaled coprime prime steps', () {
       const settings = XenSynthSettings(
+        layoutMode: KeyboardLayoutMode.hexagonal,
         edo: 53,
         hexPeriod: 99,
         hexStepQ: 52,
@@ -112,13 +113,102 @@ void main() {
 
       final sevenEdo = settings.withEdo(7);
       expect(sevenEdo.hexPeriod, 7);
-      expect(sevenEdo.hexStepQ, 6);
-      expect(sevenEdo.hexStepR, 6);
+      expect(sevenEdo.hexStepQ, 2);
+      expect(sevenEdo.hexStepR, 3);
 
       final free = sevenEdo.withEdo(0);
       expect(free.hexPeriod, 12);
-      expect(free.hexStepQ, 1);
-      expect(free.hexStepR, 1);
+      expect(free.hexStepQ, 5);
+      expect(free.hexStepR, 2);
+    });
+
+    test('recomputes hex steps after a multi-digit EDO is typed', () {
+      const settings = XenSynthSettings(
+        layoutMode: KeyboardLayoutMode.hexagonal,
+      );
+
+      final firstDigit = settings.withEdo(1);
+      expect(firstDigit.hexStepQ, 1);
+      expect(firstDigit.hexStepR, -1);
+
+      final completedValue = firstDigit.withEdo(19);
+      expect(completedValue.hexStepQ, 7);
+      expect(completedValue.hexStepR, 3);
+    });
+
+    test('uses traversable fallbacks where two primes cannot fit', () {
+      const settings = XenSynthSettings(
+        layoutMode: KeyboardLayoutMode.hexagonal,
+      );
+
+      final expected = <int, (int, int)>{1: (1, -1), 2: (1, -1), 3: (2, 1)};
+      for (final entry in expected.entries) {
+        final changed = settings.withEdo(entry.key);
+        expect((changed.hexStepQ, changed.hexStepR), entry.value);
+        final pitchClasses = <int>{
+          for (var q = 0; q < entry.key; q++)
+            for (var r = 0; r < entry.key; r++)
+              (q * changed.hexStepQ + r * changed.hexStepR) % entry.key,
+        };
+        expect(pitchClasses, hasLength(entry.key), reason: 'EDO ${entry.key}');
+      }
+    });
+
+    test('does not replace hidden hex steps while in linear mode', () {
+      const settings = XenSynthSettings(edo: 53, hexStepQ: 52, hexStepR: 20);
+
+      final changed = settings.withEdo(7);
+      expect(changed.hexStepQ, 6);
+      expect(changed.hexStepR, 6);
+    });
+
+    test('recommended hex steps scale with the effective EDO period', () {
+      const settings = XenSynthSettings(
+        layoutMode: KeyboardLayoutMode.hexagonal,
+        edo: 3,
+      );
+
+      final expected = <int, (int, int)>{
+        0: (5, 2),
+        12: (5, 2),
+        19: (7, 3),
+        26: (11, 5),
+        53: (19, 7),
+        72: (23, 11),
+      };
+      for (final entry in expected.entries) {
+        final changed = settings.withEdo(entry.key);
+        expect(
+          (changed.hexStepQ, changed.hexStepR),
+          entry.value,
+          reason: 'EDO ${entry.key}',
+        );
+      }
+    });
+
+    test('recommended prime steps traverse every EDO pitch class', () {
+      const settings = XenSynthSettings(
+        layoutMode: KeyboardLayoutMode.hexagonal,
+        edo: 3,
+      );
+
+      for (final edo in <int>[
+        0,
+        for (var value = 4; value <= 72; value++) value,
+      ]) {
+        final changed = settings.withEdo(edo);
+        final period = changed.hexPeriod;
+        expect(_isPrime(changed.hexStepQ), isTrue, reason: 'Q at EDO $edo');
+        expect(_isPrime(changed.hexStepR), isTrue, reason: 'R at EDO $edo');
+        expect(changed.hexStepQ, isNot(changed.hexStepR), reason: 'EDO $edo');
+
+        final pitchClasses = <int>{
+          for (var q = 0; q < period; q++)
+            for (var r = 0; r < period; r++)
+              (q * changed.hexStepQ + r * changed.hexStepR) % period,
+        };
+        expect(pitchClasses, hasLength(period), reason: 'EDO $edo');
+      }
     });
 
     test('reads legacy maps while applying current effective ranges', () {
@@ -315,4 +405,12 @@ void main() {
       expect(cabinet.toMap()['spatialProjection'], 'cabinet');
     });
   });
+}
+
+bool _isPrime(int value) {
+  if (value < 2) return false;
+  for (var divisor = 2; divisor * divisor <= value; divisor++) {
+    if (value % divisor == 0) return false;
+  }
+  return true;
 }

@@ -45,6 +45,7 @@ class XenSynthController extends ChangeNotifier {
   double _microphoneTakeDuration = 0;
   int _pitchInputSequence = 0;
   bool _scoreVisualizationSuppressed = false;
+  int _scoreVisualizationSuppressionGeneration = 0;
 
   XenSynthSettings settings = const XenSynthSettings();
   TuningDefinition tuning = TuningDefinition.standard;
@@ -263,6 +264,7 @@ class XenSynthController extends ChangeNotifier {
     if (recordingTransportLocked) return;
     final currentScore = score;
     if (duration <= 0 || (!_microphoneTake && currentScore == null)) return;
+    final suppressionGeneration = _scoreVisualizationSuppressionGeneration;
     _clearSeekGestureState();
     if (playhead >= duration - 0.001) playhead = 0;
     visualPlayhead = playhead;
@@ -284,6 +286,9 @@ class XenSynthController extends ChangeNotifier {
           audioStartDelaySeconds: settings.audioLatencyMs / 1000,
         );
       }
+      if (_restoreScoreVisualizationAfterPlaybackStart(suppressionGeneration)) {
+        notifyListeners();
+      }
     } catch (error) {
       if (_microphoneTake) {
         playing = false;
@@ -291,6 +296,7 @@ class XenSynthController extends ChangeNotifier {
         _stopClock();
         _setStatus('PLAYBACK FAILED · $error');
       } else {
+        _restoreScoreVisualizationAfterPlaybackStart(suppressionGeneration);
         _continueVisualPlaybackAfterAudioError(error);
       }
     }
@@ -312,6 +318,7 @@ class XenSynthController extends ChangeNotifier {
 
   Future<void> syncPlaybackState() async {
     if (_microphoneTake) return;
+    final suppressionGeneration = _scoreVisualizationSuppressionGeneration;
     final state = await _native.getPlaybackState();
     if (state.isEmpty) return;
     final nativePosition = _finiteDouble(state['position']);
@@ -323,6 +330,7 @@ class XenSynthController extends ChangeNotifier {
     playing = nativePlaying;
     waterfallAnimating = nativePlaying;
     if (nativePlaying) {
+      _restoreScoreVisualizationAfterPlaybackStart(suppressionGeneration);
       _startPlaybackClock();
     } else {
       _stopClock();
@@ -419,6 +427,7 @@ class XenSynthController extends ChangeNotifier {
       notifyListeners();
       return;
     }
+    final suppressionGeneration = _scoreVisualizationSuppressionGeneration;
     playing = true;
     waterfallAnimating = true;
     visualPlayhead = playhead;
@@ -438,6 +447,9 @@ class XenSynthController extends ChangeNotifier {
           audioStartDelaySeconds: settings.audioLatencyMs / 1000,
         );
       }
+      if (_restoreScoreVisualizationAfterPlaybackStart(suppressionGeneration)) {
+        notifyListeners();
+      }
     } catch (error) {
       if (_microphoneTake) {
         playing = false;
@@ -445,6 +457,7 @@ class XenSynthController extends ChangeNotifier {
         _stopClock();
         _setStatus('PLAYBACK FAILED · $error');
       } else {
+        _restoreScoreVisualizationAfterPlaybackStart(suppressionGeneration);
         _continueVisualPlaybackAfterAudioError(error);
       }
     }
@@ -961,6 +974,7 @@ class XenSynthController extends ChangeNotifier {
     bool nativeAudioHandled = false,
   }) {
     _scoreVisualizationSuppressed = true;
+    _scoreVisualizationSuppressionGeneration++;
     final targetPitch = playbackPitch + settings.appliedPitchOffsetCents / 100;
     final nextActive = Map<int, double>.from(activePitches)
       ..[pointer] = playbackPitch;
@@ -1729,6 +1743,17 @@ class XenSynthController extends ChangeNotifier {
   void _setStatus(String value) {
     status = value.toUpperCase();
     notifyListeners();
+  }
+
+  bool _restoreScoreVisualizationAfterPlaybackStart(int generation) {
+    if (generation != _scoreVisualizationSuppressionGeneration ||
+        !_scoreVisualizationSuppressed ||
+        score == null ||
+        duration <= 0) {
+      return false;
+    }
+    _scoreVisualizationSuppressed = false;
+    return true;
   }
 
   void _continueVisualPlaybackAfterAudioError(Object error) {

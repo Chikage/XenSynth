@@ -408,6 +408,7 @@ class _ScoreSummary extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final safeBpm = bpm.isFinite && bpm > 0 ? bpm : 120.0;
+    final displayTitle = _fileNameWithoutExtension(title);
     final playbackSummary =
         '${safeBpm.toStringAsFixed(1)} BPM | '
         '$meterNumerator/$meterDenominator | '
@@ -436,7 +437,7 @@ class _ScoreSummary extends StatelessWidget {
               ConstrainedBox(
                 constraints: const BoxConstraints(maxWidth: 192),
                 child: Text(
-                  title,
+                  displayTitle,
                   maxLines: 1,
                   overflow: TextOverflow.clip,
                   textAlign: TextAlign.end,
@@ -464,6 +465,11 @@ class _ScoreSummary extends StatelessWidget {
     final minutes = totalSeconds ~/ 60;
     final remainder = totalSeconds % 60;
     return '$minutes:${remainder.toString().padLeft(2, '0')}';
+  }
+
+  static String _fileNameWithoutExtension(String value) {
+    final extensionStart = value.lastIndexOf('.');
+    return extensionStart > 0 ? value.substring(0, extensionStart) : value;
   }
 }
 

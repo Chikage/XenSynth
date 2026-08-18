@@ -46,7 +46,7 @@ class AppleMidiManagerTest {
     }
 
     @Test
-    fun activeTransportRequiresRunningManagerAndFixedPortPair() {
+    fun activeTransportRequiresRunningManagerAndHealthyPortPair() {
         val first = DatagramSocket()
         val second = DatagramSocket()
         val fixed = UdpPortPair(first, second, isFixedPortCapable = true)
@@ -80,7 +80,7 @@ class AppleMidiManagerTest {
             isFixedPortCapable = false,
         )
         fallback.use {
-            assertFalse(
+            assertTrue(
                 activeMidiTransportAllowed(
                     running = true,
                     portPair = fallback,

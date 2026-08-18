@@ -44,15 +44,33 @@ class UdpPortPairTest {
     }
 
     @Test
-    fun fallsBackToPassiveConsecutivePortsWhenFixedPairIsOccupied() {
+    fun fallsBackToNextConsecutivePairWhenFixedPairIsOccupied() {
         DatagramSocket(null).use { occupied ->
             occupied.reuseAddress = false
             occupied.bind(InetSocketAddress(UdpPortPair.FIXED_CONTROL_PORT))
 
             UdpPortPair.bind().use { pair ->
                 assertFalse(pair.isFixedPortCapable)
-                assertEquals(pair.controlPort + 1, pair.dataPort)
-                assertTrue(pair.controlPort >= 49_152)
+                assertEquals(5_006, pair.controlPort)
+                assertEquals(5_007, pair.dataPort)
+            }
+        }
+    }
+
+    @Test
+    fun keepsTryingPortPairsInOrder() {
+        DatagramSocket(null).use { occupiedFixed ->
+            occupiedFixed.reuseAddress = false
+            occupiedFixed.bind(InetSocketAddress(UdpPortPair.FIXED_CONTROL_PORT))
+            DatagramSocket(null).use { occupiedFirstFallback ->
+                occupiedFirstFallback.reuseAddress = false
+                occupiedFirstFallback.bind(InetSocketAddress(5_006))
+
+                UdpPortPair.bind().use { pair ->
+                    assertFalse(pair.isFixedPortCapable)
+                    assertEquals(5_008, pair.controlPort)
+                    assertEquals(5_009, pair.dataPort)
+                }
             }
         }
     }
@@ -65,7 +83,8 @@ class UdpPortPairTest {
 
             UdpPortPair.bind().use { fallback ->
                 assertFalse(fallback.isFixedPortCapable)
-                assertEquals(fallback.controlPort + 1, fallback.dataPort)
+                assertEquals(5_006, fallback.controlPort)
+                assertEquals(5_007, fallback.dataPort)
 
                 DatagramSocket(null).use { controlProbe ->
                     controlProbe.reuseAddress = false

@@ -401,7 +401,7 @@ void main() {
   });
 
   testWidgets(
-    'live notes hide score visuals in every layout until a new score loads',
+    'playback or a new score restores visuals hidden by live notes',
     (tester) async {
       const nativeChannel = MethodChannel('icu.ringona.xensynth/platform');
       final messenger =
@@ -452,6 +452,18 @@ void main() {
         expect(displayedScore(), isNull, reason: mode.name);
 
         controller.noteUp(101);
+        await tester.pump();
+        expect(displayedScore(), isNull, reason: mode.name);
+        expect(controller.scoreVisualizationSuppressed, isTrue);
+
+        await controller.play();
+        await tester.pump();
+        expect(displayedScore(), same(_loadedScore), reason: mode.name);
+        expect(controller.scoreVisualizationSuppressed, isFalse);
+
+        await controller.pause();
+        controller.noteDown(102, 67, 80);
+        controller.noteUp(102);
         await tester.pump();
         expect(displayedScore(), isNull, reason: mode.name);
         expect(controller.scoreVisualizationSuppressed, isTrue);

@@ -118,14 +118,16 @@ class RunnerTests: XCTestCase {
     wait(for: [completed], timeout: 2)
   }
 
-  func testAppleMIDIPortPolicyAllowsActiveTransportOnFixedPorts() {
-    XCTAssertTrue(AppleMIDIPortPolicy.allowsActiveTransport(
-      sessionEnabled: true,
-      networkPort: 5_004
-    ))
+  func testAppleMIDIPortPolicyAllowsActiveTransportOnSequentialPortPairs() {
+    for port in [5_004, 5_006, 5_008, 54_618, 65_534] {
+      XCTAssertTrue(AppleMIDIPortPolicy.allowsActiveTransport(
+        sessionEnabled: true,
+        networkPort: port
+      ))
+    }
   }
 
-  func testAppleMIDIPortPolicyRejectsDisabledOrFallbackSessions() {
+  func testAppleMIDIPortPolicyRejectsDisabledOrInvalidSessions() {
     XCTAssertFalse(AppleMIDIPortPolicy.allowsActiveTransport(
       sessionEnabled: false,
       networkPort: 5_004
@@ -136,7 +138,11 @@ class RunnerTests: XCTestCase {
     ))
     XCTAssertFalse(AppleMIDIPortPolicy.allowsActiveTransport(
       sessionEnabled: true,
-      networkPort: 54_618
+      networkPort: 5_005
+    ))
+    XCTAssertFalse(AppleMIDIPortPolicy.allowsActiveTransport(
+      sessionEnabled: true,
+      networkPort: 65_535
     ))
   }
 
