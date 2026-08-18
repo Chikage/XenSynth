@@ -41,25 +41,39 @@ class AppleMidiManager(
     private val controlExecutor = Executors.newSingleThreadExecutor { runnable ->
         Thread(runnable, "AppleMidiControl").apply { isDaemon = true }
     }
+    /** Keeps potentially blocking data-socket writes off the timing scheduler while preserving RTP order. */
+    private val rtpSendExecutor = BoundedSerialExecutor(
+        capacity = RTP_SEND_QUEUE_CAPACITY,
+        threadName = "AppleMidiData",
+        criticalOverloadFallback = ::sendOverloadPanicNow,
+    )
     private val scheduler: ScheduledExecutorService =
         Executors.newSingleThreadScheduledExecutor { runnable ->
             Thread(runnable, "AppleMidiSession").apply { isDaemon = true }
         }
-    private data class PendingOutputMessage(
-        val timestampNanos: Long,
-        val bytes: ByteArray,
+    private val eventDeliveryLookaheadNanos = appleMidiDeliveryLookaheadNanos(
+        configuration,
+        listener,
     )
-
     private val pendingOutputLock = Any()
-    private val pendingOutputMessages = ArrayList<PendingOutputMessage>()
+    private val pendingOutput = MidiOutputAccumulator()
     private var outputFlushFuture: ScheduledFuture<*>? = null
+    private var outputFlushDeadlineNanos: Long? = null
     private val discovered = AppleMidiServiceRegistry()
     private val sessions = LinkedHashMap<String, AppleMidiSession>()
+    private val queuedJournalHeartbeats = LinkedHashSet<String>()
+    /** Peers that may receive locally generated RTP-MIDI output. */
     private val selectedPeerIds = LinkedHashSet<String>()
+    /** Peers that may initiate/keep an input session. */
+    private val selectedInputPeerIds = LinkedHashSet<String>()
+    private var inputSelectionConfigured = false
     private val scanWaiters = CopyOnWriteArrayList<CountDownLatch>()
     private var nextJitterWakeupNanos: Long? = null
     private var jitterWakeupGeneration = 0L
     private var jitterWakeupFuture: ScheduledFuture<*>? = null
+    private var gapWakeupGeneration = 0L
+    private var gapWakeupFuture: ScheduledFuture<*>? = null
+    private var nextGapWakeupNanos: Long? = null
 
     @Volatile
     private var running = false
@@ -76,11 +90,36 @@ class AppleMidiManager(
     val isFixedPortCapable: Boolean
         get() = synchronized(lock) { activeMidiTransportAllowedLocked() }
 
+    fun sessionStatistics(): List<AppleMidiSessionStatistics> = synchronized(lock) {
+        sessions.values.map(AppleMidiSession::statistics)
+    }
+
+    val transportStatistics: AppleMidiTransportStatistics
+        get() {
+            val send = rtpSendExecutor.statistics
+            val output = synchronized(pendingOutputLock) { pendingOutput.statistics }
+            return AppleMidiTransportStatistics(
+                queuedSendTasks = send.queuedTasks,
+                peakQueuedSendTasks = send.peakQueuedTasks,
+                droppedSendTasks = send.droppedTasks,
+                overloadPanicFallbacks = send.overloadFallbacks,
+                pendingMidiMessages = output.queuedMessages,
+                coalescedMidiMessages = output.coalescedMessages,
+                evictedContinuousMidiMessages = output.evictedContinuousMessages,
+                droppedContinuousMidiMessages = output.droppedContinuousMessages,
+                evictedNonCriticalMidiMessages = output.evictedNonCriticalMessages,
+                droppedNonCriticalMidiMessages = output.droppedNonCriticalMessages,
+                accumulatorPanicFallbacks = output.panicCount,
+            )
+        }
+
     fun start(): Boolean {
         synchronized(lock) {
             if (closed) return false
             if (running) return true
-            val pair = runCatching { UdpPortPair.bind(random) }
+            val pair = runCatching {
+                UdpPortPair.bind(random = random, ipv4Only = configuration.ipv4Only)
+            }
                 .onFailure { error -> Log.e(TAG, "Could not bind AppleMIDI UDP ports", error) }
                 .getOrNull()
                 ?: return false
@@ -105,6 +144,11 @@ class AppleMidiManager(
                 requestedName = configuration.serviceName,
                 controlPort = pair.controlPort,
                 deviceModel = configuration.deviceModel ?: Build.MODEL,
+                addressPolicy = if (configuration.ipv4Only) {
+                    AppleMidiAddressPolicy.IPV4_ONLY
+                } else {
+                    AppleMidiAddressPolicy.IPV4_PREFERRED
+                },
                 onResolved = ::onServiceResolved,
                 onLost = ::onServiceLost,
             ).also(NsdDirectory::start)
@@ -135,7 +179,10 @@ class AppleMidiManager(
             .sortedBy { it.name.lowercase() }
     }
 
-    /** Selected IDs are deduplicated peer identities returned by [scan], never IP:port strings. */
+    /**
+     * Selects the peers that may receive locally generated RTP-MIDI output.
+     * Input selection is managed independently by [setInputIds].
+     */
     fun setDestinationIds(ids: Collection<String>) {
         val servicesToConnect: List<AppleMidiServiceSnapshot>
         val sessionsToClose: List<AppleMidiSession>
@@ -144,14 +191,47 @@ class AppleMidiManager(
             selectedPeerIds += ids.filter { it.startsWith(DESTINATION_PREFIX) }
             val connectedEndpoints = connectedEndpointsLocked()
             servicesToConnect = if (activeMidiTransportAllowedLocked()) {
-                selectedPeerIds.mapNotNull { discovered.snapshot(it, connectedEndpoints) }
+                selectedConnectionPeerIdsLocked()
+                    .mapNotNull { discovered.snapshot(it, connectedEndpoints) }
             } else {
                 emptyList()
             }
-            // Destination selection controls local output; inbound sessions stay available.
             sessionsToClose = sessions.values.filter { session ->
                 session.initiatedLocally &&
-                    session.peerId != null && session.peerId !in selectedPeerIds
+                    session.peerId != null &&
+                    session.peerId !in selectedConnectionPeerIdsLocked()
+            }
+        }
+        sessionsToClose.forEach { closeSession(it, notifyRemote = true) }
+        servicesToConnect.forEach(::ensureOutgoingSession)
+        publishPeers()
+    }
+
+    /**
+     * Selects peers that may deliver MIDI into the app. When [configured] is
+     * false, passive input remains enabled for every peer for migration from
+     * the pre-directional settings model.
+     */
+    @JvmOverloads
+    fun setInputIds(ids: Collection<String>, configured: Boolean = true) {
+        val servicesToConnect: List<AppleMidiServiceSnapshot>
+        val sessionsToClose: List<AppleMidiSession>
+        synchronized(lock) {
+            inputSelectionConfigured = configured
+            selectedInputPeerIds.clear()
+            if (configured) {
+                selectedInputPeerIds += ids.filter { it.startsWith(DESTINATION_PREFIX) }
+            }
+            val selectedConnections = selectedConnectionPeerIdsLocked()
+            val connectedEndpoints = connectedEndpointsLocked()
+            servicesToConnect = if (activeMidiTransportAllowedLocked()) {
+                selectedConnections.mapNotNull { discovered.snapshot(it, connectedEndpoints) }
+            } else {
+                emptyList()
+            }
+            sessionsToClose = sessions.values.filter { session ->
+                session.initiatedLocally &&
+                    session.peerId != null && session.peerId !in selectedConnections
             }
         }
         sessionsToClose.forEach { closeSession(it, notifyRemote = true) }
@@ -172,24 +252,32 @@ class AppleMidiManager(
         }
         synchronized(pendingOutputLock) {
             if (!running) return
-            safeMessages.forEach { message ->
-                pendingOutputMessages += PendingOutputMessage(timestampNanos, message)
+            val now = System.nanoTime()
+            val result = pendingOutput.offer(safeMessages, timestampNanos, now)
+            val desiredDeadline = if (result.flushImmediately) {
+                now
+            } else {
+                pendingOutput.nextFlushDeadlineNanos() ?: return
             }
-            if (outputFlushFuture == null || outputFlushFuture?.isDone == true) {
-                val delay = if (pendingOutputMessages.size >= MAX_PENDING_OUTPUT_MESSAGES) {
-                    0L
-                } else {
-                    OUTPUT_BATCH_WINDOW_NANOS
-                }
+            val existing = outputFlushFuture
+            val alreadyImmediate = result.flushImmediately &&
+                outputFlushDeadlineNanos?.let { it <= now } == true &&
+                existing != null && !existing.isDone
+            if (!alreadyImmediate &&
+                (existing == null || existing.isDone || outputFlushDeadlineNanos != desiredDeadline)
+            ) {
+                existing?.cancel(false)
+                outputFlushDeadlineNanos = desiredDeadline
                 runCatching {
                     outputFlushFuture = scheduler.schedule(
                         ::flushPendingOutput,
-                        delay,
+                        (desiredDeadline - now).coerceAtLeast(0L),
                         TimeUnit.NANOSECONDS,
                     )
                 }.onFailure { error ->
                     outputFlushFuture = null
-                    pendingOutputMessages.clear()
+                    outputFlushDeadlineNanos = null
+                    pendingOutput.clear()
                     if (running) Log.w(TAG, "Could not queue RTP-MIDI output", error)
                 }
             }
@@ -198,14 +286,14 @@ class AppleMidiManager(
 
     /** Coalesces the burst of key events arriving within one audio-sized frame. */
     private fun flushPendingOutput() {
-        val messages: List<PendingOutputMessage>
+        val output: MidiOutputDrain
         synchronized(pendingOutputLock) {
             outputFlushFuture = null
-            if (pendingOutputMessages.isEmpty()) return
-            messages = pendingOutputMessages.toList()
-            pendingOutputMessages.clear()
+            outputFlushDeadlineNanos = null
+            if (pendingOutput.size == 0) return
+            output = pendingOutput.drain()
         }
-        sendRtpMidi(messages)
+        sendRtpMidi(output)
     }
 
     private fun onServiceResolved(service: ResolvedAppleMidiService) {
@@ -216,7 +304,8 @@ class AppleMidiManager(
             val peerId = discovered.upsert(service)
             sessions.values.filter { it.connectsTo(service) }.forEach { it.peerId = peerId }
             snapshot = discovered.snapshot(peerId, connectedEndpointsLocked()) ?: return
-            shouldConnect = peerId in selectedPeerIds && activeMidiTransportAllowedLocked()
+            shouldConnect = peerId in selectedConnectionPeerIdsLocked() &&
+                activeMidiTransportAllowedLocked()
         }
         scanWaiters.forEach(CountDownLatch::countDown)
         publishPeers()
@@ -230,7 +319,7 @@ class AppleMidiManager(
             val peerId = discovered.peerIdForInstance(instanceId)
             discovered.remove(instanceId)
             fallback = peerId?.let { discovered.snapshot(it, connectedEndpointsLocked()) }
-            shouldConnect = fallback != null && peerId in selectedPeerIds &&
+            shouldConnect = fallback != null && peerId in selectedConnectionPeerIdsLocked() &&
                 sessions.values.none {
                     it.peerId == peerId && it.state == AppleMidiSessionState.CONNECTED
                 } && activeMidiTransportAllowedLocked()
@@ -243,7 +332,9 @@ class AppleMidiManager(
         val service = snapshot.service
         val peerId = snapshot.id
         val obsolete = synchronized(lock) {
-            if (!activeMidiTransportAllowedLocked() || peerId !in selectedPeerIds) return
+            if (!activeMidiTransportAllowedLocked() ||
+                peerId !in selectedConnectionPeerIdsLocked()
+            ) return
             sessions.values.filter {
                 it.peerId == peerId && !it.connectsTo(service) &&
                     it.state != AppleMidiSessionState.CONNECTED
@@ -251,7 +342,8 @@ class AppleMidiManager(
         }
         obsolete.forEach { closeSession(it, notifyRemote = true) }
         val session = synchronized(lock) {
-            if (!activeMidiTransportAllowedLocked() || peerId !in selectedPeerIds ||
+            if (!activeMidiTransportAllowedLocked() ||
+                peerId !in selectedConnectionPeerIdsLocked() ||
                 sessions.size >= configuration.maximumSessions
             ) {
                 return
@@ -292,7 +384,7 @@ class AppleMidiManager(
         socket: DatagramSocket,
         dataChannel: Boolean,
     ) {
-        val buffer = ByteArray(MAX_DATAGRAM_BYTES)
+        val buffer = ByteArray(RECEIVE_BUFFER_BYTES)
         while (running && !socket.isClosed) {
             val datagram = DatagramPacket(buffer, buffer.size)
             try {
@@ -319,18 +411,19 @@ class AppleMidiManager(
     }
 
     private fun markTransportUnhealthy(pair: UdpPortPair, error: SocketException) {
-        val outgoingSessions = synchronized(lock) {
+        val affectedSessions = synchronized(lock) {
             if (!running || portPair !== pair || !transportHealthy) return
             transportHealthy = false
-            sessions.values.filter(AppleMidiSession::initiatedLocally).toList()
+            sessions.values.toList()
         }
         synchronized(pendingOutputLock) {
             outputFlushFuture?.cancel(false)
             outputFlushFuture = null
-            pendingOutputMessages.clear()
+            outputFlushDeadlineNanos = null
+            pendingOutput.clear()
         }
-        Log.e(TAG, "AppleMIDI UDP transport failed; active output is disabled", error)
-        outgoingSessions.forEach { closeSession(it, notifyRemote = false) }
+        Log.e(TAG, "AppleMIDI UDP transport failed; all sessions are being closed", error)
+        affectedSessions.forEach { closeSession(it, notifyRemote = false) }
         publishPeers()
     }
 
@@ -349,8 +442,14 @@ class AppleMidiManager(
                 handleClockSynchronization(packet, remote)
             is AppleMidiControlPacket.ReceiverFeedback -> {
                 synchronized(lock) {
-                    findSessionLocked(remote.address, ssrc = packet.ssrc)?.lastActivityNanos =
-                        System.nanoTime()
+                    selectReceiverFeedbackSession(
+                        sessions.values,
+                        remote,
+                        packet.ssrc,
+                    )?.let { session ->
+                        session.lastActivityNanos = System.nanoTime()
+                        session.acknowledgeOutgoingSequence(packet.sequenceNumber)
+                    }
                 }
             }
         }
@@ -535,9 +634,7 @@ class AppleMidiManager(
         remote: InetSocketAddress,
     ) {
         val session = synchronized(lock) {
-            findSessionLocked(remote.address, ssrc = packet.ssrc)?.takeIf {
-                it.remoteDataPort == remote.port
-            }
+            selectRtpMidiSession(sessions.values, remote, packet.ssrc)
         } ?: return
         val nowTicks = clockTicks()
         when (packet.count) {
@@ -635,6 +732,8 @@ class AppleMidiManager(
         val inviteAgain = mutableListOf<AppleMidiSession>()
         val synchronize = mutableListOf<AppleMidiSession>()
         val expired = mutableListOf<AppleMidiSession>()
+        val journalHeartbeats = mutableListOf<Pair<AppleMidiSession, Boolean>>()
+        val receiverFeedback = mutableListOf<Pair<AppleMidiSession, Int>>()
         synchronized(lock) {
             sessions.values.forEach { session ->
                 if (session.initiatedLocally &&
@@ -661,6 +760,23 @@ class AppleMidiManager(
                 ) {
                     expired += session
                 }
+                if (session.state == AppleMidiSessionState.CONNECTED) {
+                    val urgent = session.hasUnacknowledgedCriticalReleaseJournal
+                    val interval = if (urgent) {
+                        CRITICAL_RELEASE_HEARTBEAT_NANOS
+                    } else {
+                        JOURNAL_HEARTBEAT_NANOS
+                    }
+                    if (session.journalHeartbeatDue(now, interval)) {
+                        journalHeartbeats += session to urgent
+                    }
+                }
+                if (session.state == AppleMidiSessionState.CONNECTED) {
+                    session.takeReceiverFeedback(now, RECEIVER_FEEDBACK_INTERVAL_NANOS)
+                        ?.let { sequenceNumber ->
+                        receiverFeedback += session to sequenceNumber
+                    }
+                }
                 if (session.state != AppleMidiSessionState.CONNECTED &&
                     now - session.createdAtNanos >=
                     configuration.invitationTimeoutMillis * 2L * NANOS_PER_MILLI
@@ -672,6 +788,14 @@ class AppleMidiManager(
         inviteAgain.forEach { sendInvitation(it, dataChannel = it.controlAccepted) }
         synchronize.forEach(::sendClockRequest)
         expired.distinctBy { it.id }.forEach(::failSession)
+        journalHeartbeats
+            .filterNot { heartbeat -> expired.any { it.id == heartbeat.first.id } }
+            .forEach { (session, urgent) -> queueJournalHeartbeat(session, urgent) }
+        receiverFeedback
+            .filterNot { feedback -> expired.any { it.id == feedback.first.id } }
+            .forEach { (session, sequenceNumber) ->
+                sendReceiverFeedback(session, sequenceNumber)
+            }
         drainJitterBuffers(now)
     }
 
@@ -680,6 +804,7 @@ class AppleMidiManager(
         destination: InetSocketAddress,
         dataChannel: Boolean,
         sendAllowedLocked: (() -> Boolean)? = null,
+        onSentLocked: (() -> Unit)? = null,
     ) {
         val bytes = AppleMidiControlCodec.encode(packet)
         runCatching {
@@ -689,7 +814,10 @@ class AppleMidiManager(
                     portPair
                 } ?: return@execute
                 val socket = if (dataChannel) pair.data else pair.control
-                runCatching { socket.send(DatagramPacket(bytes, bytes.size, destination)) }
+                runCatching {
+                    socket.send(DatagramPacket(bytes, bytes.size, destination))
+                    synchronized(lock) { onSentLocked?.invoke() }
+                }
                     .onFailure { error ->
                         if (error is SocketException) {
                             markTransportUnhealthy(pair, error)
@@ -720,8 +848,10 @@ class AppleMidiManager(
             sendControl(by, session.controlAddress, dataChannel = false)
             sendControl(by, session.dataAddress, dataChannel = true)
         }
-        releaseSessionNotes(session)
-        listener.onSessionClosed(session.id)
+        session.closeDelivery {
+            releaseSessionNotes(session)
+            listener.onSessionClosed(session.id)
+        }
         if (!preserveFailedPeerState) publishPeers()
     }
 
@@ -795,12 +925,29 @@ class AppleMidiManager(
         activeMidiTransportAllowedLocked() &&
             sessions[session.id] === session &&
             session.initiatedLocally &&
-            session.peerId?.let(selectedPeerIds::contains) == true
+            session.peerId?.let(::isConnectionPeerSelectedLocked) == true
 
     private fun midiOutputAllowedLocked(session: AppleMidiSession): Boolean =
         activeMidiTransportAllowedLocked() &&
             sessions[session.id] === session &&
-            session.state == AppleMidiSessionState.CONNECTED
+            session.state == AppleMidiSessionState.CONNECTED &&
+            session.peerId?.let(selectedPeerIds::contains) == true
+
+    private fun isConnectionPeerSelectedLocked(peerId: String): Boolean =
+        peerId in selectedPeerIds ||
+            !inputSelectionConfigured ||
+            peerId in selectedInputPeerIds
+
+    private fun selectedConnectionPeerIdsLocked(): LinkedHashSet<String> =
+        LinkedHashSet<String>().apply {
+            addAll(selectedPeerIds)
+            if (!inputSelectionConfigured) {
+                // No explicit input selection means passive receive only. Do
+                // not actively connect every discovered peer on startup.
+            } else {
+                addAll(selectedInputPeerIds)
+            }
+        }
 
     private fun peerSnapshot(snapshot: AppleMidiServiceSnapshot): AppleMidiPeer {
         val service = snapshot.service
@@ -839,12 +986,18 @@ class AppleMidiManager(
             jitterWakeupFuture = null
             nextJitterWakeupNanos = null
             jitterWakeupGeneration += 1
+            gapWakeupFuture?.cancel(false)
+            gapWakeupFuture = null
+            nextGapWakeupNanos = null
+            gapWakeupGeneration += 1
         }
         synchronized(pendingOutputLock) {
             outputFlushFuture?.cancel(false)
             outputFlushFuture = null
-            pendingOutputMessages.clear()
+            outputFlushDeadlineNanos = null
+            pendingOutput.clear()
         }
+        rtpSendExecutor.close()
         active.forEach { closeSession(it, notifyRemote = true) }
         controlExecutor.shutdown()
         if (Thread.currentThread().name != "AppleMidiControl") {
@@ -860,8 +1013,11 @@ class AppleMidiManager(
             portPair = null
             discovered.clear()
             selectedPeerIds.clear()
+            queuedJournalHeartbeats.clear()
             nextJitterWakeupNanos = null
             jitterWakeupGeneration += 1
+            nextGapWakeupNanos = null
+            gapWakeupGeneration += 1
         }
         pair?.close()
         ioExecutor.shutdownNow()
@@ -871,78 +1027,97 @@ class AppleMidiManager(
         scanWaiters.clear()
     }
 
-    private fun sendRtpMidi(messages: List<PendingOutputMessage>) {
+    private data class PreparedRtpPacket(
+        val extendedSequenceNumber: Long,
+        val packet: RtpMidiPacket,
+        val bytes: ByteArray,
+    )
+
+    private fun sendRtpMidi(output: MidiOutputDrain) {
+        val critical = output.messages.any { isCriticalMidiRelease(it.bytes) }
+        rtpSendExecutor.execute(critical = critical) { sendRtpMidiNow(output) }
+    }
+
+    private fun sendRtpMidiNow(output: MidiOutputDrain) {
         val targets = synchronized(lock) {
             if (!activeMidiTransportAllowedLocked()) return
             sessions.values
-                .filter { it.state == AppleMidiSessionState.CONNECTED }
+                .filter { midiOutputAllowedLocked(it) }
                 .groupBy { it.peerId ?: it.id }
                 .values
                 .map { peerSessions -> peerSessions.maxBy(AppleMidiSession::lastActivityNanos) }
         }
-        val batches = buildList {
-            var batch = mutableListOf<PendingOutputMessage>()
-            var estimatedBytes = 0
-            var batchTimestampNanos: Long? = null
-            messages.sortedBy { it.timestampNanos }.forEach { message ->
-                // Keep the coalescing window bounded. The delta timestamps still preserve the
-                // ordering of Note On/Off pairs inside that window.
-                val messageBytes = message.bytes.size + if (batch.isEmpty()) 0 else 5
-                val exceedsTimeWindow = batchTimestampNanos?.let {
-                    message.timestampNanos - it > OUTPUT_BATCH_WINDOW_NANOS
-                } == true
-                if (batch.isNotEmpty() &&
-                    (estimatedBytes + messageBytes > MAX_COMMAND_BYTES || exceedsTimeWindow)
-                ) {
-                    add(batch)
-                    batch = mutableListOf()
-                    estimatedBytes = 0
-                    batchTimestampNanos = null
-                }
-                batch += message
-                batchTimestampNanos = batchTimestampNanos ?: message.timestampNanos
-                estimatedBytes += messageBytes
-            }
-            if (batch.isNotEmpty()) add(batch)
-        }
         targets.forEach { session ->
-            batches.forEach { batch -> sendRtpMidiToSession(session, batch) }
+            sendRtpMidiToSession(session, output)
         }
     }
 
     private fun sendRtpMidiToSession(
         session: AppleMidiSession,
-        messages: List<PendingOutputMessage>,
+        output: MidiOutputDrain,
     ) {
-        if (!synchronized(lock) { midiOutputAllowedLocked(session) }) return
-        val packet = buildRtpPacket(session, messages)
-        val bytes = RtpMidiCodec.encode(packet)
-        val pair = synchronized(lock) {
-            if (!midiOutputAllowedLocked(session)) return
-            portPair
-        } ?: return
-        runCatching {
-            pair.data.send(DatagramPacket(bytes, bytes.size, session.dataAddress))
-        }.onFailure { error ->
-            if (error is SocketException) {
-                markTransportUnhealthy(pair, error)
-            } else if (running) {
-                Log.d(TAG, "Could not send RTP-MIDI", error)
+        var cursor = 0
+        while (cursor < output.messages.size) {
+            if (!synchronized(lock) { midiOutputAllowedLocked(session) }) return
+            val firstTimestamp = output.messages[cursor].timestampNanos
+            val endExclusive = largestFittingMidiOutputPrefix(
+                messages = output.messages,
+                startIndex = cursor,
+                batchWindowNanos = output.batchWindowNanos,
+                maximumDatagramBytes = MAX_RTP_DATAGRAM_BYTES,
+                encodedSize = { candidate ->
+                    prepareRtpPacket(session, candidate, marker = true)?.bytes?.size
+                        ?: Int.MAX_VALUE
+                },
+            )
+            if (endExclusive == cursor) {
+                if (!sendRecoveryOverflowPanic(session, firstTimestamp)) return
+                continue
             }
+            val accepted = prepareRtpPacket(
+                session,
+                output.messages.subList(cursor, endExclusive),
+                marker = true,
+            ) ?: return
+            if (!transmitPreparedRtpPacket(session, accepted)) return
+            cursor = endExclusive
         }
     }
 
-    private fun buildRtpPacket(
+    private fun prepareRtpPacket(
         session: AppleMidiSession,
-        messages: List<PendingOutputMessage>,
-    ): RtpMidiPacket {
-        val sequence = synchronized(lock) {
-            session.nextSequence.also { session.nextSequence = (it + 1) and 0xFFFF }
+        messages: List<PendingMidiOutput>,
+        marker: Boolean,
+    ): PreparedRtpPacket? {
+        val sequenceAndJournal = synchronized(lock) {
+            if (!midiOutputAllowedLocked(session)) return null
+            val extended = session.nextOutgoingExtendedSequence
+            extended to session.recoveryJournalForPacket(extended)
         }
-        val firstTimestampNanos = messages.first().timestampNanos
+        val extendedSequence = sequenceAndJournal.first
+        val packet = buildRtpPacket(
+            extendedSequenceNumber = extendedSequence,
+            messages = messages,
+            marker = marker,
+            journal = sequenceAndJournal.second,
+        )
+        return PreparedRtpPacket(
+            extendedSequenceNumber = extendedSequence,
+            packet = packet,
+            bytes = RtpMidiCodec.encode(packet),
+        )
+    }
+
+    private fun buildRtpPacket(
+        extendedSequenceNumber: Long,
+        messages: List<PendingMidiOutput>,
+        marker: Boolean,
+        journal: ByteArray?,
+    ): RtpMidiPacket {
+        val firstTimestampNanos = messages.firstOrNull()?.timestampNanos ?: System.nanoTime()
         var previousTimestampNanos = firstTimestampNanos
         return RtpMidiPacket(
-            sequenceNumber = sequence,
+            sequenceNumber = (extendedSequenceNumber and 0xFFFF).toInt(),
             timestamp = rtpClock.timestampTicksForNanos(firstTimestampNanos) and UINT32_MASK,
             ssrc = localSsrc,
             commands = messages.map { pending ->
@@ -955,77 +1130,232 @@ class AppleMidiManager(
                     message = MidiChannelMessage.fromBytes(pending.bytes),
                 )
             },
-            marker = true,
+            marker = marker,
+            firstDeltaEncoded = false,
+            journal = journal,
         )
+    }
+
+    private fun transmitPreparedRtpPacket(
+        session: AppleMidiSession,
+        prepared: PreparedRtpPacket,
+    ): Boolean {
+        if (prepared.bytes.size > MAX_RTP_DATAGRAM_BYTES) return false
+        val pair = synchronized(lock) {
+            if (!midiOutputAllowedLocked(session) ||
+                session.nextOutgoingExtendedSequence != prepared.extendedSequenceNumber
+            ) {
+                return false
+            }
+            check(session.takeNextOutgoingSequence() == prepared.extendedSequenceNumber)
+            portPair
+        } ?: return false
+        val sent = runCatching {
+            pair.data.send(
+                DatagramPacket(prepared.bytes, prepared.bytes.size, session.dataAddress),
+            )
+            true
+        }.getOrElse { error ->
+            synchronized(lock) {
+                if (sessions[session.id] === session) session.recordOutgoingSendFailure()
+            }
+            if (error is SocketException) {
+                markTransportUnhealthy(pair, error)
+            } else if (running) {
+                Log.d(TAG, "Could not send RTP-MIDI", error)
+            }
+            false
+        }
+        if (sent) {
+            synchronized(lock) {
+                if (sessions[session.id] === session) {
+                    session.recordOutgoingPacket(
+                        packetExtendedSequence = prepared.extendedSequenceNumber,
+                        messages = prepared.packet.commands.map(TimedMidiMessage::message),
+                        sentAtNanos = System.nanoTime(),
+                    )
+                }
+            }
+        }
+        return sent
+    }
+
+    private fun sendRecoveryOverflowPanic(
+        session: AppleMidiSession,
+        timestampNanos: Long,
+    ): Boolean {
+        synchronized(lock) {
+            if (!midiOutputAllowedLocked(session)) return false
+            session.resetOutgoingRecoveryForPanic(session.nextOutgoingExtendedSequence)
+        }
+        val panic = MidiOutputAccumulator.fullPanic(timestampNanos)
+        val prepared = prepareRtpPacket(session, panic, marker = true) ?: return false
+        if (prepared.bytes.size > MAX_RTP_DATAGRAM_BYTES) {
+            Log.e(TAG, "A complete RTP-MIDI panic exceeds the datagram limit")
+            return false
+        }
+        return transmitPreparedRtpPacket(session, prepared)
+    }
+
+    private fun queueJournalHeartbeat(session: AppleMidiSession, urgent: Boolean) {
+        val queued = synchronized(lock) {
+            if (!midiOutputAllowedLocked(session) || !queuedJournalHeartbeats.add(session.id)) {
+                false
+            } else {
+                true
+            }
+        }
+        if (!queued) return
+        val accepted = rtpSendExecutor.execute(
+            critical = urgent,
+            onDiscard = { synchronized(lock) { queuedJournalHeartbeats.remove(session.id) } },
+        ) {
+            try {
+                sendJournalHeartbeatNow(session)
+            } finally {
+                synchronized(lock) { queuedJournalHeartbeats.remove(session.id) }
+            }
+        }
+        if (!accepted) synchronized(lock) { queuedJournalHeartbeats.remove(session.id) }
+    }
+
+    private fun sendJournalHeartbeatNow(session: AppleMidiSession) {
+        val urgent = synchronized(lock) {
+            if (!midiOutputAllowedLocked(session)) return
+            val currentUrgent = session.hasUnacknowledgedCriticalReleaseJournal
+            val interval = if (currentUrgent) {
+                CRITICAL_RELEASE_HEARTBEAT_NANOS
+            } else {
+                JOURNAL_HEARTBEAT_NANOS
+            }
+            if (!session.journalHeartbeatDue(System.nanoTime(), interval)) return
+            currentUrgent
+        }
+        val prepared = prepareRtpPacket(session, emptyList(), marker = false) ?: return
+        if (prepared.bytes.size > MAX_RTP_DATAGRAM_BYTES) {
+            sendRecoveryOverflowPanic(session, System.nanoTime())
+            return
+        }
+        if (transmitPreparedRtpPacket(session, prepared)) {
+            synchronized(lock) {
+                if (sessions[session.id] === session) session.recordJournalHeartbeatSent(urgent)
+            }
+        }
+    }
+
+    private fun sendOverloadPanicNow() {
+        val targets = synchronized(lock) {
+            if (!activeMidiTransportAllowedLocked()) return
+            sessions.values
+                .filter { it.state == AppleMidiSessionState.CONNECTED }
+                .groupBy { it.peerId ?: it.id }
+                .values
+                .map { peerSessions -> peerSessions.maxBy(AppleMidiSession::lastActivityNanos) }
+        }
+        val now = System.nanoTime()
+        targets.forEach { sendRecoveryOverflowPanic(it, now) }
     }
 
     private fun handleRtpMidi(payload: ByteArray, remote: InetSocketAddress) {
+        val packetSsrc = RtpMidiCodec.readSsrcOrNull(payload) ?: return
         val session = synchronized(lock) {
-            sessions.values.firstOrNull {
-                it.transportAddress.sameNetworkHost(remote.address) &&
-                    it.remoteDataPort == remote.port
-            }
+            selectRtpMidiSession(sessions.values, remote, packetSsrc)
         } ?: return
-        val packet = RtpMidiCodec.decode(
-            bytes = payload,
-            initialRunningStatus = session.incomingRunningStatus,
-        )
+        val packet = RtpMidiCodec.decode(payload)
         val arrival = System.nanoTime()
-        val accepted = synchronized(lock) {
+        val release = synchronized(lock) {
             session.takeIf { current ->
                 sessions[current.id] === current && current.remoteSsrc == packet.ssrc
             }?.let { current ->
-                val observation = current.sequenceTracker.observe(packet.sequenceNumber)
-                if (observation.disposition == RtpSequenceDisposition.DUPLICATE) {
-                    null
-                } else {
-                    if (observation.disposition == RtpSequenceDisposition.GAP) {
-                        current.enqueueRecovery(
-                            targetTimeNanos = arrival,
-                            messages = current.resetActiveStateForRecovery(),
-                        )
-                    }
-                    current
-                }
+                current.lastActivityNanos = arrival
+                current.offerRtpPacket(packet, arrival)
             }
         } ?: return
-        synchronized(lock) {
-            accepted.lastActivityNanos = arrival
-            accepted.incomingRunningStatus = packet.commands.lastOrNull()?.message?.status
-                ?: accepted.incomingRunningStatus
-        }
-        packet.commands.zip(packet.commandTimestamps()).forEach { (command, commandTimestamp) ->
-            val message = command.message.toByteArray()
-            offerJittered(accepted, commandTimestamp, arrival, message)
-        }
-        scheduleJitterWakeup()
-        sendControl(
-            AppleMidiControlPacket.ReceiverFeedback(localSsrc, packet.sequenceNumber),
-            accepted.controlAddress,
-            dataChannel = false,
-        )
+        processRtpPacketRelease(session, release)
+        scheduleGapWakeup()
     }
 
-    private fun offerJittered(
+    private fun processRtpPacketRelease(
         session: AppleMidiSession,
-        remoteTimestamp: Long,
-        arrivalNanos: Long,
-        message: ByteArray,
+        release: RtpMidiPacketRelease,
     ) {
-        session.offerMidi(
-            remoteTimestamp = remoteTimestamp and UINT32_MASK,
-            arrivalNanos = arrivalNanos,
-            message = message,
+        if (release.packets.isEmpty()) return
+        var feedbackSequenceNumber: Int? = null
+        synchronized(lock) {
+            if (sessions[session.id] !== session) return
+            session.queueReceiverFeedback(release.packets.last().extendedSequenceNumber)
+            val recovery = when {
+                release.loss != null -> session.recoverFromPacketLoss(release.loss)
+                release.initialPacket && release.packets.first().packet.journal != null ->
+                    session.recoverFromInitialPacket(release.packets.first())
+                else -> null
+            }
+            if (recovery != null && recovery.messages.isNotEmpty()) {
+                val recoveryPacket = release.loss?.recoveryPacket ?: release.packets.first()
+                recovery.messages.forEach { message ->
+                    session.offerMidi(
+                        remoteTimestamp = recoveryPacket.packet.timestamp and UINT32_MASK,
+                        arrivalNanos = recoveryPacket.arrivalNanos,
+                        message = message,
+                    )
+                }
+            }
+            release.packets.forEach { buffered ->
+                buffered.packet.commands
+                    .zip(buffered.packet.commandTimestamps())
+                    .forEach { (command, commandTimestamp) ->
+                        session.offerMidi(
+                            remoteTimestamp = commandTimestamp and UINT32_MASK,
+                            arrivalNanos = buffered.arrivalNanos,
+                            message = command.message.toByteArray(),
+                        )
+                }
+                session.observeOrderedNetworkMidi(buffered.packet.commands.map(TimedMidiMessage::message))
+            }
+            if (release.loss != null) {
+                feedbackSequenceNumber = session.takeReceiverFeedback()
+            }
+        }
+        feedbackSequenceNumber?.let { sendReceiverFeedback(session, it) }
+        scheduleJitterWakeup()
+    }
+
+    private fun sendReceiverFeedback(session: AppleMidiSession, sequenceNumber: Int) {
+        sendControl(
+            AppleMidiControlPacket.ReceiverFeedback(localSsrc, sequenceNumber),
+            session.controlAddress,
+            dataChannel = false,
+            sendAllowedLocked = {
+                running && transportHealthy && portPair != null &&
+                    sessions[session.id] === session &&
+                    session.state == AppleMidiSessionState.CONNECTED
+            },
+            onSentLocked = {
+                if (sessions[session.id] === session) session.recordReceiverFeedbackSent()
+            },
         )
     }
 
     private fun drainJitterBuffers(nowNanos: Long) {
+        val drainThroughNanos = appleMidiDeliveryDrainThroughNanos(
+            nowNanos = nowNanos,
+            lookaheadNanos = eventDeliveryLookaheadNanos,
+        )
         val ready = synchronized(lock) {
-            sessions.values.flatMap { session -> session.drainMidi(nowNanos) }
+            sessions.values.flatMap { session -> session.drainMidi(drainThroughNanos) }
         }
         ready.sortedBy { it.targetTimeNanos }.forEach { event ->
-            synchronized(lock) { sessions[event.sessionId]?.observeMidi(event.bytes) }
-            listener.onMidiEvent(event)
+            val session = synchronized(lock) {
+                val candidate = sessions[event.sessionId] ?: return@synchronized null
+                if (inputSelectionConfigured && candidate.peerId !in selectedInputPeerIds) {
+                    return@synchronized null
+                }
+                candidate
+            } ?: return@forEach
+            session.deliverIfOpen {
+                session.observeMidi(event.bytes)
+                listener.onMidiEvent(event)
+            }
         }
         scheduleJitterWakeup()
     }
@@ -1048,18 +1378,22 @@ class AppleMidiManager(
                 return
             }
 
+            val deliveryWakeup = appleMidiDeliveryWakeupNanos(
+                targetTimeNanos = earliest,
+                lookaheadNanos = eventDeliveryLookaheadNanos,
+            )
             val existing = nextJitterWakeupNanos
             val existingFuture = jitterWakeupFuture
-            if (existing != null && existing <= earliest &&
+            if (existing != null && existing <= deliveryWakeup &&
                 existingFuture != null && !existingFuture.isDone
             ) {
                 return
             }
 
             existingFuture?.cancel(false)
-            nextJitterWakeupNanos = earliest
+            nextJitterWakeupNanos = deliveryWakeup
             val generation = ++jitterWakeupGeneration
-            val delay = (earliest - System.nanoTime()).coerceAtLeast(0L)
+            val delay = (deliveryWakeup - System.nanoTime()).coerceAtLeast(0L)
             try {
                 // Keep scheduling and publishing the future under lock. With a zero delay the
                 // scheduler may run the callback before schedule() returns; holding the lock
@@ -1093,6 +1427,64 @@ class AppleMidiManager(
         if (accepted) drainJitterBuffers(System.nanoTime())
     }
 
+    private fun scheduleGapWakeup() {
+        var schedulingError: Throwable? = null
+        synchronized(lock) {
+            if (!running) return
+            val earliest = sessions.values
+                .mapNotNull(AppleMidiSession::nextRtpGapDeadlineNanos)
+                .minOrNull()
+            if (earliest == null) {
+                gapWakeupFuture?.cancel(false)
+                gapWakeupFuture = null
+                nextGapWakeupNanos = null
+                return
+            }
+            val existing = nextGapWakeupNanos
+            val existingFuture = gapWakeupFuture
+            if (existing != null && existing <= earliest &&
+                existingFuture != null && !existingFuture.isDone
+            ) {
+                return
+            }
+            existingFuture?.cancel(false)
+            nextGapWakeupNanos = earliest
+            val generation = ++gapWakeupGeneration
+            val delay = (earliest - System.nanoTime()).coerceAtLeast(0L)
+            try {
+                gapWakeupFuture = scheduler.schedule(
+                    { onGapWakeup(generation) },
+                    delay,
+                    TimeUnit.NANOSECONDS,
+                )
+            } catch (error: Throwable) {
+                gapWakeupFuture = null
+                nextGapWakeupNanos = null
+                schedulingError = error
+            }
+        }
+        schedulingError?.let { error ->
+            if (running) Log.d(TAG, "Could not schedule RTP sequence-gap recovery", error)
+        }
+    }
+
+    private fun onGapWakeup(generation: Long) {
+        val now = System.nanoTime()
+        val releases = synchronized(lock) {
+            if (!running || generation != gapWakeupGeneration) return
+            gapWakeupFuture = null
+            nextGapWakeupNanos = null
+            sessions.values.mapNotNull { session ->
+                val release = session.expireRtpGap(now)
+                release.takeIf { it.packets.isNotEmpty() }?.let { session to it }
+            }
+        }
+        releases.forEach { (session, release) ->
+            processRtpPacketRelease(session, release)
+        }
+        scheduleGapWakeup()
+    }
+
     private fun randomUInt32(): Long = random.nextInt().toLong() and UINT32_MASK
 
     private fun clockTicks(): Long = rtpClock.nowTicks()
@@ -1111,14 +1503,16 @@ class AppleMidiManager(
         const val FIXED_CONTROL_PORT = UdpPortPair.FIXED_CONTROL_PORT
         const val FIXED_DATA_PORT = UdpPortPair.FIXED_DATA_PORT
         private const val TAG = "AppleMidiManager"
-        private const val MAX_DATAGRAM_BYTES = 1_500
-        private const val MAX_COMMAND_BYTES = 1_000
-        private const val MAX_PENDING_OUTPUT_MESSAGES = 256
-        private const val OUTPUT_BATCH_WINDOW_NANOS = 1_000_000L
-        private const val TICK_MILLIS = 100L
+        private const val RECEIVE_BUFFER_BYTES = 1_500
+        private const val MAX_RTP_DATAGRAM_BYTES = 1_200
+        private const val TICK_MILLIS = 10L
+        private const val RTP_SEND_QUEUE_CAPACITY = 128
         private const val CONTROL_FLUSH_TIMEOUT_MILLIS = 250L
         private const val NANOS_PER_MILLI = 1_000_000L
         private const val INVITATION_RETRY_NANOS = 1_000_000_000L
+        private const val RECEIVER_FEEDBACK_INTERVAL_NANOS = 25_000_000L
+        private const val CRITICAL_RELEASE_HEARTBEAT_NANOS = 35_000_000L
+        private const val JOURNAL_HEARTBEAT_NANOS = 100_000_000L
         private const val SESSION_TIMEOUT_NANOS = 35_000_000_000L
         private const val UINT32_MASK = 0xFFFF_FFFFL
 
@@ -1137,6 +1531,59 @@ internal fun activeMidiTransportAllowed(
     portPair: UdpPortPair?,
     transportHealthy: Boolean,
 ): Boolean = running && transportHealthy && portPair?.isFixedPortCapable == true
+
+internal fun appleMidiDeliveryLookaheadNanos(
+    configuration: AppleMidiConfiguration,
+    listener: AppleMidiListener,
+): Long = if (listener is AppleMidiScheduledListener) {
+    configuration.eventDeliveryLookaheadMillis * 1_000_000L
+} else {
+    0L
+}
+
+internal fun appleMidiDeliveryWakeupNanos(
+    targetTimeNanos: Long,
+    lookaheadNanos: Long,
+): Long {
+    require(lookaheadNanos >= 0) { "lookaheadNanos must not be negative" }
+    return (targetTimeNanos - lookaheadNanos).coerceAtLeast(0L)
+}
+
+internal fun appleMidiDeliveryDrainThroughNanos(
+    nowNanos: Long,
+    lookaheadNanos: Long,
+): Long {
+    require(lookaheadNanos >= 0) { "lookaheadNanos must not be negative" }
+    return if (nowNanos > Long.MAX_VALUE - lookaheadNanos) {
+        Long.MAX_VALUE
+    } else {
+        nowNanos + lookaheadNanos
+    }
+}
+
+internal fun selectRtpMidiSession(
+    sessions: Collection<AppleMidiSession>,
+    remote: InetSocketAddress,
+    remoteSsrc: Long,
+): AppleMidiSession? = sessions.asSequence()
+    .filter { session ->
+        session.transportAddress.sameNetworkHost(remote.address) &&
+            session.remoteDataPort == remote.port &&
+            session.remoteSsrc == remoteSsrc
+    }
+    .maxByOrNull(AppleMidiSession::lastActivityNanos)
+
+internal fun selectReceiverFeedbackSession(
+    sessions: Collection<AppleMidiSession>,
+    remote: InetSocketAddress,
+    remoteSsrc: Long,
+): AppleMidiSession? = sessions.asSequence()
+    .filter { session ->
+        session.transportAddress.sameNetworkHost(remote.address) &&
+            session.remoteControlPort == remote.port &&
+            session.remoteSsrc == remoteSsrc
+    }
+    .maxByOrNull(AppleMidiSession::lastActivityNanos)
 
 internal fun selectInvitationResponseSession(
     sessions: Collection<AppleMidiSession>,

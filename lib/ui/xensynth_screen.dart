@@ -280,6 +280,9 @@ class _XenSynthScreenState extends State<XenSynthScreen>
                       settings: settings,
                       pitchRecognitionAvailable:
                           _controller.pitchRecognitionAvailable,
+                      midiInputDevices: _controller.midiInputDevices,
+                      midiOutputDevices: _controller.midiOutputDevices,
+                      midiDeviceRefreshing: _controller.midiDeviceRefreshing,
                       bluetoothMidiOutputs: _controller.bluetoothMidiOutputs,
                       networkMidiOutputs: _controller.networkMidiOutputs,
                       networkMidiScanning: _controller.networkMidiScanning,
@@ -287,6 +290,7 @@ class _XenSynthScreenState extends State<XenSynthScreen>
                           _controller.refreshBluetoothMidiOutputs,
                       onRefreshNetworkMidiOutputs:
                           _controller.refreshNetworkMidiOutputs,
+                      onRefreshMidiDevices: _controller.refreshMidiDevices,
                       onChanged: _controller.updateSettings,
                       onReset: _resetSettings,
                     ),

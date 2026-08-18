@@ -10,6 +10,16 @@ data class AppleMidiConfiguration @JvmOverloads constructor(
     val maximumSessions: Int = 16,
     /** Optional Bonjour TXT model. Android callers may leave this null to publish Build.MODEL. */
     val deviceModel: String? = null,
+    /**
+     * How early a scheduled listener may receive an event before [AppleMidiEvent.targetTimeNanos].
+     * Ordinary [AppleMidiListener] implementations continue to receive events at playout time.
+     */
+    val eventDeliveryLookaheadMillis: Long = 8,
+    /**
+     * Keep Bonjour discovery and the RTP sockets on the Wi-Fi IPv4 LAN by default. Set this to
+     * false only when an IPv6-only network must be supported.
+     */
+    val ipv4Only: Boolean = true,
 ) {
     init {
         require(serviceName.isNotBlank()) { "serviceName must not be blank" }
@@ -25,6 +35,9 @@ data class AppleMidiConfiguration @JvmOverloads constructor(
             "jitterBufferMillis must be between 24 and 120"
         }
         require(maximumSessions > 0) { "maximumSessions must be positive" }
+        require(eventDeliveryLookaheadMillis in 0..50) {
+            "eventDeliveryLookaheadMillis must be between 0 and 50"
+        }
     }
 }
 
@@ -62,3 +75,9 @@ interface AppleMidiListener {
     /** Called after a session disappears so consumers can release notes owned by that source. */
     fun onSessionClosed(sessionId: String) = Unit
 }
+
+/**
+ * Opts a listener into early delivery while preserving each event's original monotonic target.
+ * Use this only when the consumer can schedule work against [AppleMidiEvent.targetTimeNanos].
+ */
+interface AppleMidiScheduledListener : AppleMidiListener

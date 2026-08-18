@@ -16,6 +16,7 @@
 
 #include <android/log.h>
 #include <oboe/Oboe.h>
+#include <time.h>
 #include "fluidsynth.h"
 
 namespace {
@@ -34,6 +35,11 @@ constexpr int32_t kMaxFluidSynthInstanceCount = 8;
 constexpr int32_t kMixScratchFrameCount = 1024;
 constexpr int32_t kSampleRate = 44100;
 constexpr int32_t kBufferSizeInBursts = 3;
+constexpr int32_t kExactScheduledSegmentCount = 32;
+constexpr int32_t kMaximumScheduledSegmentCount = 64;
+constexpr int32_t kTimestampRefreshCallbackCount = 8;
+constexpr int64_t kPresentationTimestampPastToleranceNanos = 20000000LL;
+constexpr int64_t kMaximumEstimatedOutputLatencyNanos = 500000000LL;
 constexpr int32_t kPitchClassCount = 12;
 constexpr int32_t kMidiKeyCount = 128;
 constexpr int32_t kMidiExpressionController = 11;
@@ -135,11 +141,17 @@ struct FluidNote {
     int32_t bank = 0;
     int32_t program = 0;
     int32_t startFramesRemaining = 0;
+    int32_t scheduledStopFramesRemaining = -1;
+    int32_t scheduledImmediateStopFramesRemaining = -1;
     int32_t releaseFramesRemaining = 0;
+    int64_t absoluteStartTimeNanos = 0;
+    int64_t absoluteStopTimeNanos = 0;
+    int64_t absoluteImmediateStopTimeNanos = 0;
     float cents = 0.0f;
     Sf2ReleaseProfile profile = Sf2ReleaseProfile::Default;
     bool started = false;
     bool releasing = false;
+    bool scheduledStopImmediate = false;
 };
 
 struct PlaybackTarget {
@@ -512,6 +524,41 @@ static int32_t framesFromSeconds(double seconds) {
     return std::max(0, static_cast<int32_t>(std::round(frames)));
 }
 
+static int64_t monotonicTimeNanos() {
+    timespec now{};
+    if (clock_gettime(CLOCK_MONOTONIC, &now) != 0) {
+        return 0;
+    }
+    return static_cast<int64_t>(now.tv_sec) * 1000000000LL + now.tv_nsec;
+}
+
+static int32_t framesFromNanoseconds(int64_t nanoseconds) {
+    if (nanoseconds <= 0) {
+        return 0;
+    }
+    const double frames = static_cast<double>(nanoseconds) *
+                          static_cast<double>(kSampleRate) / 1000000000.0;
+    if (frames >= static_cast<double>(std::numeric_limits<int32_t>::max())) {
+        return std::numeric_limits<int32_t>::max();
+    }
+    return std::max(0, static_cast<int32_t>(std::round(frames)));
+}
+
+static int64_t nanosecondsFromFrames(int64_t frames, int32_t sampleRate) {
+    if (sampleRate <= 0 || frames == 0) {
+        return 0;
+    }
+    const long double nanoseconds = static_cast<long double>(frames) * 1000000000.0L /
+                                    static_cast<long double>(sampleRate);
+    if (nanoseconds >= static_cast<long double>(std::numeric_limits<int64_t>::max())) {
+        return std::numeric_limits<int64_t>::max();
+    }
+    if (nanoseconds <= static_cast<long double>(std::numeric_limits<int64_t>::min())) {
+        return std::numeric_limits<int64_t>::min();
+    }
+    return static_cast<int64_t>(std::llround(nanoseconds));
+}
+
 static std::array<jbyte, 32> buildSoundFontKey() {
     std::array<jbyte, 32> key{};
     for (size_t i = 0; i < key.size(); ++i) {
@@ -680,7 +727,8 @@ public:
             int bankMsb,
             int bankLsb,
             double delaySeconds,
-            int expression) {
+            int expression,
+            int64_t absoluteTargetTimeNanos = 0) {
         std::unique_lock<std::mutex> lock(synthMutex);
         if (!isFluidReadyLocked() || key < 0 || key >= kMidiKeyCount || velocity <= 0) {
             return -1;
@@ -724,10 +772,13 @@ public:
         note.expression = clampInt(expression, 0, 127);
         note.bank = bank;
         note.program = safeProgram;
-        note.startFramesRemaining = framesFromSeconds(delaySeconds);
+        note.absoluteStartTimeNanos = std::max<int64_t>(0, absoluteTargetTimeNanos);
+        note.startFramesRemaining = note.absoluteStartTimeNanos > 0
+                                    ? 0
+                                    : framesFromSeconds(delaySeconds);
         note.cents = cents;
         note.profile = profile;
-        note.started = note.startFramesRemaining <= 0;
+        note.started = note.absoluteStartTimeNanos == 0 && note.startFramesRemaining <= 0;
         if (note.started && !startFluidNoteLocked(note)) {
             return -1;
         }
@@ -770,6 +821,56 @@ public:
         }
     }
 
+    void scheduleNoteOff(int noteId, double delaySeconds, bool immediate) {
+        const int32_t delayFrames = framesFromSeconds(delaySeconds);
+        if (delayFrames <= 0) {
+            noteOff(noteId, immediate);
+            return;
+        }
+        std::lock_guard<std::mutex> lock(synthMutex);
+        if (!isFluidReadyLocked()) {
+            return;
+        }
+        const auto found = std::find_if(
+                activeFluidNotes.begin(),
+                activeFluidNotes.end(),
+                [noteId](const FluidNote &note) { return note.id == noteId; });
+        if (found == activeFluidNotes.end()) {
+            return;
+        }
+        if (found->scheduledStopFramesRemaining < 0 ||
+            delayFrames < found->scheduledStopFramesRemaining) {
+            found->scheduledStopFramesRemaining = delayFrames;
+            found->scheduledStopImmediate = immediate;
+        } else if (delayFrames == found->scheduledStopFramesRemaining) {
+            found->scheduledStopImmediate = found->scheduledStopImmediate || immediate;
+        }
+    }
+
+    void noteOffAt(int noteId, int64_t targetTimeNanos, bool immediate) {
+        if (targetTimeNanos <= 0) {
+            noteOff(noteId, immediate);
+            return;
+        }
+        std::lock_guard<std::mutex> lock(synthMutex);
+        if (!isFluidReadyLocked()) {
+            return;
+        }
+        const auto found = std::find_if(
+                activeFluidNotes.begin(),
+                activeFluidNotes.end(),
+                [noteId](const FluidNote &note) { return note.id == noteId; });
+        if (found == activeFluidNotes.end()) {
+            return;
+        }
+        int64_t &deadline = immediate
+                            ? found->absoluteImmediateStopTimeNanos
+                            : found->absoluteStopTimeNanos;
+        if (deadline == 0 || targetTimeNanos < deadline) {
+            deadline = targetTimeNanos;
+        }
+    }
+
     void setNotePressure(int noteId, int expression) {
         if (noteId <= 0) {
             return;
@@ -802,6 +903,10 @@ public:
 
     void allSoundOff() {
         std::lock_guard<std::mutex> lock(synthMutex);
+        allSoundOffLocked();
+    }
+
+    void allSoundOffLocked() {
         forEachFluidInstanceLocked([](FluidHandle &instance, int32_t) {
             if (instance.synth != nullptr) {
                 fluid_synth_all_sounds_off(instance.synth, -1);
@@ -887,17 +992,25 @@ private:
             return oboe::DataCallbackResult::Continue;
         }
         auto *out = static_cast<float *>(audioData);
+        const int64_t callbackTimeNanos = monotonicTimeNanos();
         std::fill(out, out + numFrames * kChannelCount, 0.0f);
         if (stream == nullptr || stream->getState() != oboe::StreamState::Started) {
             return oboe::DataCallbackResult::Continue;
         }
+        const int64_t callbackPresentationTimeNanos =
+                estimateCallbackPresentationTimeNanos(
+                        stream,
+                        callbackTimeNanos,
+                        numFrames);
         bool hasAudio = false;
         if (isFluidReadyForCallback()) {
             std::lock_guard<std::mutex> lock(synthMutex);
             if (isFluidReadyLocked()) {
                 drainNotePressureLocked();
-                renderFluidInstancesLocked(out, numFrames);
-                handleScheduledFluidNotesLocked(numFrames);
+                renderScheduledFluidAudioLocked(
+                        out,
+                        numFrames,
+                        callbackPresentationTimeNanos);
                 hasAudio = true;
             }
         }
@@ -910,7 +1023,63 @@ private:
         return oboe::DataCallbackResult::Continue;
     }
 
+    int64_t estimateCallbackPresentationTimeNanos(
+            oboe::AudioStream *stream,
+            int64_t fallbackTimeNanos,
+            int32_t numFrames) {
+        if (stream == nullptr || fallbackTimeNanos <= 0) {
+            return fallbackTimeNanos;
+        }
+        if (timestampRefreshCountdown <= 0 || !hasPresentationTimestamp) {
+            const oboe::ResultWithValue<oboe::FrameTimestamp> timestampResult =
+                    stream->getTimestamp(CLOCK_MONOTONIC);
+            if (timestampResult) {
+                const oboe::FrameTimestamp timestamp = timestampResult.value();
+                presentationTimestampFramePosition = timestamp.position;
+                presentationTimestampNanos = timestamp.timestamp;
+                hasPresentationTimestamp = timestamp.position >= 0 && timestamp.timestamp > 0;
+                timestampRefreshCountdown = kTimestampRefreshCallbackCount;
+            } else {
+                hasPresentationTimestamp = false;
+                timestampRefreshCountdown = 1;
+            }
+        } else {
+            timestampRefreshCountdown--;
+        }
+
+        int64_t estimate = fallbackTimeNanos;
+        if (hasPresentationTimestamp) {
+            // The current callback buffer starts at framesWritten; project that frame
+            // through Oboe's most recent presentation timestamp onto CLOCK_MONOTONIC.
+            const int64_t framesWritten = stream->getFramesWritten();
+            if (framesWritten >= 0) {
+                const int64_t candidate = presentationTimestampNanos +
+                        nanosecondsFromFrames(
+                                framesWritten - presentationTimestampFramePosition,
+                                kSampleRate);
+                const int64_t earliestSane = fallbackTimeNanos -
+                        kPresentationTimestampPastToleranceNanos;
+                const int64_t latestSane = fallbackTimeNanos +
+                        kMaximumEstimatedOutputLatencyNanos;
+                if (candidate >= earliestSane && candidate <= latestSane) {
+                    estimate = candidate;
+                }
+            }
+        }
+
+        const int64_t latestContinuousEnd = fallbackTimeNanos +
+                kMaximumEstimatedOutputLatencyNanos;
+        if (lastCallbackPresentationEndNanos > estimate &&
+            lastCallbackPresentationEndNanos <= latestContinuousEnd) {
+            estimate = lastCallbackPresentationEndNanos;
+        }
+        lastCallbackPresentationEndNanos = estimate +
+                nanosecondsFromFrames(numFrames, kSampleRate);
+        return estimate;
+    }
+
     bool openStreamLocked() {
+        resetPresentationTimeline();
         dataCallback = std::make_shared<DataCallback>(this);
         errorCallback = std::make_shared<ErrorCallback>(this);
 
@@ -953,6 +1122,15 @@ private:
         }
         dataCallback.reset();
         errorCallback.reset();
+        resetPresentationTimeline();
+    }
+
+    void resetPresentationTimeline() {
+        hasPresentationTimestamp = false;
+        presentationTimestampFramePosition = 0;
+        presentationTimestampNanos = 0;
+        lastCallbackPresentationEndNanos = 0;
+        timestampRefreshCountdown = 0;
     }
 
     bool openFluidSynthLocked() {
@@ -1494,11 +1672,84 @@ private:
         }
     }
 
-    void handleScheduledFluidNotesLocked(int32_t numFrames) {
+    int32_t framesUntilNextFluidEventLocked(int32_t maximumFrames) const {
+        int32_t frames = maximumFrames;
+        for (const FluidNote &note : activeFluidNotes) {
+            if (!note.started && note.absoluteStartTimeNanos == 0) {
+                frames = std::min(frames, std::max(0, note.startFramesRemaining));
+            }
+            if (note.absoluteStopTimeNanos == 0 && note.scheduledStopFramesRemaining >= 0) {
+                frames = std::min(
+                        frames,
+                        std::max(0, note.scheduledStopFramesRemaining));
+            }
+            if (note.absoluteImmediateStopTimeNanos == 0 &&
+                note.scheduledImmediateStopFramesRemaining >= 0) {
+                frames = std::min(
+                        frames,
+                        std::max(0, note.scheduledImmediateStopFramesRemaining));
+            }
+            if (note.releasing) {
+                frames = std::min(frames, std::max(0, note.releaseFramesRemaining));
+            }
+        }
+        return frames;
+    }
+
+    void advanceFluidEventClocksLocked(int32_t frames) {
+        for (FluidNote &note : activeFluidNotes) {
+            if (!note.started && note.absoluteStartTimeNanos == 0) {
+                note.startFramesRemaining -= frames;
+            }
+            if (note.absoluteStopTimeNanos == 0 && note.scheduledStopFramesRemaining >= 0) {
+                note.scheduledStopFramesRemaining -= frames;
+            }
+            if (note.absoluteImmediateStopTimeNanos == 0 &&
+                note.scheduledImmediateStopFramesRemaining >= 0) {
+                note.scheduledImmediateStopFramesRemaining -= frames;
+            }
+            if (note.releasing) {
+                note.releaseFramesRemaining -= frames;
+            }
+        }
+    }
+
+    void processFluidEventsAtCurrentFrameLocked(int32_t earlyFrames = 0) {
+        const int32_t safeEarlyFrames = std::max(0, earlyFrames);
         for (auto note = activeFluidNotes.begin(); note != activeFluidNotes.end();) {
+            if (note->scheduledImmediateStopFramesRemaining >= 0 &&
+                note->scheduledImmediateStopFramesRemaining <= safeEarlyFrames) {
+                if (note->started) {
+                    stopFluidNoteLocked(*note);
+                }
+                releasePressureMailboxLocked(*note);
+                note = activeFluidNotes.erase(note);
+                continue;
+            }
+            if (note->scheduledStopFramesRemaining >= 0 &&
+                note->scheduledStopFramesRemaining <= safeEarlyFrames) {
+                const bool immediate = note->scheduledStopImmediate;
+                note->scheduledStopFramesRemaining = -1;
+                note->scheduledStopImmediate = false;
+                if (!note->started || immediate) {
+                    if (note->started) {
+                        stopFluidNoteLocked(*note);
+                    }
+                    releasePressureMailboxLocked(*note);
+                    note = activeFluidNotes.erase(note);
+                    continue;
+                }
+                if (!note->releasing) {
+                    note->releasing = true;
+                    note->releaseFramesRemaining = releaseFramesForProfile(note->profile);
+                }
+            }
             if (!note->started) {
-                note->startFramesRemaining -= numFrames;
-                if (note->startFramesRemaining > 0) {
+                if (note->absoluteStartTimeNanos > 0) {
+                    ++note;
+                    continue;
+                }
+                if (note->startFramesRemaining > safeEarlyFrames) {
                     ++note;
                     continue;
                 }
@@ -1519,14 +1770,99 @@ private:
                 ++note;
                 continue;
             }
-            note->releaseFramesRemaining -= numFrames;
-            if (note->releaseFramesRemaining > 0) {
+            if (note->releaseFramesRemaining > safeEarlyFrames) {
                 ++note;
                 continue;
             }
             stopFluidNoteLocked(*note);
             releasePressureMailboxLocked(*note);
             note = activeFluidNotes.erase(note);
+        }
+    }
+
+    void prepareAbsoluteFluidEventsLocked(
+            int64_t callbackTimeNanos,
+            int32_t numFrames) {
+        if (callbackTimeNanos <= 0) {
+            for (FluidNote &note : activeFluidNotes) {
+                if (!note.started && note.absoluteStartTimeNanos > 0) {
+                    note.startFramesRemaining = 0;
+                    note.absoluteStartTimeNanos = 0;
+                }
+                if (note.absoluteStopTimeNanos > 0) {
+                    note.scheduledStopFramesRemaining = 0;
+                    note.absoluteStopTimeNanos = 0;
+                }
+                if (note.absoluteImmediateStopTimeNanos > 0) {
+                    note.scheduledImmediateStopFramesRemaining = 0;
+                    note.absoluteImmediateStopTimeNanos = 0;
+                }
+            }
+            return;
+        }
+        const int64_t callbackDurationNanos = static_cast<int64_t>(std::ceil(
+                static_cast<double>(numFrames) * 1000000000.0 /
+                static_cast<double>(kSampleRate)));
+        const int64_t callbackEndNanos = callbackTimeNanos + callbackDurationNanos;
+        for (FluidNote &note : activeFluidNotes) {
+            if (!note.started &&
+                note.absoluteStartTimeNanos > 0 &&
+                note.absoluteStartTimeNanos <= callbackEndNanos) {
+                note.startFramesRemaining = framesFromNanoseconds(
+                        note.absoluteStartTimeNanos - callbackTimeNanos);
+                note.absoluteStartTimeNanos = 0;
+            }
+            if (note.absoluteStopTimeNanos > 0 &&
+                note.absoluteStopTimeNanos <= callbackEndNanos) {
+                note.scheduledStopFramesRemaining = framesFromNanoseconds(
+                        note.absoluteStopTimeNanos - callbackTimeNanos);
+                note.absoluteStopTimeNanos = 0;
+            }
+            if (note.absoluteImmediateStopTimeNanos > 0 &&
+                note.absoluteImmediateStopTimeNanos <= callbackEndNanos) {
+                note.scheduledImmediateStopFramesRemaining = framesFromNanoseconds(
+                        note.absoluteImmediateStopTimeNanos - callbackTimeNanos);
+                note.absoluteImmediateStopTimeNanos = 0;
+            }
+        }
+    }
+
+    void renderScheduledFluidAudioLocked(
+            float *out,
+            int32_t numFrames,
+            int64_t callbackTimeNanos) {
+        int32_t renderedFrames = 0;
+        int32_t renderedSegments = 0;
+        prepareAbsoluteFluidEventsLocked(callbackTimeNanos, numFrames);
+        processFluidEventsAtCurrentFrameLocked();
+        while (renderedFrames < numFrames) {
+            const int32_t remainingFrames = numFrames - renderedFrames;
+            int32_t segmentFrames = framesUntilNextFluidEventLocked(remainingFrames);
+            if (segmentFrames <= 0) {
+                processFluidEventsAtCurrentFrameLocked();
+                segmentFrames = framesUntilNextFluidEventLocked(remainingFrames);
+                if (segmentFrames <= 0) {
+                    segmentFrames = remainingFrames;
+                }
+            }
+            renderFluidInstancesLocked(
+                    out + renderedFrames * kChannelCount,
+                    segmentFrames);
+            advanceFluidEventClocksLocked(segmentFrames);
+            renderedFrames += segmentFrames;
+            renderedSegments++;
+            int32_t coalescingFrames = 0;
+            if (renderedSegments >= kExactScheduledSegmentCount) {
+                // Preserve ordinary sample-accurate playback, but bound callback work
+                // when hostile or synthetic MIDI creates an event on nearly every frame.
+                const int32_t remainingFrames = numFrames - renderedFrames;
+                const int32_t remainingSegmentBudget = std::max(
+                        1,
+                        kMaximumScheduledSegmentCount - renderedSegments);
+                coalescingFrames = (remainingFrames + remainingSegmentBudget - 1) /
+                        remainingSegmentBudget;
+            }
+            processFluidEventsAtCurrentFrameLocked(coalescingFrames);
         }
     }
 
@@ -1829,6 +2165,11 @@ private:
     std::list<FluidNote> activeFluidNotes;
     std::array<PressureMailbox, kPressureMailboxCount> pressureMailboxes{};
     std::array<float, kMixScratchFrameCount * kChannelCount> mixScratch{};
+    int64_t presentationTimestampFramePosition = 0;
+    int64_t presentationTimestampNanos = 0;
+    int64_t lastCallbackPresentationEndNanos = 0;
+    int32_t timestampRefreshCountdown = 0;
+    bool hasPresentationTimestamp = false;
     std::vector<uint8_t> builtinSoundFont;
     std::string soundFontPath;
     SoundFontSource soundFontSource = SoundFontSource::None;
@@ -1926,6 +2267,32 @@ Java_icu_ringona_xensynth_audio_NativeAudioEngine_noteOnNative(
             expression);
 }
 
+JNIEXPORT jint JNICALL
+Java_icu_ringona_xensynth_audio_NativeAudioEngine_noteOnAtNative(
+        JNIEnv *,
+        jclass,
+        jint key,
+        jint velocity,
+        jfloat cents,
+        jint channel,
+        jint program,
+        jint bankMsb,
+        jint bankLsb,
+        jlong targetTimeNanos,
+        jint expression) {
+    return engine.noteOn(
+            key,
+            velocity,
+            cents,
+            channel,
+            program,
+            bankMsb,
+            bankLsb,
+            0.0,
+            expression,
+            targetTimeNanos);
+}
+
 JNIEXPORT void JNICALL
 Java_icu_ringona_xensynth_audio_NativeAudioEngine_noteOffNative(
         JNIEnv *,
@@ -1933,6 +2300,26 @@ Java_icu_ringona_xensynth_audio_NativeAudioEngine_noteOffNative(
         jint noteId,
         jboolean immediate) {
     engine.noteOff(noteId, immediate == JNI_TRUE);
+}
+
+JNIEXPORT void JNICALL
+Java_icu_ringona_xensynth_audio_NativeAudioEngine_scheduleNoteOffNative(
+        JNIEnv *,
+        jclass,
+        jint noteId,
+        jdouble delaySeconds,
+        jboolean immediate) {
+    engine.scheduleNoteOff(noteId, delaySeconds, immediate == JNI_TRUE);
+}
+
+JNIEXPORT void JNICALL
+Java_icu_ringona_xensynth_audio_NativeAudioEngine_noteOffAtNative(
+        JNIEnv *,
+        jclass,
+        jint noteId,
+        jlong targetTimeNanos,
+        jboolean immediate) {
+    engine.noteOffAt(noteId, targetTimeNanos, immediate == JNI_TRUE);
 }
 
 JNIEXPORT void JNICALL

@@ -5,6 +5,7 @@ import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.net.DatagramSocket
+import java.net.Inet4Address
 import java.net.InetSocketAddress
 
 class UdpPortPairTest {
@@ -17,6 +18,28 @@ class UdpPortPairTest {
             assertEquals(pair.controlPort + 1, pair.dataPort)
             assertFalse(pair.control.reuseAddress)
             assertFalse(pair.data.reuseAddress)
+        }
+    }
+
+    @Test
+    fun defaultPairUsesIpv4SocketsForBothAppleMidiChannels() {
+        UdpPortPair.bind().use { pair ->
+            assertTrue(pair.control.localAddress is Inet4Address)
+            assertTrue(pair.data.localAddress is Inet4Address)
+            assertEquals(4, pair.control.localAddress.address.size)
+            assertEquals(4, pair.data.localAddress.address.size)
+        }
+    }
+
+    @Test
+    fun explicitIpv6FallbackKeepsLegacyDualStackBindingAvailable() {
+        UdpPortPair.bind(ipv4Only = false).use { pair ->
+            // The platform may expose a dual-stack IPv6 wildcard or an IPv4 wildcard. Either is
+            // valid when callers explicitly opt out of the IPv4-only policy.
+            assertTrue(pair.control.localAddress.address.size == 4 ||
+                pair.control.localAddress.address.size == 16)
+            assertTrue(pair.data.localAddress.address.size == 4 ||
+                pair.data.localAddress.address.size == 16)
         }
     }
 

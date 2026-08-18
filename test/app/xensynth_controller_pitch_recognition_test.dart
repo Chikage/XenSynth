@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:typed_data';
 
 import 'package:flutter/services.dart';
@@ -190,23 +191,34 @@ void main() {
       'channel': 0,
       'pitch': 60,
       'velocity': 100,
+      'targetTimeNanos': 1234567890,
     });
     final noteOn = calls.lastWhere((call) => call.method == 'noteOn');
-    expect(
-      Map<Object?, Object?>.from(noteOn.arguments! as Map)['networkOutput'],
-      isFalse,
+    final noteOnArguments = Map<Object?, Object?>.from(
+      noteOn.arguments! as Map,
     );
+    expect(noteOnArguments['networkOutput'], isFalse);
+    expect(noteOnArguments['audioTargetTimeNanos'], 1234567890);
 
     await emit(<String, Object?>{
       'type': 'noteOff',
       'source': 'network',
       'channel': 0,
       'pitch': 60,
+      'targetTimeNanos': 1235567890,
     });
+    final noteOff = calls.lastWhere((call) => call.method == 'noteOff');
+    expect(
+      Map<Object?, Object?>.from(
+        noteOff.arguments! as Map,
+      )['audioTargetTimeNanos'],
+      1235567890,
+    );
     await emit(<String, Object?>{
       'type': 'allNotesOff',
       'source': 'network',
       'channel': 0,
+      'targetTimeNanos': 1236567890,
     });
     final allNotesOff = calls.lastWhere((call) => call.method == 'allNotesOff');
     expect(
@@ -215,10 +227,162 @@ void main() {
       )['networkOutput'],
       isFalse,
     );
+    expect(
+      Map<Object?, Object?>.from(
+        allNotesOff.arguments! as Map,
+      )['audioTargetTimeNanos'],
+      1236567890,
+    );
 
     controller.dispose();
     await pumpEventQueue();
   });
+
+  test('keeps a pending fallback note-off on its network deadline', () async {
+    final noteOnResult = Completer<int?>();
+    messenger.setMockMethodCallHandler(channel, (call) async {
+      calls.add(call);
+      if (call.method == 'noteOn') return noteOnResult.future;
+      return true;
+    });
+    final controller = XenSynthController();
+    await controller.initialize();
+    calls.clear();
+
+    controller.noteDown(
+      7,
+      60,
+      100,
+      networkOutput: false,
+      audioTargetTimeNanos: 2_000_000_000,
+    );
+    await pumpEventQueue();
+    controller.noteUp(7, audioTargetTimeNanos: 2_004_000_000);
+    noteOnResult.complete(73);
+    await pumpEventQueue();
+
+    final noteOff = calls.singleWhere((call) => call.method == 'noteOff');
+    final arguments = Map<Object?, Object?>.from(noteOff.arguments! as Map);
+    expect(arguments['token'], 73);
+    expect(arguments['audioTargetTimeNanos'], 2_004_000_000);
+
+    controller.dispose();
+    await pumpEventQueue();
+  });
+
+  test(
+    'uses the pedal-up target when releasing sustained network notes',
+    () async {
+      final controller = XenSynthController();
+      await controller.initialize();
+      calls.clear();
+
+      Future<void> emit(Map<String, Object?> payload) async {
+        await messenger.handlePlatformMessage(
+          midiChannelName,
+          codec.encodeSuccessEnvelope(payload),
+          (_) {},
+        );
+        await pumpEventQueue();
+      }
+
+      await emit(<String, Object?>{
+        'type': 'noteOn',
+        'source': 'network',
+        'channel': 2,
+        'pitch': 64,
+        'velocity': 96,
+        'targetTimeNanos': 2000000000,
+      });
+      await emit(<String, Object?>{
+        'type': 'sustain',
+        'source': 'network',
+        'channel': 2,
+        'down': true,
+        'targetTimeNanos': 2001000000,
+      });
+      await emit(<String, Object?>{
+        'type': 'noteOff',
+        'source': 'network',
+        'channel': 2,
+        'pitch': 64,
+        'targetTimeNanos': 2002000000,
+      });
+      expect(calls.where((call) => call.method == 'noteOff'), isEmpty);
+
+      await emit(<String, Object?>{
+        'type': 'sustain',
+        'source': 'network',
+        'channel': 2,
+        'down': false,
+        'targetTimeNanos': 2008000000,
+      });
+
+      final noteOff = calls.singleWhere((call) => call.method == 'noteOff');
+      expect(
+        Map<Object?, Object?>.from(
+          noteOff.arguments! as Map,
+        )['audioTargetTimeNanos'],
+        2008000000,
+      );
+
+      controller.dispose();
+      await pumpEventQueue();
+    },
+  );
+
+  test(
+    'keeps native-scheduled network audio out of the Flutter loop',
+    () async {
+      final controller = XenSynthController();
+      await controller.initialize();
+      calls.clear();
+
+      Future<void> emit(Map<String, Object?> payload) async {
+        await messenger.handlePlatformMessage(
+          midiChannelName,
+          codec.encodeSuccessEnvelope(payload),
+          (_) {},
+        );
+        await pumpEventQueue();
+      }
+
+      await emit(<String, Object?>{
+        'type': 'noteOn',
+        'source': 'network',
+        'nativeAudioHandled': true,
+        'channel': 1,
+        'pitch': 65,
+        'velocity': 99,
+        'targetTimeNanos': 3000000000,
+      });
+      expect(calls.where((call) => call.method == 'noteOn'), isEmpty);
+      expect(controller.activePitches, isNotEmpty);
+
+      await emit(<String, Object?>{
+        'type': 'noteOff',
+        'source': 'network',
+        'nativeAudioHandled': true,
+        'channel': 1,
+        'pitch': 65,
+        'targetTimeNanos': 3005000000,
+      });
+      expect(calls.where((call) => call.method == 'noteOff'), isEmpty);
+
+      await emit(<String, Object?>{
+        'type': 'allNotesOff',
+        'source': 'network',
+        'nativeAudioHandled': true,
+        'channel': 1,
+        'targetTimeNanos': 3010000000,
+      });
+      expect(calls.where((call) => call.method == 'allNotesOff'), isEmpty);
+      expect(controller.activePitches, isEmpty);
+
+      controller.dispose();
+      await pumpEventQueue();
+    },
+  );
 
   test('records microphone note timing and replays captured audio', () async {
     stopDuration = 0.8;

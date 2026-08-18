@@ -85,7 +85,7 @@ data class RtpMidiPacket(
         require(commands.isNotEmpty() || !phantomStatus) {
             "An empty MIDI list cannot set the phantom-status flag"
         }
-        require(firstDeltaEncoded || commands.firstOrNull()?.deltaTimeTicks == 0) {
+        require(commands.isEmpty() || firstDeltaEncoded || commands.first().deltaTimeTicks == 0) {
             "A non-zero first delta time must be encoded"
         }
         require(journal == null || journal.isNotEmpty()) {
@@ -165,6 +165,19 @@ object RtpMidiCodec {
             (second and RTP_PAYLOAD_TYPE_MASK) == PAYLOAD_TYPE
     }
 
+    fun readSsrcOrNull(
+        bytes: ByteArray,
+        offset: Int = 0,
+        length: Int = bytes.size - offset,
+    ): Long? {
+        if (!isRtpMidiPacket(bytes, offset, length) || length < RTP_HEADER_BYTES) return null
+        val ssrcOffset = offset + 8
+        return ((bytes[ssrcOffset].toLong() and 0xFF) shl 24) or
+            ((bytes[ssrcOffset + 1].toLong() and 0xFF) shl 16) or
+            ((bytes[ssrcOffset + 2].toLong() and 0xFF) shl 8) or
+            (bytes[ssrcOffset + 3].toLong() and 0xFF)
+    }
+
     fun encode(packet: RtpMidiPacket, useRunningStatus: Boolean = true): ByteArray {
         val midiCommands = encodeCommandSection(packet, useRunningStatus)
         if (midiCommands.size > MAX_COMMAND_SECTION_BYTES) {
@@ -192,7 +205,7 @@ object RtpMidiCodec {
         }
         commandHeader = commandHeader or encodedLengthHighBits
         writer.writeUInt8(commandHeader)
-        if ((commandHeader and LONG_HEADER) != 0) writer.writeUInt8(midiCommands.size)
+        if ((commandHeader and LONG_HEADER) != 0) writer.writeUInt8(midiCommands.size and 0xFF)
         writer.writeBytes(midiCommands)
         packet.journal?.let(writer::writeBytes)
         return writer.toByteArray()
@@ -202,11 +215,7 @@ object RtpMidiCodec {
         bytes: ByteArray,
         offset: Int = 0,
         length: Int = bytes.size - offset,
-        initialRunningStatus: Int? = null,
     ): RtpMidiPacket {
-        if (initialRunningStatus != null && initialRunningStatus !in 0x80..0xEF) {
-            throw AppleMidiProtocolException("Initial running status is not a channel status")
-        }
         val reader = BigEndianPacketReader(bytes, offset, length)
         if (reader.remaining < RTP_HEADER_BYTES + 1) {
             throw AppleMidiProtocolException("Truncated RTP-MIDI datagram")
@@ -254,7 +263,6 @@ object RtpMidiCodec {
         val commands = decodeCommandSection(
             bytes = commandBytes,
             firstDeltaEncoded = firstDeltaEncoded,
-            initialRunningStatus = initialRunningStatus.takeIf { phantomStatus },
         )
         val journal = if (hasJournal) {
             if (reader.remaining == 0) {
@@ -281,9 +289,8 @@ object RtpMidiCodec {
         bytes: ByteArray,
         offset: Int = 0,
         length: Int = bytes.size - offset,
-        initialRunningStatus: Int? = null,
     ): RtpMidiPacket? = try {
-        decode(bytes, offset, length, initialRunningStatus)
+        decode(bytes, offset, length)
     } catch (_: AppleMidiProtocolException) {
         null
     }
@@ -312,12 +319,11 @@ object RtpMidiCodec {
     private fun decodeCommandSection(
         bytes: ByteArray,
         firstDeltaEncoded: Boolean,
-        initialRunningStatus: Int?,
     ): List<TimedMidiMessage> {
         if (bytes.isEmpty()) return emptyList()
         val reader = BigEndianPacketReader(bytes, 0, bytes.size)
         val result = ArrayList<TimedMidiMessage>()
-        var runningStatus = initialRunningStatus ?: -1
+        var runningStatus = -1
         var commandIndex = 0
         while (reader.remaining > 0) {
             val delta = if (commandIndex > 0 || firstDeltaEncoded) readDeltaTime(reader) else 0

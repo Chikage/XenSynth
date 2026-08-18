@@ -1,6 +1,7 @@
 import CoreMIDI
 import Darwin
 import Foundation
+import UIKit
 
 final class NetworkMIDIEventBuffer {
   private struct PendingEvent {
@@ -298,21 +299,60 @@ final class MIDIKeyboardController {
   var onEvent: (([String: Any]) -> Void)?
 
   private final class SourceContext {
+    let endpoint: MIDIEndpointRef
+    let generation: UInt64
     let isNetwork: Bool
-    var runningStatus: UInt8?
+    private let lifecycleLock = NSLock()
+    private let parserLock = NSLock()
+    private var active = true
+    private var runningStatus: UInt8?
 
-    init(isNetwork: Bool) {
+    init(endpoint: MIDIEndpointRef, generation: UInt64, isNetwork: Bool) {
+      self.endpoint = endpoint
+      self.generation = generation
       self.isNetwork = isNetwork
+    }
+
+    var isActive: Bool {
+      lifecycleLock.lock()
+      defer { lifecycleLock.unlock() }
+      return active
+    }
+
+    func deactivate() {
+      lifecycleLock.lock()
+      active = false
+      lifecycleLock.unlock()
+    }
+
+    func withRunningStatus<T>(_ body: (inout UInt8?) -> T) -> T {
+      parserLock.lock()
+      defer { parserLock.unlock() }
+      return body(&runningStatus)
     }
   }
 
   private var client = MIDIClientRef()
   private var inputPort = MIDIPortRef()
   private var sourceContexts: [MIDIEndpointRef: SourceContext] = [:]
+  private let sourceContextsLock = NSLock()
+  private var nextSourceGeneration: UInt64 = 0
+  private var retiredSourceContexts: [SourceContext] = []
+  private let retiredSourceContextsLock = NSLock()
   private var isStarted = false
   private var networkSessionObserver: NSObjectProtocol?
-  private var networkConnectionIds = Set<ObjectIdentifier>()
+  private var applicationActiveObserver: NSObjectProtocol?
+  /// `connections()` can recreate Swift wrappers for an unchanged socket, so
+  /// object identity cannot be used to decide whether a peer was removed.
+  private var networkConnectionKeys = Set<String>()
+  private var networkRefreshGeneration: UInt64 = 0
+  /// `nil` means that all currently available sources are enabled.  CoreMIDI
+  /// exposes one shared source for all AppleMIDI peers, so network input uses
+  /// the stable `applemidi:input` identity rather than a per-peer endpoint.
+  private var selectedInputSourceIds: Set<String>?
   private let networkEventBuffer = NetworkMIDIEventBuffer()
+  private let networkIngressLogLock = NSLock()
+  private var didLogNetworkIngress = false
   private let inputEnabledLock = NSLock()
   private var storedInputEnabled = true
 
@@ -328,13 +368,25 @@ final class MIDIKeyboardController {
       events.forEach(self.emit)
     }
     let session = MIDINetworkSession.default()
-    networkConnectionIds = Set(session.connections().map(ObjectIdentifier.init))
+    networkConnectionKeys = Set(session.connections().map(Self.networkConnectionKey))
     networkSessionObserver = NotificationCenter.default.addObserver(
       forName: NSNotification.Name(rawValue: MIDINetworkNotificationSessionDidChange),
       object: session,
       queue: .main
     ) { [weak self] _ in
       self?.networkSessionDidChange()
+    }
+    // CoreMIDI can tear down the network source while the app is suspended.
+    // Reconnect once on foreground so a stale endpoint ref cannot silently
+    // swallow the first MIDI packets after returning to the app.
+    applicationActiveObserver = NotificationCenter.default.addObserver(
+      forName: UIApplication.didBecomeActiveNotification,
+      object: nil,
+      queue: .main
+    ) { [weak self] _ in
+      guard let self, self.inputEnabled, self.isStarted else { return }
+      self.refreshConnections(forceNetworkReconnect: true)
+      self.scheduleNetworkConnectionRefreshes()
     }
   }
 
@@ -345,10 +397,76 @@ final class MIDIKeyboardController {
     if !enabled { stop() }
   }
 
+  /// Returns every CoreMIDI source visible to the app, including the shared
+  /// AppleMIDI source.  The payload intentionally mirrors NativeMidiOutput so
+  /// Flutter can render input and output devices with one model.
+  func inputDevices() -> [[String: Any]] {
+    var devices: [[String: Any]] = []
+    var seen = Set<String>()
+    let networkSource = MIDINetworkSession.default().sourceEndpoint()
+    let enumeratedSources = (0..<MIDIGetNumberOfSources()).compactMap { index -> MIDIEndpointRef? in
+      let source = MIDIGetSource(index)
+      return source == 0 ? nil : source
+    }
+    for source in enumeratedSources {
+      let isNetwork = source == networkSource && networkSource != 0
+      let id = Self.sourceId(for: source, isNetwork: isNetwork)
+      guard seen.insert(id).inserted else { continue }
+      devices.append(Self.deviceMap(for: source, id: id, isNetwork: isNetwork))
+    }
+    if networkSource != 0, seen.insert(Self.networkInputSourceId).inserted {
+      devices.append(Self.deviceMap(
+        for: networkSource,
+        id: Self.networkInputSourceId,
+        isNetwork: true
+      ))
+    // The network source may not have been published yet (for example during
+    // app launch), but the session is still a valid selectable input target.
+    } else if networkSource == 0, MIDINetworkSession.default().isEnabled {
+      let id = Self.networkInputSourceId
+      if seen.insert(id).inserted {
+        devices.append([
+          "id": id,
+          "name": "RTP-MIDI / AppleMIDI",
+          "model": "Network",
+          "transport": "network",
+          "isNetwork": true,
+          "hostAddress": "",
+          "port": MIDINetworkSession.default().networkPort,
+        ])
+      }
+    }
+    return devices.sorted {
+      ($0["name"] as? String ?? "").localizedCaseInsensitiveCompare(
+        $1["name"] as? String ?? ""
+      ) == .orderedAscending
+    }
+  }
+
+  /// Applies the user-selected source IDs.  Passing `configured = false`
+  /// preserves the pre-device-list behaviour (all sources enabled).
+  func setInputSourceIds(_ ids: [String], configured: Bool = true) {
+    let next = configured ? Set(ids.filter { !$0.isEmpty }) : nil
+    guard selectedInputSourceIds != next else { return }
+    selectedInputSourceIds = next
+    if isStarted {
+      // A deselected source can no longer deliver its matching Note Off. Clear
+      // queued network events and release all input-owned notes before the
+      // source endpoints are disconnected.
+      networkEventBuffer.clear()
+      emit(["type": "allNotesOff"])
+      refreshConnections()
+    }
+  }
+
   func start() throws {
     guard inputEnabled else { return }
+    let networkSession = MIDINetworkSession.default()
+    networkSession.connectionPolicy = .anyone
+    networkSession.isEnabled = true
     guard !isStarted else {
       refreshConnections()
+      scheduleNetworkConnectionRefreshes()
       return
     }
 
@@ -379,16 +497,23 @@ final class MIDIKeyboardController {
     client = newClient
     inputPort = newInputPort
     isStarted = true
+    NSLog(
+      "Xen Synth MIDI input started (port=%u, AppleMIDI port=%lu, source=%u)",
+      newInputPort,
+      networkSession.networkPort,
+      networkSession.sourceEndpoint()
+    )
     refreshConnections()
+    scheduleNetworkConnectionRefreshes()
   }
 
   func stop() {
     networkEventBuffer.clear()
+    networkRefreshGeneration &+= 1
     guard isStarted else { return }
-    for source in sourceContexts.keys {
-      MIDIPortDisconnectSource(inputPort, source)
+    for source in sourceContextsSnapshot().keys {
+      disconnectInputSource(source)
     }
-    sourceContexts.removeAll()
     MIDIPortDispose(inputPort)
     MIDIClientDispose(client)
     inputPort = MIDIPortRef()
@@ -397,45 +522,148 @@ final class MIDIKeyboardController {
     emit(["type": "allNotesOff"])
   }
 
-  private func refreshConnections() {
+  private func refreshConnections(forceNetworkReconnect: Bool = false) {
     guard isStarted, inputPort != 0 else { return }
-    let sources = Set((0..<MIDIGetNumberOfSources()).compactMap { index -> MIDIEndpointRef? in
+    let enumeratedSources = (0..<MIDIGetNumberOfSources()).compactMap { index -> MIDIEndpointRef? in
       let source = MIDIGetSource(index)
       return source == 0 ? nil : source
-    })
-    for source in Array(sourceContexts.keys) where !sources.contains(source) {
-      MIDIPortDisconnectSource(inputPort, source)
-      sourceContexts.removeValue(forKey: source)
     }
     let networkSource = MIDINetworkSession.default().sourceEndpoint()
-    for source in sources where sourceContexts[source] == nil {
-      let context = SourceContext(
+    let sources = Self.inputSources(
+      enumeratedSources: enumeratedSources,
+      networkSource: networkSource
+    ).filter { source in
+      guard let selectedInputSourceIds else { return true }
+      let isNetwork = networkSource != 0 && source == networkSource
+      return selectedInputSourceIds.contains(Self.sourceId(for: source, isNetwork: isNetwork))
+    }
+    if forceNetworkReconnect, networkSource != 0,
+       sourceContext(for: networkSource) != nil {
+      disconnectInputSource(networkSource)
+    }
+    for (source, context) in sourceContextsSnapshot() {
+      let shouldBeNetwork = networkSource != 0 && source == networkSource
+      guard !sources.contains(source) || context.isNetwork != shouldBeNetwork else {
+        continue
+      }
+      disconnectInputSource(source)
+    }
+    for source in sources where sourceContext(for: source) == nil {
+      connectInputSource(
+        source,
         isNetwork: networkSource != 0 && source == networkSource
       )
-      let sourceRefCon = Unmanaged.passUnretained(context).toOpaque()
-      if MIDIPortConnectSource(inputPort, source, sourceRefCon) == noErr {
-        sourceContexts[source] = context
+    }
+  }
+
+  private func scheduleNetworkConnectionRefreshes() {
+    // CoreMIDI may publish sourceEndpoint well after the session notification
+    // on a busy device. Supersede older retry sets so notifications cannot
+    // accumulate redundant refresh work.
+    networkRefreshGeneration &+= 1
+    let generation = networkRefreshGeneration
+    let delays: [TimeInterval] = [0.05, 0.25, 0.75, 1.5, 3.0]
+    for (index, delay) in delays.enumerated() {
+      DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+        guard let self,
+              self.inputEnabled,
+              self.isStarted,
+              self.networkRefreshGeneration == generation else { return }
+        let networkSource = MIDINetworkSession.default().sourceEndpoint()
+        if networkSource != 0, self.sourceContext(for: networkSource) != nil {
+          return
+        }
+        self.refreshConnections()
+        if index == delays.count - 1,
+           MIDINetworkSession.default().sourceEndpoint() == 0 {
+          NSLog("Xen Synth AppleMIDI input source was not published after retry window")
+        }
       }
     }
+  }
+
+  static func inputSources(
+    enumeratedSources: [MIDIEndpointRef],
+    networkSource: MIDIEndpointRef
+  ) -> Set<MIDIEndpointRef> {
+    var sources = Set(enumeratedSources.filter { $0 != 0 })
+    if networkSource != 0 {
+      sources.insert(networkSource)
+    }
+    return sources
+  }
+
+  private static let networkInputSourceId = "applemidi:input"
+
+  private static func sourceId(for source: MIDIEndpointRef, isNetwork: Bool) -> String {
+    if isNetwork { return networkInputSourceId }
+    var uniqueId: Int32 = 0
+    if MIDIObjectGetIntegerProperty(source, kMIDIPropertyUniqueID, &uniqueId) == noErr {
+      return "coremidi:\(uniqueId)"
+    }
+    return "coremidi:endpoint:\(source)"
+  }
+
+  private static func displayName(for source: MIDIEndpointRef) -> String {
+    var unmanagedName: Unmanaged<CFString>?
+    guard MIDIObjectGetStringProperty(source, kMIDIPropertyDisplayName, &unmanagedName) == noErr,
+          let name = unmanagedName?.takeRetainedValue() else {
+      return "MIDI input"
+    }
+    let value = name as String
+    return value.isEmpty ? "MIDI input" : value
+  }
+
+  private static func transportName(for source: MIDIEndpointRef, isNetwork: Bool) -> String {
+    if isNetwork { return "network" }
+    // CoreMIDI does not publish a portable transport property on every iOS
+    // endpoint. Use the endpoint's display identity for the two transports
+    // users need to distinguish, and keep a neutral CoreMIDI fallback.
+    let normalizedName = displayName(for: source).lowercased()
+    if normalizedName.contains("bluetooth") || normalizedName.contains("ble") {
+      return "bluetooth"
+    }
+    if normalizedName.contains("usb") {
+      return "usb"
+    }
+    return "coremidi"
+  }
+
+  private static func deviceMap(
+    for source: MIDIEndpointRef,
+    id: String,
+    isNetwork: Bool
+  ) -> [String: Any] {
+    [
+      "id": id,
+      "name": displayName(for: source),
+      "model": isNetwork ? "Network" : "CoreMIDI",
+      "transport": transportName(for: source, isNetwork: isNetwork),
+      "isNetwork": isNetwork,
+    ]
   }
 
   private func handle(
     packetList: UnsafePointer<MIDIPacketList>,
     sourceContext: SourceContext?
   ) {
-    guard inputEnabled else { return }
-    let isNetwork = sourceContext?.isNetwork == true
+    guard inputEnabled,
+          let sourceContext,
+          isCurrentSourceContext(sourceContext) else { return }
+    let isNetwork = sourceContext.isNetwork
     let ingressEpoch = isNetwork ? networkEventBuffer.captureIngressEpoch() : nil
     if isNetwork, ingressEpoch == nil { return }
-    var runningStatus = sourceContext?.runningStatus
-    let parsed = Self.events(
-      from: packetList,
-      runningStatus: &runningStatus,
-      isNetwork: isNetwork
-    )
-    sourceContext?.runningStatus = runningStatus
+    let parsed = sourceContext.withRunningStatus { runningStatus in
+      Self.events(
+        from: packetList,
+        runningStatus: &runningStatus,
+        isNetwork: isNetwork
+      )
+    }
+    guard isCurrentSourceContext(sourceContext) else { return }
     guard !parsed.isEmpty else { return }
     if isNetwork {
+      logFirstNetworkIngress(eventCount: parsed.count)
       networkEventBuffer.enqueue(parsed, ingressEpoch: ingressEpoch)
       return
     }
@@ -449,14 +677,175 @@ final class MIDIKeyboardController {
     onEvent?(event)
   }
 
+  private func connectInputSource(_ source: MIDIEndpointRef, isNetwork: Bool) {
+    sourceContextsLock.lock()
+    guard sourceContexts[source] == nil else {
+      sourceContextsLock.unlock()
+      return
+    }
+    nextSourceGeneration &+= 1
+    let context = SourceContext(
+      endpoint: source,
+      generation: nextSourceGeneration,
+      isNetwork: isNetwork
+    )
+    // Install the context before CoreMIDI sees its unretained refCon. The
+    // connect call is allowed to deliver an already queued packet immediately.
+    sourceContexts[source] = context
+    sourceContextsLock.unlock()
+
+    let sourceRefCon = Unmanaged.passUnretained(context).toOpaque()
+    let status = MIDIPortConnectSource(inputPort, source, sourceRefCon)
+    guard status == noErr else {
+      sourceContextsLock.lock()
+      if sourceContexts[source] === context {
+        sourceContexts.removeValue(forKey: source)
+      }
+      sourceContextsLock.unlock()
+      context.deactivate()
+      retainRetiredSourceContext(context)
+      NSLog("Xen Synth could not connect MIDI input source %u: %d", source, status)
+      return
+    }
+    if isNetwork {
+      NSLog(
+        "Xen Synth connected AppleMIDI input source %u generation %llu",
+        source,
+        context.generation
+      )
+    }
+  }
+
+  private func sourceContext(for source: MIDIEndpointRef) -> SourceContext? {
+    sourceContextsLock.lock()
+    defer { sourceContextsLock.unlock() }
+    return sourceContexts[source]
+  }
+
+  private func sourceContextsSnapshot() -> [MIDIEndpointRef: SourceContext] {
+    sourceContextsLock.lock()
+    defer { sourceContextsLock.unlock() }
+    return sourceContexts
+  }
+
+  private func isCurrentSourceContext(_ context: SourceContext) -> Bool {
+    sourceContextsLock.lock()
+    let current = sourceContexts[context.endpoint]
+    let matches = current === context && current?.generation == context.generation
+    sourceContextsLock.unlock()
+    return matches && context.isActive
+  }
+
+  private func disconnectInputSource(_ source: MIDIEndpointRef) {
+    sourceContextsLock.lock()
+    let context = sourceContexts.removeValue(forKey: source)
+    sourceContextsLock.unlock()
+    guard let context else { return }
+    context.deactivate()
+    if inputPort != 0 {
+      MIDIPortDisconnectSource(inputPort, source)
+    }
+    retainRetiredSourceContext(context)
+  }
+
+  private func retainRetiredSourceContext(_ context: SourceContext) {
+    retiredSourceContextsLock.lock()
+    retiredSourceContexts.append(context)
+    retiredSourceContextsLock.unlock()
+    // A CoreMIDI callback may already be in flight when disconnect returns.
+    // Preserve its opaque refCon briefly; `isActive` suppresses stale events.
+    DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self, context] in
+      guard let self else { return }
+      self.retiredSourceContextsLock.lock()
+      self.retiredSourceContexts.removeAll { $0 === context }
+      self.retiredSourceContextsLock.unlock()
+    }
+  }
+
+  private func logFirstNetworkIngress(eventCount: Int) {
+    networkIngressLogLock.lock()
+    let shouldLog = !didLogNetworkIngress
+    didLogNetworkIngress = true
+    networkIngressLogLock.unlock()
+    if shouldLog {
+      NSLog("Xen Synth received AppleMIDI input (%d parsed event(s))", eventCount)
+    }
+  }
+
   private func networkSessionDidChange() {
-    let next = Set(MIDINetworkSession.default().connections().map(ObjectIdentifier.init))
-    let connectionWasRemoved = !networkConnectionIds.subtracting(next).isEmpty
-    networkConnectionIds = next
+    let session = MIDINetworkSession.default()
+    let connections = session.connections()
+    logNetworkConnections(connections)
+    let next = Set(connections.map(Self.networkConnectionKey))
+    // The key prefers Bonjour domain/name, so CoreMIDI wrapper replacement and
+    // control/data-port changes do not look like a disconnect.  Compare the
+    // identities themselves instead of only the count: a peer can disappear
+    // while another is added in the same notification, leaving the count
+    // unchanged but still requiring release recovery for notes it owned.
+    let connectionWasRemoved = !networkConnectionKeys.subtracting(next).isEmpty
+    networkConnectionKeys = next
+    if inputEnabled {
+      // All peers feed CoreMIDI's shared source endpoint. A peer-list change
+      // must not disconnect that endpoint; refreshConnections will replace it
+      // naturally if CoreMIDI actually publishes a different endpoint ref.
+      refreshConnections()
+      scheduleNetworkConnectionRefreshes()
+    }
     if inputEnabled && connectionWasRemoved {
       networkEventBuffer.clear()
       emit(["type": "allNotesOff", "source": "network"])
     }
+  }
+
+  /// The CoreMIDI session chooses the address family for incoming invitations.
+  /// Keep those connections alive so the shared network source can deliver
+  /// MIDI; IPv4-only selection is applied to Bonjour discovery and outbound
+  /// `MIDINetworkHost` construction in `MIDIOutputRouter`.
+  private func logNetworkConnections(_ connections: Set<MIDINetworkConnection>) {
+    guard !connections.isEmpty else { return }
+    let description = connections.map { connection in
+      "\(connection.host.address):\(connection.host.port)"
+    }.joined(separator: ",")
+    NSLog(
+      "Xen Synth AppleMIDI connections %@ (IPv4 preferred for outbound; incoming family retained)",
+      description
+    )
+  }
+
+  private static func networkConnectionKey(_ connection: MIDINetworkConnection) -> String {
+    let host = connection.host
+    return networkConnectionKey(
+      serviceDomain: host.netServiceDomain,
+      serviceName: host.netServiceName,
+      address: host.address,
+      port: host.port
+    )
+  }
+
+  static func networkConnectionKey(
+    serviceDomain: String?,
+    serviceName: String?,
+    address: String,
+    port: Int
+  ) -> String {
+    let domain = serviceDomain?
+      .trimmingCharacters(in: .whitespacesAndNewlines)
+      .lowercased() ?? ""
+    let name = serviceName?
+      .trimmingCharacters(in: .whitespacesAndNewlines)
+      .lowercased() ?? ""
+    if !name.isEmpty {
+      // Bonjour identity describes the peer, while its advertised control
+      // and data ports may differ or fall back independently.
+      return "service|\(domain)|\(name)"
+    }
+    let numericAddress = address
+      .trimmingCharacters(in: .whitespacesAndNewlines)
+      .split(separator: "%", maxSplits: 1)
+      .first
+      .map(String.init)?
+      .lowercased() ?? ""
+    return "address|\(numericAddress)|\(port)"
   }
 
   private static let notifyProc: MIDINotifyProc = { notification, refCon in
@@ -464,10 +853,14 @@ final class MIDIKeyboardController {
     let controller = Unmanaged<MIDIKeyboardController>.fromOpaque(refCon).takeUnretainedValue()
     switch notification.pointee.messageID {
     case .msgObjectAdded, .msgSetupChanged:
-      DispatchQueue.main.async { controller.refreshConnections() }
+      DispatchQueue.main.async {
+        controller.refreshConnections()
+        controller.scheduleNetworkConnectionRefreshes()
+      }
     case .msgObjectRemoved:
       DispatchQueue.main.async {
         controller.refreshConnections()
+        controller.scheduleNetworkConnectionRefreshes()
         controller.emit(["type": "allNotesOff"])
       }
     default:
@@ -476,11 +869,11 @@ final class MIDIKeyboardController {
   }
 
   private static let readProc: MIDIReadProc = { packetList, refCon, sourceConnectionRefCon in
-    guard let refCon else { return }
+    guard let refCon, let sourceConnectionRefCon else { return }
     let controller = Unmanaged<MIDIKeyboardController>.fromOpaque(refCon).takeUnretainedValue()
-    let sourceContext = sourceConnectionRefCon.map {
-      Unmanaged<SourceContext>.fromOpaque($0).takeUnretainedValue()
-    }
+    let sourceContext = Unmanaged<SourceContext>
+      .fromOpaque(sourceConnectionRefCon)
+      .takeUnretainedValue()
     controller.handle(packetList: packetList, sourceContext: sourceContext)
   }
 
@@ -629,6 +1022,9 @@ final class MIDIKeyboardController {
   deinit {
     if let networkSessionObserver {
       NotificationCenter.default.removeObserver(networkSessionObserver)
+    }
+    if let applicationActiveObserver {
+      NotificationCenter.default.removeObserver(applicationActiveObserver)
     }
     stop()
     networkEventBuffer.close()

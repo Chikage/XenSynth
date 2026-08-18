@@ -1,4 +1,5 @@
 import Flutter
+import Darwin
 import UIKit
 import XCTest
 @testable import Runner
@@ -65,17 +66,23 @@ class RunnerTests: XCTestCase {
     XCTAssertGreaterThan(magnitudes[69], magnitudes[75])
   }
 
-  func testPianoDetectorEmitsA4() {
-    let detector = PianoPitchDetector(sampleRate: 16_000, frameSize: 8_192)
-    let notes = detector.detect(sineWave(
+  func testHybridPitchDetectorEmitsA4() {
+    let samples = sineWave(
       frequency: 440,
       sampleRate: 16_000,
-      count: 8_192,
+      count: 2_048,
       amplitude: 0.7
-    ))
+    )
+    let estimate = HybridPitchFusion.fuse(
+      yin: YinPitchDetector(sampleRate: 16_000, frameSize: 2_048).detect(samples),
+      fft: FftSpectrumAnalyzer(sampleRate: 16_000, frameSize: 2_048)
+        .analyzeFrame(samples)
+        .pitchEstimate
+    )
 
-    XCTAssertNotNil(notes[69])
-    XCTAssertGreaterThan(notes[69] ?? 0, 80)
+    XCTAssertNotNil(estimate)
+    XCTAssertEqual(estimate?.midiPitch ?? 0, 69, accuracy: 0.1)
+    XCTAssertGreaterThan(estimate?.confidence ?? 0, 0.7)
   }
 
   func testWaveEncodingCreatesPcmHeader() throws {
@@ -133,10 +140,276 @@ class RunnerTests: XCTestCase {
     ))
   }
 
+  func testAppleMIDIIPv4SelectorPrefersPrivateLanAddress() {
+    let selected = AppleMIDIIPv4AddressSelector.select(from: [
+      socketAddressData("169.254.22.8"),
+      socketAddressData("10.36.64.108"),
+    ])
+
+    XCTAssertEqual(selected, "10.36.64.108")
+    XCTAssertTrue(AppleMIDIIPv4AddressSelector.isPrivate(selected ?? ""))
+  }
+
+  func testAppleMIDIIPv4SelectorRejectsNonLanAddresses() {
+    XCTAssertNil(AppleMIDIIPv4AddressSelector.select(from: [
+      socketAddressData("8.8.8.8"),
+      Data(repeating: 0, count: 28),
+    ]))
+  }
+
+  func testAppleMIDIIPv4SelectorAcceptsIPv4MappedIPv6Address() {
+    XCTAssertEqual(
+      AppleMIDIIPv4AddressSelector.select(from: [
+        mappedIPv6SocketAddressData("192.168.50.24"),
+      ]),
+      "192.168.50.24"
+    )
+  }
+
+  func testNetworkMidiOutputBufferUsesBoundedThreefoldDefaults() {
+    XCTAssertEqual(NetworkMIDIOutputBuffer.defaultMaximumPendingMessages, 1_536)
+    XCTAssertEqual(NetworkMIDIOutputBuffer.defaultNormalBatchDelayNanoseconds, 2_000_000)
+    XCTAssertEqual(NetworkMIDIOutputBuffer.defaultCongestedBatchDelayNanoseconds, 4_000_000)
+  }
+
+  func testNetworkMidiOutputBufferCoalescesContinuousMessages() {
+    let buffer = NetworkMIDIOutputBuffer(
+      maximumPendingMessages: 16,
+      normalBatchDelayNanoseconds: 1_000_000_000,
+      congestedBatchDelayNanoseconds: 1_000_000_000,
+      criticalBatchDelayNanoseconds: 1_000_000_000,
+      criticalRetryDelayNanoseconds: 1_000_000_000
+    )
+    var delivered: [[UInt8]] = []
+    buffer.onMessages = {
+      delivered.append(contentsOf: $0)
+      return true
+    }
+    defer { buffer.close() }
+
+    buffer.enqueue([
+      [0xE0, 0, 64],
+      [0x90, 60, 100],
+      [0xE0, 12, 65],
+      [0xB0, 7, 40],
+      [0xB0, 7, 96],
+      [0xB0, 101, 0],
+      [0xB0, 101, 127],
+      [0xC0, 5],
+      [0x80, 60, 0],
+    ])
+    buffer.flushSynchronously()
+
+    XCTAssertFalse(delivered.contains([0xE0, 0, 64]))
+    XCTAssertFalse(delivered.contains([0xB0, 7, 40]))
+    XCTAssertTrue(delivered.contains([0xE0, 12, 65]))
+    XCTAssertTrue(delivered.contains([0xB0, 7, 96]))
+    XCTAssertEqual(delivered.filter { $0.count >= 2 && $0[1] == 101 }.count, 2)
+    XCTAssertTrue(delivered.contains([0x90, 60, 100]))
+    XCTAssertTrue(delivered.contains([0xC0, 5]))
+    XCTAssertTrue(delivered.contains([0x80, 60, 0]))
+  }
+
+  func testNetworkMidiOutputBufferEvictsContinuousDataBeforeReleases() {
+    let buffer = NetworkMIDIOutputBuffer(
+      maximumPendingMessages: 3,
+      normalBatchDelayNanoseconds: 1_000_000_000,
+      congestedBatchDelayNanoseconds: 1_000_000_000,
+      criticalBatchDelayNanoseconds: 1_000_000_000,
+      criticalRetryDelayNanoseconds: 1_000_000_000
+    )
+    var delivered: [[UInt8]] = []
+    buffer.onMessages = {
+      delivered.append(contentsOf: $0)
+      return true
+    }
+    defer { buffer.close() }
+
+    buffer.enqueue([
+      [0x90, 60, 100],
+      [0xE0, 0, 64],
+      [0xC0, 5],
+      [0x80, 60, 0],
+    ])
+    buffer.flushSynchronously()
+
+    XCTAssertEqual(delivered, [
+      [0x90, 60, 100],
+      [0xC0, 5],
+      [0x80, 60, 0],
+    ])
+  }
+
+  func testNetworkMidiOutputBufferUsesPanicWhenCriticalQueueSaturates() {
+    let buffer = NetworkMIDIOutputBuffer(
+      maximumPendingMessages: 2,
+      normalBatchDelayNanoseconds: 1_000_000_000,
+      congestedBatchDelayNanoseconds: 1_000_000_000,
+      criticalBatchDelayNanoseconds: 1_000_000_000,
+      criticalRetryDelayNanoseconds: 1_000_000_000
+    )
+    var delivered: [[UInt8]] = []
+    buffer.onMessages = {
+      delivered.append(contentsOf: $0)
+      return true
+    }
+    defer { buffer.close() }
+
+    buffer.enqueue([
+      [0x80, 60, 0],
+      [0x80, 61, 0],
+      [0x80, 62, 0],
+    ])
+    buffer.flushSynchronously()
+
+    XCTAssertEqual(delivered.count, 49)
+    XCTAssertEqual(delivered[0], [0xB0, 64, 0])
+    XCTAssertEqual(delivered[1], [0xB0, 120, 0])
+    XCTAssertEqual(delivered[47], [0xBF, 123, 0])
+    XCTAssertEqual(delivered[48], [0x80, 62, 0])
+  }
+
+  func testNetworkMidiOutputBufferRejectsMalformedChannelMessages() {
+    let buffer = NetworkMIDIOutputBuffer(
+      normalBatchDelayNanoseconds: 1_000_000_000,
+      congestedBatchDelayNanoseconds: 1_000_000_000,
+      criticalBatchDelayNanoseconds: 1_000_000_000,
+      criticalRetryDelayNanoseconds: 1_000_000_000
+    )
+    var delivered: [[UInt8]] = []
+    buffer.onMessages = {
+      delivered.append(contentsOf: $0)
+      return true
+    }
+    defer { buffer.close() }
+
+    buffer.enqueue([
+      [0x90, 60],
+      [0xC0, 5, 1],
+      [0xF8, 0],
+      [0xC0, 5],
+    ])
+    buffer.flushSynchronously()
+
+    XCTAssertEqual(delivered, [[0xC0, 5]])
+  }
+
+  func testNetworkMidiOutputBufferRetriesReleaseWithoutNewNote() {
+    let buffer = makeRetryTestOutputBuffer()
+    var delivered: [[UInt8]] = []
+    buffer.onMessages = {
+      delivered.append(contentsOf: $0)
+      return true
+    }
+    defer { buffer.close() }
+
+    buffer.enqueue([
+      [0x90, 60, 100],
+      [0x80, 60, 0],
+    ])
+    waitForOutputRetry()
+    buffer.flushSynchronously()
+
+    XCTAssertEqual(delivered.filter { $0 == [0x80, 60, 0] }.count, 2)
+  }
+
+  func testNetworkMidiOutputBufferDoesNotRetryAcrossNewNoteGeneration() {
+    let buffer = makeRetryTestOutputBuffer()
+    var delivered: [[UInt8]] = []
+    buffer.onMessages = {
+      delivered.append(contentsOf: $0)
+      return true
+    }
+    defer { buffer.close() }
+
+    buffer.enqueue([
+      [0x90, 60, 100],
+      [0x80, 60, 0],
+      [0x90, 60, 90],
+    ])
+    waitForOutputRetry()
+    buffer.flushSynchronously()
+
+    XCTAssertEqual(delivered.filter { $0 == [0x80, 60, 0] }.count, 1)
+  }
+
+  func testNetworkMidiOutputBufferInvalidatesRetriesAfterDeliveryGateCloses() {
+    let buffer = makeRetryTestOutputBuffer()
+    var deliveryAttempts = 0
+    buffer.onMessages = { _ in
+      deliveryAttempts += 1
+      return false
+    }
+    defer { buffer.close() }
+
+    buffer.enqueue([[0x80, 60, 0]])
+    buffer.flushSynchronously()
+    waitForOutputRetry()
+    buffer.flushSynchronously()
+
+    XCTAssertEqual(deliveryAttempts, 1)
+  }
+
   func testNetworkMidiEventBufferUsesThreefoldDefaults() {
     XCTAssertEqual(NetworkMIDIEventBuffer.defaultPlayoutDelayNanoseconds, 60_000_000)
     XCTAssertEqual(NetworkMIDIEventBuffer.defaultMaximumTimestampSkewNanoseconds, 120_000_000)
     XCTAssertEqual(NetworkMIDIEventBuffer.defaultMaximumPendingEvents, 6_144)
+  }
+
+  func testMidiInputSourcesExplicitlyIncludeNetworkEndpoint() {
+    XCTAssertEqual(
+      MIDIKeyboardController.inputSources(
+        enumeratedSources: [11, 12],
+        networkSource: 42
+      ),
+      Set([11, 12, 42])
+    )
+  }
+
+  func testMidiInputSourcesIgnoreZeroAndDeduplicateNetworkEndpoint() {
+    XCTAssertEqual(
+      MIDIKeyboardController.inputSources(
+        enumeratedSources: [0, 11, 42, 42],
+        networkSource: 42
+      ),
+      Set([11, 42])
+    )
+  }
+
+  func testMidiNetworkConnectionKeyPrefersStableBonjourIdentity() {
+    let first = MIDIKeyboardController.networkConnectionKey(
+      serviceDomain: "LOCAL.",
+      serviceName: " JustPiano ",
+      address: " 192.168.1.27 ",
+      port: 5_004
+    )
+    let second = MIDIKeyboardController.networkConnectionKey(
+      serviceDomain: "local.",
+      serviceName: "justpiano",
+      address: "fe80::27%en0",
+      port: 5_005
+    )
+
+    XCTAssertEqual(first, second)
+    XCTAssertEqual(first, "service|local.|justpiano")
+  }
+
+  func testMidiNetworkConnectionKeyNormalizesScopedAddressFallback() {
+    let controlPort = MIDIKeyboardController.networkConnectionKey(
+      serviceDomain: nil,
+      serviceName: nil,
+      address: "FE80::27%en0",
+      port: 5_004
+    )
+    let dataPort = MIDIKeyboardController.networkConnectionKey(
+      serviceDomain: nil,
+      serviceName: nil,
+      address: "fe80::27%awdl0",
+      port: 5_005
+    )
+
+    XCTAssertEqual(controlPort, "address|fe80::27|5004")
+    XCTAssertNotEqual(controlPort, dataPort)
   }
 
   func testNetworkMidiEventBufferPreservesBatchOrder() {
@@ -280,6 +553,42 @@ class RunnerTests: XCTestCase {
     (0..<count).map { index in
       Float(amplitude * sin(2 * .pi * frequency * Double(index) / sampleRate))
     }
+  }
+
+  private func makeRetryTestOutputBuffer() -> NetworkMIDIOutputBuffer {
+    NetworkMIDIOutputBuffer(
+      maximumPendingMessages: 16,
+      normalBatchDelayNanoseconds: 1_000_000_000,
+      congestedBatchDelayNanoseconds: 1_000_000_000,
+      criticalBatchDelayNanoseconds: 1_000_000_000,
+      criticalRetryDelayNanoseconds: 5_000_000
+    )
+  }
+
+  private func waitForOutputRetry() {
+    let elapsed = expectation(description: "Critical MIDI retry elapsed")
+    DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(25)) {
+      elapsed.fulfill()
+    }
+    wait(for: [elapsed], timeout: 0.2)
+  }
+
+  private func socketAddressData(_ address: String) -> Data {
+    var storage = sockaddr_in()
+    storage.sin_family = UInt8(AF_INET)
+    address.withCString { pointer in
+      _ = inet_pton(AF_INET, pointer, &storage.sin_addr)
+    }
+    return Data(bytes: &storage, count: MemoryLayout<sockaddr_in>.size)
+  }
+
+  private func mappedIPv6SocketAddressData(_ address: String) -> Data {
+    var storage = sockaddr_in6()
+    storage.sin6_family = UInt8(AF_INET6)
+    "::ffff:\(address)".withCString { pointer in
+      _ = inet_pton(AF_INET6, pointer, &storage.sin6_addr)
+    }
+    return Data(bytes: &storage, count: MemoryLayout<sockaddr_in6>.size)
   }
 
 }

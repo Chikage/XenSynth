@@ -177,6 +177,92 @@ void main() {
     },
   );
 
+  testWidgets('MIDI input and output devices use separate selectable lists', (
+    tester,
+  ) async {
+    await tester.binding.setSurfaceSize(const Size(874, 500));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+
+    var settings = const XenSynthSettings();
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: AppPalette.theme(),
+        home: Scaffold(
+          body: Align(
+            alignment: Alignment.topRight,
+            child: SizedBox(
+              height: 430,
+              child: StatefulBuilder(
+                builder: (context, setState) => SettingsPanel(
+                  settings: settings,
+                  midiInputDevices: const [
+                    NativeMidiOutput(
+                      id: 'coremidi:12',
+                      name: 'USB Keyboard',
+                      transport: 'usb',
+                      isInput: true,
+                    ),
+                  ],
+                  midiOutputDevices: const [
+                    NativeMidiOutput(
+                      id: 'applemidi:peer',
+                      name: 'Studio iPad',
+                      hostAddress: '192.168.1.12',
+                      port: 5004,
+                      transport: 'network',
+                    ),
+                  ],
+                  onChanged: (value) => setState(() => settings = value),
+                  onReset: () {},
+                ),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+
+    final scrollable = find
+        .byWidgetPredicate(
+          (widget) =>
+              widget is Scrollable &&
+              widget.axisDirection == AxisDirection.down,
+        )
+        .first;
+    await tester.scrollUntilVisible(
+      find.text('MIDI输入设备'),
+      100,
+      scrollable: scrollable,
+    );
+    expect(find.text('MIDI输入设备'), findsOneWidget);
+    await tester.scrollUntilVisible(
+      find.textContaining('USB Keyboard'),
+      100,
+      scrollable: scrollable,
+    );
+
+    await tester.tap(find.byType(Checkbox).first);
+    await tester.pump();
+    expect(settings.midiInputDeviceSelectionConfigured, isTrue);
+    expect(settings.midiInputDeviceIds, isEmpty);
+
+    await tester.scrollUntilVisible(
+      find.text('MIDI输出设备'),
+      100,
+      scrollable: scrollable,
+    );
+    expect(find.text('MIDI输出设备'), findsOneWidget);
+    await tester.scrollUntilVisible(
+      find.textContaining('Studio iPad'),
+      100,
+      scrollable: scrollable,
+    );
+    await tester.tap(find.byType(Checkbox).last);
+    await tester.pump();
+    expect(settings.midiOutputDeviceIds, ['applemidi:peer']);
+    expect(settings.networkMidiDestinationIds, ['applemidi:peer']);
+  });
+
   testWidgets('network scan results are selectable destinations', (
     tester,
   ) async {

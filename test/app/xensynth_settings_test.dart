@@ -237,6 +237,9 @@ void main() {
       const configured = XenSynthSettings(
         midiInputEnabled: false,
         midiOutputEnabled: false,
+        midiInputDeviceIds: ['coremidi:12', 'applemidi:input'],
+        midiInputDeviceSelectionConfigured: true,
+        midiOutputDeviceIds: ['applemidi:SnVzdFBpYW5v', 'bluetooth:42:0'],
         networkMidiEnabled: true,
         networkMidiDestinationIds: ['applemidi:SnVzdFBpYW5v'],
         bluetoothMidiOutputIds: ['bluetooth:42:0'],
@@ -246,11 +249,27 @@ void main() {
 
       expect(restored.midiInputEnabled, isFalse);
       expect(restored.midiOutputEnabled, isFalse);
+      expect(restored.midiInputDeviceIds, ['coremidi:12', 'applemidi:input']);
+      expect(restored.midiInputDeviceSelectionConfigured, isTrue);
+      expect(
+        restored.midiOutputDeviceIds,
+        containsAll(['applemidi:SnVzdFBpYW5v', 'bluetooth:42:0']),
+      );
       expect(restored.networkMidiEnabled, isTrue);
       expect(restored.networkMidiDestinationIds, ['applemidi:SnVzdFBpYW5v']);
       expect(restored.bluetoothMidiOutputIds, ['bluetooth:42:0']);
       expect(restored.toMap(), isNot(contains('networkMidiHost')));
       expect(restored.toMap(), isNot(contains('networkMidiPort')));
+    });
+
+    test('migrates unified MIDI output IDs from transport-specific lists', () {
+      final restored = XenSynthSettings.fromMap(<String, Object?>{
+        'networkMidiDestinationIds': ['applemidi:peer'],
+        'bluetoothMidiOutputIds': ['coremidi:9'],
+      });
+
+      expect(restored.midiOutputDeviceIds, ['applemidi:peer', 'coremidi:9']);
+      expect(restored.midiInputDeviceSelectionConfigured, isFalse);
     });
 
     test('applies pitch offset with the opposite sign', () {

@@ -62,12 +62,52 @@ class NativeMidiEvent {
 }
 
 class NativeMidiOutput {
-  const NativeMidiOutput({required this.id, required this.name});
+  const NativeMidiOutput({
+    required this.id,
+    required this.name,
+    this.hostAddress,
+    this.port,
+    this.model,
+    this.transport,
+    this.isInput = false,
+  });
 
   final String id;
   final String name;
+  final String? hostAddress;
+  final int? port;
+  final String? model;
+  final String? transport;
+  final bool isInput;
 
   bool get isNetwork => id.startsWith('applemidi:');
+
+  String get displayName {
+    final identity =
+        model != null &&
+            model!.isNotEmpty &&
+            !name.toLowerCase().contains(model!.toLowerCase())
+        ? '$name ($model)'
+        : name;
+    final endpoint = hostAddress == null || hostAddress!.isEmpty
+        ? null
+        : port == null || port! <= 0
+        ? hostAddress
+        : '$hostAddress:$port';
+    final transportLabel = switch (transport?.toLowerCase()) {
+      'usb' => 'USB',
+      'bluetooth' || 'bluetoothmidi' => 'Bluetooth',
+      'network' || 'applemidi' || 'rtp-midi' => 'LAN',
+      _ => null,
+    };
+    final labeledIdentity =
+        transportLabel == null ||
+            identity.toLowerCase().contains(transportLabel.toLowerCase())
+        ? identity
+        : '$identity [$transportLabel]';
+    if (endpoint == null) return labeledIdentity;
+    return '$labeledIdentity - $endpoint';
+  }
 
   static NativeMidiOutput? fromMessage(Object? message) {
     if (message is! Map) return null;
@@ -75,9 +115,30 @@ class NativeMidiOutput {
     final id = map['id']?.toString().trim();
     if (id == null || id.isEmpty) return null;
     final name = map['name']?.toString().trim();
+    final hostAddress = map['hostAddress']?.toString().trim();
+    final rawPort = map['port'];
+    final port = rawPort is num
+        ? rawPort.toInt()
+        : int.tryParse(rawPort?.toString() ?? '');
+    final model = map['model']?.toString().trim();
+    final transport = map['transport']?.toString().trim();
+    final isInput = switch (map['isInput']) {
+      bool value => value,
+      num value => value != 0,
+      _ => false,
+    };
     return NativeMidiOutput(
       id: id,
-      name: name == null || name.isEmpty ? 'MIDI output' : name,
+      name: name == null || name.isEmpty
+          ? (isInput ? 'MIDI input' : 'MIDI output')
+          : name,
+      hostAddress: hostAddress == null || hostAddress.isEmpty
+          ? null
+          : hostAddress,
+      port: port,
+      model: model == null || model.isEmpty ? null : model,
+      transport: transport == null || transport.isEmpty ? null : transport,
+      isInput: isInput,
     );
   }
 }
@@ -191,6 +252,7 @@ class XenSynthNativeBridge {
     int bankMsb = 0,
     int bankLsb = 0,
     bool networkOutput = true,
+    int? audioTargetTimeNanos,
   }) async {
     final result = await _invoke('noteOn', <String, Object?>{
       'id': ?id,
@@ -201,23 +263,65 @@ class XenSynthNativeBridge {
       'bankMsb': bankMsb,
       'bankLsb': bankLsb,
       'networkOutput': networkOutput,
+      'audioTargetTimeNanos': ?audioTargetTimeNanos,
     });
     return result is num ? result.toInt() : int.tryParse('$result');
   }
 
-  Future<void> noteOff(int token) {
-    return _invokeVoid('noteOff', <String, Object?>{'token': token});
+  Future<void> noteOff(int token, {int? audioTargetTimeNanos}) {
+    return _invokeVoid('noteOff', <String, Object?>{
+      'token': token,
+      'audioTargetTimeNanos': ?audioTargetTimeNanos,
+    });
   }
 
-  Future<void> allNotesOff({bool networkOutput = true}) {
+  Future<void> allNotesOff({
+    bool networkOutput = true,
+    int? audioTargetTimeNanos,
+  }) {
     return _invokeVoid('allNotesOff', <String, Object?>{
       'networkOutput': networkOutput,
+      'audioTargetTimeNanos': ?audioTargetTimeNanos,
     });
   }
 
   Future<void> setMidiInputEnabled(bool enabled) {
     return _invokeVoid('setMidiInputEnabled', <String, Object?>{
       'enabled': enabled,
+    });
+  }
+
+  Future<List<NativeMidiOutput>> getMidiInputDevices() async {
+    final result = await _invoke('getMidiInputDevices');
+    if (result is! List) return const <NativeMidiOutput>[];
+    return result
+        .map((message) {
+          if (message is Map) {
+            final map = Map<Object?, Object?>.from(message)..['isInput'] = true;
+            return NativeMidiOutput.fromMessage(map);
+          }
+          return null;
+        })
+        .whereType<NativeMidiOutput>()
+        .toList(growable: false);
+  }
+
+  Future<List<NativeMidiOutput>> getMidiOutputDevices() async {
+    final result = await _invoke('getMidiOutputDevices');
+    if (result is! List) return const <NativeMidiOutput>[];
+    return result
+        .map(NativeMidiOutput.fromMessage)
+        .whereType<NativeMidiOutput>()
+        .toList(growable: false);
+  }
+
+  Future<void> setMidiInputDeviceIds(
+    List<String> ids, {
+    bool configured = true,
+  }) {
+    return _invokeVoid('setMidiInputDeviceIds', <String, Object?>{
+      'ids': ids,
+      'configured': configured,
     });
   }
 
@@ -230,6 +334,16 @@ class XenSynthNativeBridge {
   Future<void> configureNetworkMidiOutput({required bool enabled}) {
     return _invokeVoid('configureNetworkMidiOutput', <String, Object?>{
       'enabled': enabled,
+    });
+  }
+
+  Future<void> configureNetworkAudio({
+    required List<double> mappedPitches,
+    required int program,
+  }) {
+    return _invokeVoid('configureNetworkAudio', <String, Object?>{
+      'mappedPitches': mappedPitches,
+      'program': program,
     });
   }
 

@@ -25,6 +25,9 @@ class XenSynthSettings {
     this.externalMidiControlsProgram = false,
     this.midiInputEnabled = true,
     this.midiOutputEnabled = true,
+    this.midiInputDeviceIds = const <String>[],
+    this.midiInputDeviceSelectionConfigured = false,
+    this.midiOutputDeviceIds = const <String>[],
     this.networkMidiEnabled = true,
     this.networkMidiDestinationIds = const <String>[],
     this.bluetoothMidiOutputIds = const <String>[],
@@ -70,6 +73,15 @@ class XenSynthSettings {
   final bool externalMidiControlsProgram;
   final bool midiInputEnabled;
   final bool midiOutputEnabled;
+
+  /// Stable native IDs selected for input. An empty list is treated as all
+  /// sources until the user explicitly changes a row in the device list.
+  final List<String> midiInputDeviceIds;
+  final bool midiInputDeviceSelectionConfigured;
+
+  /// Unified output IDs. Network/Bluetooth legacy fields remain persisted as
+  /// routing-specific mirrors for the native transports.
+  final List<String> midiOutputDeviceIds;
   final bool networkMidiEnabled;
   final List<String> networkMidiDestinationIds;
   final List<String> bluetoothMidiOutputIds;
@@ -185,6 +197,17 @@ class XenSynthSettings {
         map['midiOutputEnabled'],
         defaults.midiOutputEnabled,
       ),
+      midiInputDeviceIds: _stringList(map['midiInputDeviceIds']),
+      midiInputDeviceSelectionConfigured: _bool(
+        map['midiInputDeviceSelectionConfigured'],
+        map.containsKey('midiInputDeviceIds'),
+      ),
+      midiOutputDeviceIds: _stringList(map['midiOutputDeviceIds']).isNotEmpty
+          ? _stringList(map['midiOutputDeviceIds'])
+          : _mergeStringLists(
+              _stringList(map['networkMidiDestinationIds']),
+              _stringList(map['bluetoothMidiOutputIds']),
+            ),
       networkMidiEnabled: _bool(
         map['networkMidiEnabled'],
         defaults.networkMidiEnabled,
@@ -266,6 +289,9 @@ class XenSynthSettings {
     'externalMidiControlsProgram': externalMidiControlsProgram,
     'midiInputEnabled': midiInputEnabled,
     'midiOutputEnabled': midiOutputEnabled,
+    'midiInputDeviceIds': midiInputDeviceIds,
+    'midiInputDeviceSelectionConfigured': midiInputDeviceSelectionConfigured,
+    'midiOutputDeviceIds': midiOutputDeviceIds,
     'networkMidiEnabled': networkMidiEnabled,
     'networkMidiDestinationIds': networkMidiDestinationIds,
     'bluetoothMidiOutputIds': bluetoothMidiOutputIds,
@@ -311,6 +337,9 @@ class XenSynthSettings {
     bool? externalMidiControlsProgram,
     bool? midiInputEnabled,
     bool? midiOutputEnabled,
+    List<String>? midiInputDeviceIds,
+    bool? midiInputDeviceSelectionConfigured,
+    List<String>? midiOutputDeviceIds,
     bool? networkMidiEnabled,
     List<String>? networkMidiDestinationIds,
     List<String>? bluetoothMidiOutputIds,
@@ -348,6 +377,11 @@ class XenSynthSettings {
           externalMidiControlsProgram ?? this.externalMidiControlsProgram,
       midiInputEnabled: midiInputEnabled ?? this.midiInputEnabled,
       midiOutputEnabled: midiOutputEnabled ?? this.midiOutputEnabled,
+      midiInputDeviceIds: midiInputDeviceIds ?? this.midiInputDeviceIds,
+      midiInputDeviceSelectionConfigured:
+          midiInputDeviceSelectionConfigured ??
+          this.midiInputDeviceSelectionConfigured,
+      midiOutputDeviceIds: midiOutputDeviceIds ?? this.midiOutputDeviceIds,
       networkMidiEnabled: networkMidiEnabled ?? this.networkMidiEnabled,
       networkMidiDestinationIds:
           networkMidiDestinationIds ?? this.networkMidiDestinationIds,
@@ -454,5 +488,12 @@ class XenSynthSettings {
         .where((item) => item.isNotEmpty)
         .toSet()
         .toList(growable: false);
+  }
+
+  static List<String> _mergeStringLists(
+    List<String> first,
+    List<String> second,
+  ) {
+    return <String>{...first, ...second}.toList(growable: false)..sort();
   }
 }

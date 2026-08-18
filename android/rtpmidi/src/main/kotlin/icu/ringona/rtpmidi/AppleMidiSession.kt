@@ -21,6 +21,7 @@ internal class AppleMidiSession(
     var nextSequence: Int,
     localClock: RtpMidiClock,
     jitterBufferMillis: Long,
+    jitterBufferMaximumQueueSize: Int = 6_144,
     var transportAddress: InetAddress = advertisedAddress,
     val advertisedControlPort: Int = remoteControlPort,
 ) {
@@ -31,14 +32,21 @@ internal class AppleMidiSession(
     var lastClockSyncNanos: Long = 0L
     var clockRequestT1: Long? = null
     var remoteToLocalOffsetTicks: Long? = null
-    var incomingRunningStatus: Int? = null
-    val sequenceTracker = RtpSequenceTracker()
+    private var nextExtendedSequence = nextSequence.toLong()
+    private var pendingReceiverFeedbackSequence: Long? = null
+    private var lastReceiverFeedbackNanos: Long? = null
+    private val packetReorderBuffer = RtpMidiPacketReorderBuffer()
+    private val recoveryJournalSender = RtpMidiRecoveryJournalSender()
+    private val recoveryJournalReceiver = RtpMidiRecoveryJournalReceiver()
     val sessionClock = RtpMidiSessionClock(localClock)
     val activeNotes = Array(16) { BooleanArray(128) }
     val sustainDown = BooleanArray(16)
     private val jitterBuffer = RtpMidiJitterBuffer<ByteArray>(
         sessionClock = sessionClock,
         initialDelayNanos = jitterBufferMillis.coerceIn(24, 120) * NANOS_PER_MILLI,
+        maximumQueueSize = jitterBufferMaximumQueueSize,
+        priorityOf = ::midiDeliveryPriority,
+        protectedPriority = MIDI_PRIORITY_CRITICAL_RELEASE,
     )
     private data class RecoveryEvent(
         val targetTimeNanos: Long,
@@ -50,6 +58,28 @@ internal class AppleMidiSession(
         compareBy<RecoveryEvent> { it.targetTimeNanos }.thenBy { it.insertionOrder },
     )
     private var nextRecoveryInsertionOrder = 0L
+    private val deliveryLock = Any()
+    private var deliveryClosed = false
+    private var incomingPackets = 0L
+    private var releasedPackets = 0L
+    private var lostPackets = 0L
+    private var reorderedPackets = 0L
+    private var latePackets = 0L
+    private var duplicatePackets = 0L
+    private var recoveryAttempts = 0L
+    private var recoveryFallbacks = 0L
+    private var recoveredMessages = 0L
+    private var outgoingPackets = 0L
+    private var outgoingSendFailures = 0L
+    private var receiverFeedbackSent = 0L
+    private var journalHeartbeatsSent = 0L
+    private var urgentJournalHeartbeatsSent = 0L
+
+    init {
+        require(jitterBufferMaximumQueueSize >= MidiOutputAccumulator.FULL_PANIC_MESSAGE_COUNT) {
+            "jitterBufferMaximumQueueSize must hold one complete 16-channel panic"
+        }
+    }
 
     val controlAddress: InetSocketAddress
         get() = InetSocketAddress(transportAddress, remoteControlPort)
@@ -132,16 +162,136 @@ internal class AppleMidiSession(
         }
     }
 
+    fun takeNextOutgoingSequence(): Long {
+        val extended = nextExtendedSequence
+        nextExtendedSequence++
+        nextSequence = (nextExtendedSequence and 0xFFFF).toInt()
+        recoveryJournalSender.reservePacketSequence(extended)
+        return extended
+    }
+
+    val nextOutgoingExtendedSequence: Long
+        get() = nextExtendedSequence
+
+    fun recoveryJournalForPacket(packetExtendedSequence: Long): ByteArray? =
+        recoveryJournalSender.journalForPacket(packetExtendedSequence)
+
+    fun recordOutgoingPacket(
+        packetExtendedSequence: Long,
+        messages: List<MidiChannelMessage>,
+        sentAtNanos: Long,
+    ) {
+        recoveryJournalSender.recordPacket(packetExtendedSequence, messages, sentAtNanos)
+        outgoingPackets++
+    }
+
+    fun recordOutgoingSendFailure() {
+        outgoingSendFailures++
+    }
+
+    fun acknowledgeOutgoingSequence(sequenceNumber: Int): Long? =
+        recoveryJournalSender.acknowledge(sequenceNumber)
+
+    fun resetOutgoingRecoveryForPanic(nextPacketExtendedSequence: Long) {
+        recoveryJournalSender.resetHistoryForPanic(nextPacketExtendedSequence)
+    }
+
+    fun journalHeartbeatDue(nowNanos: Long, intervalNanos: Long): Boolean =
+        recoveryJournalSender.heartbeatDue(nowNanos, intervalNanos)
+
+    val hasUnacknowledgedJournal: Boolean
+        get() = recoveryJournalSender.hasUnacknowledgedState
+
+    val hasUnacknowledgedCriticalReleaseJournal: Boolean
+        get() = recoveryJournalSender.hasUnacknowledgedCriticalRelease
+
+    fun offerRtpPacket(packet: RtpMidiPacket, arrivalNanos: Long): RtpMidiPacketRelease {
+        incomingPackets++
+        return packetReorderBuffer.offer(packet, arrivalNanos).also(::recordPacketRelease)
+    }
+
+    fun queueReceiverFeedback(extendedSequenceNumber: Long) {
+        require(extendedSequenceNumber >= 0) { "extendedSequenceNumber must not be negative" }
+        val pending = pendingReceiverFeedbackSequence
+        if (pending == null || extendedSequenceNumber > pending) {
+            pendingReceiverFeedbackSequence = extendedSequenceNumber
+        }
+    }
+
+    @JvmOverloads
+    fun takeReceiverFeedback(
+        nowNanos: Long = System.nanoTime(),
+        minimumIntervalNanos: Long = 0L,
+    ): Int? {
+        require(minimumIntervalNanos >= 0L) { "minimumIntervalNanos must not be negative" }
+        val pending = pendingReceiverFeedbackSequence ?: return null
+        if (lastReceiverFeedbackNanos?.let { nowNanos - it < minimumIntervalNanos } == true) {
+            return null
+        }
+        pendingReceiverFeedbackSequence = null
+        lastReceiverFeedbackNanos = nowNanos
+        return (pending and 0xFFFF).toInt()
+    }
+
+    fun expireRtpGap(nowNanos: Long): RtpMidiPacketRelease =
+        packetReorderBuffer.expireGap(nowNanos).also(::recordPacketRelease)
+
+    val nextRtpGapDeadlineNanos: Long?
+        get() = packetReorderBuffer.nextGapDeadlineNanos
+
+    fun recoverFromPacketLoss(loss: RtpMidiPacketLoss): RtpMidiRecoveryResult =
+        recoveryJournalReceiver.recover(
+            journalBytes = loss.recoveryPacket.packet.journal,
+            missingExtendedSequence = loss.firstMissingExtendedSequence,
+            journalPacketExtendedSequence = loss.recoveryPacket.extendedSequenceNumber,
+        ).also(::recordRecovery)
+
+    fun recoverFromInitialPacket(packet: BufferedRtpMidiPacket): RtpMidiRecoveryResult {
+        val checkpoint = RtpMidiRecoveryJournalCodec.decodeOrNull(packet.packet.journal)
+            ?.checkpointSequenceNumber
+            ?.let { unwrapSequenceNear(it, packet.extendedSequenceNumber) }
+            ?: packet.extendedSequenceNumber
+        return recoveryJournalReceiver.recover(
+            journalBytes = packet.packet.journal,
+            missingExtendedSequence = checkpoint,
+            journalPacketExtendedSequence = packet.extendedSequenceNumber,
+        ).also(::recordRecovery)
+    }
+
+    fun observeOrderedNetworkMidi(messages: List<MidiChannelMessage>) {
+        recoveryJournalReceiver.observe(messages)
+    }
+
     fun offerMidi(
         remoteTimestamp: Long,
         arrivalNanos: Long,
         message: ByteArray,
     ): Long {
-        return jitterBuffer.offer(
+        val safeMessage = message.copyOf()
+        val result = jitterBuffer.offerWithResult(
             remoteTimestamp = remoteTimestamp,
             arrivalNanos = arrivalNanos,
-            value = message.copyOf(),
-        ).targetTimeNanos
+            value = safeMessage,
+        )
+        if (!result.accepted && isCriticalMidiRelease(safeMessage)) {
+            queueJitterOverflowPanic(remoteTimestamp, arrivalNanos)
+        }
+        return result.scheduled.targetTimeNanos
+    }
+
+    private fun queueJitterOverflowPanic(remoteTimestamp: Long, arrivalNanos: Long) {
+        jitterBuffer.clearQueuedValuesPreservingTiming()
+        recoveryQueue.clear()
+        recoveryJournalReceiver.forceReleasedState()
+        MidiOutputAccumulator.fullPanic(arrivalNanos).forEach { panic ->
+            check(
+                jitterBuffer.offerWithResult(
+                    remoteTimestamp = remoteTimestamp,
+                    arrivalNanos = arrivalNanos,
+                    value = panic.bytes,
+                ).accepted,
+            ) { "A cleared jitter buffer must hold one complete panic" }
+        }
     }
 
     fun nextMidiTargetNanos(): Long? {
@@ -196,12 +346,72 @@ internal class AppleMidiSession(
         return events.sortedBy { it.targetTimeNanos }
     }
 
+    fun deliverIfOpen(delivery: () -> Unit): Boolean = synchronized(deliveryLock) {
+        if (deliveryClosed) return@synchronized false
+        delivery()
+        true
+    }
+
+    fun closeDelivery(closeAction: () -> Unit): Boolean = synchronized(deliveryLock) {
+        if (deliveryClosed) return@synchronized false
+        deliveryClosed = true
+        closeAction()
+        true
+    }
+
     val jitterBufferStatistics: RtpMidiJitterBufferStatistics
         get() = jitterBuffer.statistics
+
+    fun recordReceiverFeedbackSent() {
+        receiverFeedbackSent++
+    }
+
+    fun recordJournalHeartbeatSent(urgent: Boolean) {
+        journalHeartbeatsSent++
+        if (urgent) urgentJournalHeartbeatsSent++
+    }
+
+    val statistics: AppleMidiSessionStatistics
+        get() = AppleMidiSessionStatistics(
+            sessionId = id,
+            peerId = peerId,
+            peerName = peerName,
+            incomingPackets = incomingPackets,
+            releasedPackets = releasedPackets,
+            lostPackets = lostPackets,
+            reorderedPackets = reorderedPackets,
+            latePackets = latePackets,
+            duplicatePackets = duplicatePackets,
+            recoveryAttempts = recoveryAttempts,
+            recoveryFallbacks = recoveryFallbacks,
+            recoveredMessages = recoveredMessages,
+            outgoingPackets = outgoingPackets,
+            outgoingSendFailures = outgoingSendFailures,
+            receiverFeedbackSent = receiverFeedbackSent,
+            journalHeartbeatsSent = journalHeartbeatsSent,
+            urgentJournalHeartbeatsSent = urgentJournalHeartbeatsSent,
+            jitterBuffer = jitterBuffer.statistics,
+            jitterBufferDelayNanos = jitterBuffer.playoutDelayNanos,
+            estimatedNetworkJitterNanos = jitterBuffer.estimatedJitterNanos,
+        )
 
     /** Earliest playout deadline, including synthetic recovery releases. */
     val nextMidiTargetTimeNanos: Long?
         get() = nextMidiTargetNanos()
+
+    private fun recordPacketRelease(release: RtpMidiPacketRelease) {
+        releasedPackets += release.packets.size
+        lostPackets += release.loss?.missingPackets ?: 0
+        if (release.reordered) reorderedPackets++
+        if (release.late) latePackets++
+        if (release.duplicate) duplicatePackets++
+    }
+
+    private fun recordRecovery(result: RtpMidiRecoveryResult) {
+        recoveryAttempts++
+        if (!result.journalApplied) recoveryFallbacks++
+        recoveredMessages += result.messages.size
+    }
 
     private fun Byte.unsignedMidi(): Int = (toInt() and 0xFF).coerceIn(0, 127)
 

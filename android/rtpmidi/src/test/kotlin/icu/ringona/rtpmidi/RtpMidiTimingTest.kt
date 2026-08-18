@@ -6,6 +6,10 @@ import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import java.util.Collections
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
+import kotlin.concurrent.thread
 
 class RtpMidiTimingTest {
     @Test
@@ -219,6 +223,83 @@ class RtpMidiTimingTest {
     }
 
     @Test
+    fun protectedJitterValueEvictsLowerPriorityTail() {
+        val sessionClock = RtpMidiSessionClock(RtpMidiClock(initialTimestampTicks = 0) { 0L })
+        val buffer = RtpMidiJitterBuffer<String>(
+            sessionClock = sessionClock,
+            maximumQueueSize = 2,
+            priorityOf = { if (it == "release") 2 else 1 },
+            protectedPriority = 2,
+        )
+
+        buffer.offer(remoteTimestamp = 100, arrivalNanos = 0, value = "first")
+        buffer.offer(remoteTimestamp = 110, arrivalNanos = 0, value = "second")
+        val release = buffer.offerWithResult(
+            remoteTimestamp = 120,
+            arrivalNanos = 0,
+            value = "release",
+        )
+
+        assertTrue(release.accepted)
+        assertEquals(
+            listOf("first", "release"),
+            buffer.drainReady(Long.MAX_VALUE).map { it.value },
+        )
+        assertEquals(1L, buffer.statistics.droppedOverflowValues)
+    }
+
+    @Test
+    fun protectedLateValueRunsImmediatelyAfterPlayoutWatermark() {
+        val sessionClock = RtpMidiSessionClock(RtpMidiClock(initialTimestampTicks = 0) { 0L })
+        val buffer = RtpMidiJitterBuffer<String>(
+            sessionClock = sessionClock,
+            priorityOf = { if (it == "release") 2 else 1 },
+            protectedPriority = 2,
+        )
+        val played = buffer.offer(remoteTimestamp = 100, arrivalNanos = 0, value = "played")
+        assertEquals(listOf("played"), buffer.drainReady(Long.MAX_VALUE).map { it.value })
+
+        val release = buffer.offerWithResult(
+            remoteTimestamp = 99,
+            arrivalNanos = 0,
+            value = "release",
+        )
+
+        assertTrue(release.accepted)
+        assertTrue(release.scheduled.targetTimeNanos > played.targetTimeNanos)
+        assertEquals(listOf("release"), buffer.drainReady(Long.MAX_VALUE).map { it.value })
+        assertEquals(0L, buffer.statistics.droppedLateValues)
+    }
+
+    @Test
+    fun droppedTailDoesNotPushLaterProtectedValueIntoTheFuture() {
+        val sessionClock = RtpMidiSessionClock(RtpMidiClock(initialTimestampTicks = 0) { 0L })
+        val buffer = RtpMidiJitterBuffer<String>(
+            sessionClock = sessionClock,
+            maximumQueueSize = 1,
+            priorityOf = { if (it == "release") 2 else 1 },
+            protectedPriority = 2,
+        )
+        buffer.offer(remoteTimestamp = 100, arrivalNanos = 0, value = "first")
+        val dropped = buffer.offerWithResult(
+            remoteTimestamp = 10_000,
+            arrivalNanos = 0,
+            value = "tail",
+        )
+
+        val release = buffer.offerWithResult(
+            remoteTimestamp = 101,
+            arrivalNanos = 0,
+            value = "release",
+        )
+
+        assertFalse(dropped.accepted)
+        assertTrue(release.accepted)
+        assertTrue(release.scheduled.targetTimeNanos < dropped.scheduled.targetTimeNanos)
+        assertEquals(listOf("release"), buffer.drainReady(Long.MAX_VALUE).map { it.value })
+    }
+
+    @Test
     fun defaultJitterBufferCapacityIsSixThousandOneHundredFortyFourEvents() {
         val localClock = RtpMidiClock(initialTimestampTicks = 0) { 0L }
         val sessionClock = RtpMidiSessionClock(localClock)
@@ -315,4 +396,188 @@ class RtpMidiTimingTest {
         assertArrayEquals(byteArrayOf(0xB0.toByte(), 64, 0), events[1].bytes)
         assertTrue(session.resetActiveStateForRecovery().isEmpty())
     }
+
+    @Test
+    fun journalRepairInsertedAtGapTimestampStaysBetweenEarlierAndLaterCommands() {
+        val session = AppleMidiSession(
+            id = "ordered-recovery",
+            peerId = null,
+            peerName = "loopback",
+            advertisedAddress = java.net.InetAddress.getLoopbackAddress(),
+            remoteControlPort = 5004,
+            remoteDataPort = 5005,
+            initiatorToken = 1L,
+            initiatedLocally = false,
+            localSsrc = 2L,
+            remoteSsrc = 3L,
+            state = AppleMidiSessionState.CONNECTED,
+            createdAtNanos = 0L,
+            lastActivityNanos = 0L,
+            nextSequence = 0,
+            localClock = RtpMidiClock(initialTimestampTicks = 0) { 0L },
+            jitterBufferMillis = 60L,
+        )
+
+        session.offerMidi(100, 0L, byteArrayOf(0x90.toByte(), 60, 100))
+        session.offerMidi(100, 1L, byteArrayOf(0x80.toByte(), 60, 0))
+        session.offerMidi(100, 1L, byteArrayOf(0x90.toByte(), 61, 100))
+
+        val messages = session.drainMidi(Long.MAX_VALUE).map(AppleMidiEvent::bytes)
+        assertArrayEquals(byteArrayOf(0x90.toByte(), 60, 100), messages[0])
+        assertArrayEquals(byteArrayOf(0x80.toByte(), 60, 0), messages[1])
+        assertArrayEquals(byteArrayOf(0x90.toByte(), 61, 100), messages[2])
+    }
+
+    @Test
+    fun criticalOnlyJitterOverflowQueuesCompletePanic() {
+        val session = testSession("overflow-panic", jitterBufferMaximumQueueSize = 48)
+        repeat(48) { note ->
+            session.offerMidi(
+                remoteTimestamp = 100L + note,
+                arrivalNanos = 0L,
+                message = byteArrayOf(0x80.toByte(), note.toByte(), 0),
+            )
+        }
+
+        session.offerMidi(
+            remoteTimestamp = 200,
+            arrivalNanos = 0L,
+            message = byteArrayOf(0xB0.toByte(), 64, 0),
+        )
+        val panic = session.drainMidi(Long.MAX_VALUE).map(AppleMidiEvent::bytes)
+
+        assertEquals(48, panic.size)
+        for (channel in 0 until 16) {
+            assertTrue(panic.any { it.matchesControl(channel, 64) })
+            assertTrue(panic.any { it.matchesControl(channel, 120) })
+            assertTrue(panic.any { it.matchesControl(channel, 123) })
+        }
+    }
+
+    @Test
+    fun sessionCloseWaitsForInflightDeliveryAndRejectsLaterEvents() {
+        val session = testSession("delivery-race")
+        val order = Collections.synchronizedList(mutableListOf<String>())
+        val deliveryEntered = CountDownLatch(1)
+        val releaseDelivery = CountDownLatch(1)
+        val closeAttempted = CountDownLatch(1)
+
+        val deliveryThread = thread(name = "rtpmidi-test-delivery") {
+            assertTrue(
+                session.deliverIfOpen {
+                    order += "event-start"
+                    deliveryEntered.countDown()
+                    assertTrue(releaseDelivery.await(5, TimeUnit.SECONDS))
+                    order += "event-end"
+                },
+            )
+        }
+        assertTrue(deliveryEntered.await(5, TimeUnit.SECONDS))
+        val closeThread = thread(name = "rtpmidi-test-close") {
+            closeAttempted.countDown()
+            assertTrue(session.closeDelivery { order += "close" })
+        }
+        assertTrue(closeAttempted.await(5, TimeUnit.SECONDS))
+        releaseDelivery.countDown()
+        deliveryThread.join(5_000)
+        closeThread.join(5_000)
+
+        assertFalse(deliveryThread.isAlive)
+        assertFalse(closeThread.isAlive)
+        assertEquals(listOf("event-start", "event-end", "close"), order)
+        assertFalse(session.deliverIfOpen { order += "late-event" })
+        assertEquals(listOf("event-start", "event-end", "close"), order)
+    }
+
+    @Test
+    fun sessionStatisticsSeparateLossReorderDuplicateAndLatePackets() {
+        val session = testSession("statistics")
+        val initial = testRtpPacket(sequence = 10)
+        val held = testRtpPacket(sequence = 12)
+
+        session.offerRtpPacket(initial, arrivalNanos = 0L)
+        session.offerRtpPacket(held, arrivalNanos = 1_000_000L)
+        session.offerRtpPacket(held, arrivalNanos = 2_000_000L)
+        session.expireRtpGap(nowNanos = 13_000_000L)
+        session.offerRtpPacket(testRtpPacket(sequence = 11), arrivalNanos = 14_000_000L)
+
+        session.recoverFromPacketLoss(
+            RtpMidiPacketLoss(
+                firstMissingExtendedSequence = 11,
+                missingPackets = 1,
+                recoveryPacket = BufferedRtpMidiPacket(held, 12, 1_000_000L),
+            ),
+        )
+        val outgoing = session.takeNextOutgoingSequence()
+        session.recordOutgoingPacket(outgoing, emptyList(), sentAtNanos = 20_000_000L)
+        session.recordOutgoingSendFailure()
+        session.recordReceiverFeedbackSent()
+        session.recordJournalHeartbeatSent(urgent = true)
+        session.offerMidi(100, 0L, byteArrayOf(0x90.toByte(), 60, 100))
+
+        val statistics = session.statistics
+        assertEquals(4L, statistics.incomingPackets)
+        assertEquals(2L, statistics.releasedPackets)
+        assertEquals(1L, statistics.lostPackets)
+        assertEquals(1L, statistics.reorderedPackets)
+        assertEquals(1L, statistics.duplicatePackets)
+        assertEquals(1L, statistics.latePackets)
+        assertEquals(1L, statistics.recoveryAttempts)
+        assertEquals(1L, statistics.recoveryFallbacks)
+        assertEquals(1L, statistics.outgoingPackets)
+        assertEquals(1L, statistics.outgoingSendFailures)
+        assertEquals(1L, statistics.receiverFeedbackSent)
+        assertEquals(1L, statistics.journalHeartbeatsSent)
+        assertEquals(1L, statistics.urgentJournalHeartbeatsSent)
+        assertEquals(1L, statistics.jitterBuffer.offeredValues)
+        assertEquals(60_000_000L, statistics.jitterBufferDelayNanos)
+    }
+
+    @Test
+    fun receiverFeedbackKeepsNewestSequenceWhileRateLimited() {
+        val session = testSession("receiver-feedback")
+        session.queueReceiverFeedback(10)
+        assertEquals(10, session.takeReceiverFeedback(100, 25))
+
+        session.queueReceiverFeedback(11)
+        session.queueReceiverFeedback(12)
+        assertNull(session.takeReceiverFeedback(124, 25))
+        assertEquals(12, session.takeReceiverFeedback(125, 25))
+    }
+
+    private fun testSession(
+        id: String,
+        jitterBufferMaximumQueueSize: Int = 6_144,
+    ) = AppleMidiSession(
+        id = id,
+        peerId = null,
+        peerName = "loopback",
+        advertisedAddress = java.net.InetAddress.getLoopbackAddress(),
+        remoteControlPort = 5004,
+        remoteDataPort = 5005,
+        initiatorToken = 1L,
+        initiatedLocally = false,
+        localSsrc = 2L,
+        remoteSsrc = 3L,
+        state = AppleMidiSessionState.CONNECTED,
+        createdAtNanos = 0L,
+        lastActivityNanos = 0L,
+        nextSequence = 0,
+        localClock = RtpMidiClock(initialTimestampTicks = 0) { 0L },
+        jitterBufferMillis = 60L,
+        jitterBufferMaximumQueueSize = jitterBufferMaximumQueueSize,
+    )
+
+    private fun testRtpPacket(sequence: Int) = RtpMidiPacket(
+        sequenceNumber = sequence,
+        timestamp = sequence.toLong(),
+        ssrc = 3L,
+        commands = emptyList(),
+        firstDeltaEncoded = false,
+        journal = null,
+    )
+
+    private fun ByteArray.matchesControl(channel: Int, controller: Int): Boolean =
+        (getOrNull(0)?.toInt()?.and(0xFF)) == 0xB0 + channel &&
+            (getOrNull(1)?.toInt()?.and(0xFF)) == controller && getOrNull(2)?.toInt() == 0
 }

@@ -125,8 +125,11 @@ class MidiInputParser(
                             )
                         )
                     }
+                    RESET_ALL_CONTROLLERS -> onEvent(
+                        MidiInputEvent.SustainPedal(down = false, channel = channel),
+                    )
                     ALL_SOUND_OFF_CONTROLLER,
-                    ALL_NOTES_OFF_CONTROLLER -> onEvent(MidiInputEvent.AllNotesOff(channel))
+                    in ALL_NOTES_OFF_CONTROLLERS -> onEvent(MidiInputEvent.AllNotesOff(channel))
                 }
             }
             PROGRAM_CHANGE -> onEvent(
@@ -167,6 +170,7 @@ class MidiInputParser(
         private const val SUSTAIN_PEDAL_CONTROLLER = 64
         private const val SUSTAIN_PEDAL_DOWN_VALUE = 64
         private const val ALL_SOUND_OFF_CONTROLLER = 120
-        private const val ALL_NOTES_OFF_CONTROLLER = 123
+        private const val RESET_ALL_CONTROLLERS = 121
+        private val ALL_NOTES_OFF_CONTROLLERS = 123..127
     }
 }

@@ -25,6 +25,7 @@ class XenSynthController extends ChangeNotifier {
   final Stopwatch _recordingClock = Stopwatch();
   final Map<int, int> _noteTokens = {};
   final Map<int, int> _noteEpochs = {};
+  final Map<int, _PendingNoteOn> _pendingNoteOns = {};
   final Set<int> _sustainedMidiPointers = {};
   final Set<int> _deferredMidiOffs = {};
   final Map<int, bool> _sustainByChannel = {};
@@ -55,9 +56,11 @@ class XenSynthController extends ChangeNotifier {
   bool audioReady = false;
   bool playing = false;
   bool pitchRecognitionAvailable = false;
+  List<NativeMidiOutput> midiInputDevices = const <NativeMidiOutput>[];
   List<NativeMidiOutput> bluetoothMidiOutputs = const <NativeMidiOutput>[];
   List<NativeMidiOutput> networkMidiOutputs = const <NativeMidiOutput>[];
   bool networkMidiScanning = false;
+  bool midiDeviceRefreshing = false;
   bool pitchRecognizing = false;
   bool pitchRecognitionBusy = false;
   String pitchRecognitionPhase = 'unavailable';
@@ -97,6 +100,8 @@ class XenSynthController extends ChangeNotifier {
       !_microphoneTakeSaved &&
       !_microphoneTakeSaveDismissed;
   bool get showingFftSpectrum => _microphoneTake;
+  List<NativeMidiOutput> get midiOutputDevices =>
+      _deduplicateMidiDevices([...bluetoothMidiOutputs, ...networkMidiOutputs]);
   String get scoreTitle => score?.title ?? 'XEN SYNTH';
   String get tuningLabel => tuning.profile.isEmpty ? 'TUN' : tuning.profile;
   double get currentBpm {
@@ -153,6 +158,7 @@ class XenSynthController extends ChangeNotifier {
           _native.setReverb(settings.reverbMix),
           _native.setLatency(settings.audioLatencyMs),
           _native.setProgram(program: settings.program),
+          _configureNetworkAudio(),
         ]);
       } catch (error) {
         debugPrint('Native audio initialization failed: $error');
@@ -163,8 +169,7 @@ class XenSynthController extends ChangeNotifier {
           _handleMidiEvent,
           onError: (Object error) => _setStatus('MIDI UNAVAILABLE'),
         );
-        await refreshBluetoothMidiOutputs(notify: false);
-        await refreshNetworkMidiOutputs(notify: false);
+        await refreshMidiDevices(notify: false);
         final pitchRecognitionState = await _native.getPitchRecognitionState();
         if (pitchRecognitionState.isNotEmpty) {
           _applyPitchRecognitionState(pitchRecognitionState, notify: false);
@@ -327,6 +332,7 @@ class XenSynthController extends ChangeNotifier {
 
   Future<void> releaseInputNotes() async {
     _noteEpochs.updateAll((key, value) => value + 1);
+    _cancelAllPendingNoteOns();
     _noteTokens.clear();
     for (final entry in activePitches.entries) {
       _emitPitchInput(
@@ -774,8 +780,22 @@ class XenSynthController extends ChangeNotifier {
     if (next.program != previous.program) {
       await _native.setProgram(program: next.program);
     }
+    if (next.program != previous.program ||
+        next.edo != previous.edo ||
+        next.pitchOffsetCents != previous.pitchOffsetCents ||
+        snapMappingChanged) {
+      await _configureNetworkAudio();
+    }
     if (next.midiInputEnabled != previous.midiInputEnabled) {
       await _native.setMidiInputEnabled(next.midiInputEnabled);
+    }
+    if (next.midiInputDeviceSelectionConfigured !=
+            previous.midiInputDeviceSelectionConfigured ||
+        !listEquals(next.midiInputDeviceIds, previous.midiInputDeviceIds)) {
+      await _native.setMidiInputDeviceIds(
+        next.midiInputDeviceIds,
+        configured: next.midiInputDeviceSelectionConfigured,
+      );
     }
     if (next.midiOutputEnabled != previous.midiOutputEnabled) {
       await _native.setMidiOutputEnabled(next.midiOutputEnabled);
@@ -826,11 +846,40 @@ class XenSynthController extends ChangeNotifier {
 
   Future<void> refreshBluetoothMidiOutputs({bool notify = true}) async {
     try {
-      bluetoothMidiOutputs = await _native.getBluetoothMidiOutputs();
+      final unified = await _native.getMidiOutputDevices();
+      bluetoothMidiOutputs = unified.isNotEmpty
+          ? unified
+          : await _native.getBluetoothMidiOutputs();
       if (notify) notifyListeners();
     } catch (error) {
       debugPrint('Bluetooth MIDI output refresh failed: $error');
       if (notify) _setStatus('MIDI OUTPUTS UNAVAILABLE');
+    }
+  }
+
+  Future<void> refreshMidiInputDevices({bool notify = true}) async {
+    try {
+      midiInputDevices = await _native.getMidiInputDevices();
+      if (notify) notifyListeners();
+    } catch (error) {
+      debugPrint('MIDI input device refresh failed: $error');
+      if (notify) _setStatus('MIDI INPUTS UNAVAILABLE');
+    }
+  }
+
+  Future<void> refreshMidiDevices({bool notify = true}) async {
+    if (midiDeviceRefreshing) return;
+    midiDeviceRefreshing = true;
+    if (notify) notifyListeners();
+    try {
+      await Future.wait([
+        refreshMidiInputDevices(notify: false),
+        refreshBluetoothMidiOutputs(notify: false),
+        refreshNetworkMidiOutputs(notify: false),
+      ]);
+    } finally {
+      midiDeviceRefreshing = false;
+      if (notify) notifyListeners();
     }
   }
 
@@ -852,11 +901,31 @@ class XenSynthController extends ChangeNotifier {
   Future<void> _configureMidi(XenSynthSettings value) async {
     await Future.wait([
       _native.setMidiInputEnabled(value.midiInputEnabled),
+      _native.setMidiInputDeviceIds(
+        value.midiInputDeviceIds,
+        configured: value.midiInputDeviceSelectionConfigured,
+      ),
       _native.setMidiOutputEnabled(value.midiOutputEnabled),
       _native.configureNetworkMidiOutput(enabled: value.networkMidiEnabled),
       _native.setBluetoothMidiOutputIds(value.bluetoothMidiOutputIds),
       _native.setNetworkMidiOutputIds(value.networkMidiDestinationIds),
     ]);
+  }
+
+  static List<NativeMidiOutput> _deduplicateMidiDevices(
+    Iterable<NativeMidiOutput> devices,
+  ) {
+    final byId = <String, NativeMidiOutput>{};
+    for (final device in devices) {
+      byId[device.id] = device;
+    }
+    final values = byId.values.toList(growable: false);
+    values.sort(
+      (left, right) => left.displayName.toLowerCase().compareTo(
+        right.displayName.toLowerCase(),
+      ),
+    );
+    return values;
   }
 
   Future<void> resetSettings() async {
@@ -869,6 +938,8 @@ class XenSynthController extends ChangeNotifier {
     double pitch,
     int velocity, {
     bool networkOutput = true,
+    int? audioTargetTimeNanos,
+    bool nativeAudioHandled = false,
   }) {
     final playbackPitch = _playbackPitch(pitch, settings);
     _noteDownAtPlaybackPitch(
@@ -876,6 +947,8 @@ class XenSynthController extends ChangeNotifier {
       playbackPitch,
       velocity,
       networkOutput: networkOutput,
+      audioTargetTimeNanos: audioTargetTimeNanos,
+      nativeAudioHandled: nativeAudioHandled,
     );
   }
 
@@ -884,6 +957,8 @@ class XenSynthController extends ChangeNotifier {
     double playbackPitch,
     int velocity, {
     bool networkOutput = true,
+    int? audioTargetTimeNanos,
+    bool nativeAudioHandled = false,
   }) {
     _scoreVisualizationSuppressed = true;
     final targetPitch = playbackPitch + settings.appliedPitchOffsetCents / 100;
@@ -899,10 +974,27 @@ class XenSynthController extends ChangeNotifier {
     );
     final epoch = (_noteEpochs[pointer] ?? 0) + 1;
     _noteEpochs[pointer] = epoch;
+    _cancelPendingNoteOn(pointer, audioTargetTimeNanos);
     notifyListeners();
+    if (nativeAudioHandled) {
+      final oldToken = _noteTokens.remove(pointer);
+      if (oldToken != null) {
+        unawaited(
+          _native.noteOff(oldToken, audioTargetTimeNanos: audioTargetTimeNanos),
+        );
+      }
+      return;
+    }
+    final pendingNoteOn = _PendingNoteOn(epoch);
+    _pendingNoteOns[pointer] = pendingNoteOn;
     unawaited(() async {
       final oldToken = _noteTokens.remove(pointer);
-      if (oldToken != null) await _native.noteOff(oldToken);
+      if (oldToken != null) {
+        await _native.noteOff(
+          oldToken,
+          audioTargetTimeNanos: audioTargetTimeNanos,
+        );
+      }
       final token = await _native.noteOn(
         id: pointer,
         pitch: targetPitch,
@@ -910,12 +1002,21 @@ class XenSynthController extends ChangeNotifier {
         channel: 0,
         program: settings.program,
         networkOutput: networkOutput,
+        audioTargetTimeNanos: audioTargetTimeNanos,
       );
+      if (identical(_pendingNoteOns[pointer], pendingNoteOn)) {
+        _pendingNoteOns.remove(pointer);
+      }
       if (token == null) return;
-      if (_noteEpochs[pointer] == epoch && activePitches.containsKey(pointer)) {
+      if (!pendingNoteOn.cancelled &&
+          _noteEpochs[pointer] == pendingNoteOn.epoch &&
+          activePitches.containsKey(pointer)) {
         _noteTokens[pointer] = token;
       } else {
-        await _native.noteOff(token);
+        await _native.noteOff(
+          token,
+          audioTargetTimeNanos: pendingNoteOn.releaseTargetTimeNanos,
+        );
       }
     }());
   }
@@ -947,7 +1048,8 @@ class XenSynthController extends ChangeNotifier {
     _noteDownAtPlaybackPitch(pointer, playbackPitch, velocity);
   }
 
-  void noteUp(int pointer) {
+  void noteUp(int pointer, {int? audioTargetTimeNanos}) {
+    _cancelPendingNoteOn(pointer, audioTargetTimeNanos);
     _noteEpochs[pointer] = (_noteEpochs[pointer] ?? 0) + 1;
     final previousPitch = activePitches[pointer];
     final hadVelocity = activePitchVelocities.containsKey(pointer);
@@ -967,11 +1069,21 @@ class XenSynthController extends ChangeNotifier {
     }
     if (previousPitch != null || hadVelocity) notifyListeners();
     final token = _noteTokens.remove(pointer);
-    if (token != null) unawaited(_native.noteOff(token));
+    if (token != null) {
+      unawaited(
+        _native.noteOff(token, audioTargetTimeNanos: audioTargetTimeNanos),
+      );
+    }
   }
 
-  Future<void> releaseAllNotes({bool networkOutput = true}) async {
+  Future<void> releaseAllNotes({
+    bool networkOutput = true,
+    int? audioTargetTimeNanos,
+    bool nativeAudioHandled = false,
+  }) async {
     _noteEpochs.updateAll((key, value) => value + 1);
+    _cancelAllPendingNoteOns(audioTargetTimeNanos);
+    final fallbackTokens = _noteTokens.values.toList();
     _noteTokens.clear();
     for (final entry in activePitches.entries) {
       _emitPitchInput(
@@ -986,7 +1098,17 @@ class XenSynthController extends ChangeNotifier {
     _sustainedMidiPointers.clear();
     _deferredMidiOffs.clear();
     notifyListeners();
-    await _native.allNotesOff(networkOutput: networkOutput);
+    if (nativeAudioHandled) {
+      await Future.wait([
+        for (final token in fallbackTokens)
+          _native.noteOff(token, audioTargetTimeNanos: audioTargetTimeNanos),
+      ]);
+    } else {
+      await _native.allNotesOff(
+        networkOutput: networkOutput,
+        audioTargetTimeNanos: audioTargetTimeNanos,
+      );
+    }
   }
 
   Future<void> _loadBundledDemo() async {
@@ -1005,6 +1127,7 @@ class XenSynthController extends ChangeNotifier {
       pitchOffsetCents: definition.displayOffsetCents,
     );
     await updateSettings(next);
+    await _configureNetworkAudio();
     status = 'TUNING · ${definition.profile}';
     notifyListeners();
   }
@@ -1039,6 +1162,11 @@ class XenSynthController extends ChangeNotifier {
     final midiPitch = event.intValue('pitch').clamp(0, 127);
     final fromMicrophone = event.payload['source'] == 'microphone';
     final fromNetwork = event.payload['source'] == 'network';
+    final nativeAudioHandled = event.boolValue('nativeAudioHandled');
+    final eventTargetTimeNanos = event.intValue('targetTimeNanos');
+    final audioTargetTimeNanos = fromNetwork && eventTargetTimeNanos > 0
+        ? eventTargetTimeNanos
+        : null;
     final pointer = fromMicrophone
         ? _microphonePointerBase + midiPitch
         : _midiPointerBase + channel * 128 + midiPitch;
@@ -1054,7 +1182,14 @@ class XenSynthController extends ChangeNotifier {
         if (fromMicrophone) {
           _recordMicrophoneNoteDown(pointer, mapped, velocity, microphoneTime);
         }
-        noteDown(pointer, mapped, velocity, networkOutput: !fromNetwork);
+        noteDown(
+          pointer,
+          mapped,
+          velocity,
+          networkOutput: !fromNetwork,
+          audioTargetTimeNanos: audioTargetTimeNanos,
+          nativeAudioHandled: nativeAudioHandled,
+        );
       case 'noteOff':
         if (!fromMicrophone && _sustainByChannel[channel] == true) {
           _deferredMidiOffs.add(pointer);
@@ -1063,7 +1198,7 @@ class XenSynthController extends ChangeNotifier {
           if (fromMicrophone) {
             _recordMicrophoneNoteUp(pointer, microphoneTime);
           }
-          noteUp(pointer);
+          noteUp(pointer, audioTargetTimeNanos: audioTargetTimeNanos);
         }
       case 'sustain':
         final down = event.boolValue('down');
@@ -1075,7 +1210,7 @@ class XenSynthController extends ChangeNotifier {
           for (final pointer in release) {
             _deferredMidiOffs.remove(pointer);
             _sustainedMidiPointers.remove(pointer);
-            noteUp(pointer);
+            noteUp(pointer, audioTargetTimeNanos: audioTargetTimeNanos);
           }
         }
       case 'program':
@@ -1084,7 +1219,13 @@ class XenSynthController extends ChangeNotifier {
           unawaited(updateSettings(settings.copyWith(program: program)));
         }
       case 'allNotesOff':
-        unawaited(releaseAllNotes(networkOutput: !fromNetwork));
+        unawaited(
+          releaseAllNotes(
+            networkOutput: !fromNetwork,
+            audioTargetTimeNanos: audioTargetTimeNanos,
+            nativeAudioHandled: nativeAudioHandled,
+          ),
+        );
       case 'document':
         final bytes = event.payload['bytes'];
         if (bytes is Uint8List) {
@@ -1499,6 +1640,7 @@ class XenSynthController extends ChangeNotifier {
         );
       }
       _noteEpochs[pointer] = (_noteEpochs[pointer] ?? 0) + 1;
+      _cancelPendingNoteOn(pointer);
       _sustainedMidiPointers.remove(pointer);
       _deferredMidiOffs.remove(pointer);
       final token = _noteTokens.remove(pointer);
@@ -1661,6 +1803,23 @@ class XenSynthController extends ChangeNotifier {
     return _pitchSnapLayoutFor(settings).snapPitch(pitch);
   }
 
+  Future<void> _configureNetworkAudio() {
+    final mappedPitches = <double>[
+      for (var midiKey = 0; midiKey < 128; midiKey++)
+        (_playbackPitch(
+                  tuning.mapMidiPitch(midiKey, edo: settings.edo),
+                  settings,
+                ) +
+                settings.appliedPitchOffsetCents / 100)
+            .clamp(0.0, 127.0)
+            .toDouble(),
+    ];
+    return _native.configureNetworkAudio(
+      mappedPitches: mappedPitches,
+      program: settings.program,
+    );
+  }
+
   HexaKeyboardLayout _pitchSnapLayoutFor(XenSynthSettings settings) {
     final configuration = settings.hexKeyboardConfiguration;
     final cached = _pitchSnapLayout;
@@ -1684,6 +1843,7 @@ class XenSynthController extends ChangeNotifier {
 
   @override
   void dispose() {
+    _cancelAllPendingNoteOns();
     _clearSeekGestureState();
     _stopClock();
     _stopRecordingTimeline();
@@ -1693,6 +1853,30 @@ class XenSynthController extends ChangeNotifier {
     unawaited(_native.stopPitchRecording());
     unawaited(_native.stop());
     super.dispose();
+  }
+
+  void _cancelPendingNoteOn(int pointer, [int? targetTimeNanos]) {
+    _pendingNoteOns.remove(pointer)?.cancel(targetTimeNanos);
+  }
+
+  void _cancelAllPendingNoteOns([int? targetTimeNanos]) {
+    for (final pending in _pendingNoteOns.values) {
+      pending.cancel(targetTimeNanos);
+    }
+    _pendingNoteOns.clear();
+  }
+}
+
+class _PendingNoteOn {
+  _PendingNoteOn(this.epoch);
+
+  final int epoch;
+  bool cancelled = false;
+  int? releaseTargetTimeNanos;
+
+  void cancel(int? targetTimeNanos) {
+    cancelled = true;
+    releaseTargetTimeNanos = targetTimeNanos;
   }
 }
 

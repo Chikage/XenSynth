@@ -48,9 +48,44 @@ object NativeAudioEngine : NativeAudio {
         return noteId.takeIf { it >= 0 }
     }
 
+    override fun noteOnAt(
+        key: Int,
+        velocity: Int,
+        cents: Float,
+        channel: Int,
+        program: Int,
+        bankMsb: Int,
+        bankLsb: Int,
+        targetTimeNanos: Long,
+        expression: Int,
+    ): Int? {
+        val noteId = noteOnAtNative(
+            key.coerceIn(0, 127),
+            velocity.coerceIn(1, 127),
+            cents,
+            channel.coerceIn(0, 15),
+            program.coerceIn(0, 127),
+            bankMsb.coerceIn(0, 127),
+            bankLsb.coerceIn(0, 127),
+            targetTimeNanos.coerceAtLeast(0L),
+            expression.coerceIn(0, 127),
+        )
+        return noteId.takeIf { it >= 0 }
+    }
+
     override fun noteOff(noteId: Int) = noteOffNative(noteId, immediate = false)
 
     override fun noteOffImmediately(noteId: Int) = noteOffNative(noteId, immediate = true)
+
+    override fun scheduleNoteOff(noteId: Int, delaySeconds: Double, immediate: Boolean) =
+        scheduleNoteOffNative(
+            noteId,
+            delaySeconds.coerceAtLeast(0.0),
+            immediate,
+        )
+
+    override fun noteOffAt(noteId: Int, targetTimeNanos: Long, immediate: Boolean) =
+        noteOffAtNative(noteId, targetTimeNanos.coerceAtLeast(0L), immediate)
 
     override fun setNotePressure(noteId: Int, expression: Int) =
         setNotePressureNative(noteId, expression.coerceIn(0, 127))
@@ -93,7 +128,31 @@ object NativeAudioEngine : NativeAudio {
         expression: Int,
     ): Int
 
+    private external fun noteOnAtNative(
+        key: Int,
+        velocity: Int,
+        cents: Float,
+        channel: Int,
+        program: Int,
+        bankMsb: Int,
+        bankLsb: Int,
+        targetTimeNanos: Long,
+        expression: Int,
+    ): Int
+
     private external fun noteOffNative(noteId: Int, immediate: Boolean)
+
+    private external fun scheduleNoteOffNative(
+        noteId: Int,
+        delaySeconds: Double,
+        immediate: Boolean,
+    )
+
+    private external fun noteOffAtNative(
+        noteId: Int,
+        targetTimeNanos: Long,
+        immediate: Boolean,
+    )
 
     private external fun setNotePressureNative(noteId: Int, expression: Int)
 

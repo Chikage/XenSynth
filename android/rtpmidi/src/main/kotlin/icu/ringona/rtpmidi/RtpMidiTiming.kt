@@ -287,6 +287,11 @@ data class ScheduledRtpMidiValue<T>(
     val remoteTimestamp: Long,
 )
 
+internal data class RtpMidiJitterOfferResult<T>(
+    val scheduled: ScheduledRtpMidiValue<T>,
+    val accepted: Boolean,
+)
+
 /** Observable queue health for one session's adaptive jitter buffer. */
 data class RtpMidiJitterBufferStatistics(
     val queuedValues: Int,
@@ -307,6 +312,8 @@ class RtpMidiJitterBuffer<T>(
     private val minimumDelayNanos: Long = 24_000_000L,
     private val maximumDelayNanos: Long = 120_000_000L,
     private val maximumQueueSize: Int = 6_144,
+    private val priorityOf: (T) -> Int = { 0 },
+    private val protectedPriority: Int = Int.MAX_VALUE,
 ) {
     private data class Queued<T>(
         val scheduled: ScheduledRtpMidiValue<T>,
@@ -352,7 +359,7 @@ class RtpMidiJitterBuffer<T>(
     val estimatedJitterNanos: Long
         @Synchronized get() = jitterEstimateNanos.roundToLong()
 
-    /** Number of events rejected after the bounded queue reached its safety limit. */
+    /** Number of late or overflow events discarded from the bounded queue. */
     val droppedEvents: Long
         @Synchronized get() = droppedEventCount
 
@@ -371,7 +378,20 @@ class RtpMidiJitterBuffer<T>(
         remoteTimestamp: Long,
         arrivalNanos: Long,
         value: T,
-    ): ScheduledRtpMidiValue<T> {
+    ): ScheduledRtpMidiValue<T> = offerInternal(remoteTimestamp, arrivalNanos, value).scheduled
+
+    @Synchronized
+    internal fun offerWithResult(
+        remoteTimestamp: Long,
+        arrivalNanos: Long,
+        value: T,
+    ): RtpMidiJitterOfferResult<T> = offerInternal(remoteTimestamp, arrivalNanos, value)
+
+    private fun offerInternal(
+        remoteTimestamp: Long,
+        arrivalNanos: Long,
+        value: T,
+    ): RtpMidiJitterOfferResult<T> {
         offeredValues++
         requireUInt32Timestamp(remoteTimestamp)
         val baseTargetNanos = sessionClock.localNanosForRemoteTimestamp(
@@ -389,34 +409,55 @@ class RtpMidiJitterBuffer<T>(
         if (isChronological && precedingScheduledTarget != null) {
             targetTimeNanos = maxOf(targetTimeNanos, precedingScheduledTarget)
         }
+        if (isChronological) {
+            previousBaseTargetNanos = baseTargetNanos
+        }
+        val priority = priorityOf(value)
+        val playedTarget = lastPlayedTargetNanos
+        if (playedTarget != null && targetTimeNanos <= playedTarget) {
+            if (priority < protectedPriority || playedTarget == Long.MAX_VALUE) {
+                droppedLateValues++
+                droppedEventCount++
+                return RtpMidiJitterOfferResult(
+                    ScheduledRtpMidiValue(value, targetTimeNanos, remoteTimestamp),
+                    accepted = false,
+                )
+            }
+            targetTimeNanos = playedTarget + 1
+        }
         val scheduled = ScheduledRtpMidiValue(
             value = value,
             targetTimeNanos = targetTimeNanos,
             remoteTimestamp = remoteTimestamp,
         )
-        if (isChronological) {
-            previousBaseTargetNanos = baseTargetNanos
-            previousScheduledTargetNanos = targetTimeNanos
-        }
-        if (lastPlayedTargetNanos?.let { targetTimeNanos <= it } == true) {
-            droppedLateValues++
-            droppedEventCount++
-            return scheduled
-        }
         if (queue.size >= maximumQueueSize) {
-            val latest = queue.maxByOrNull { it.scheduled.targetTimeNanos }
-            if (latest == null || latest.scheduled.targetTimeNanos <= targetTimeNanos) {
+            val lowerPriority = queue.asSequence()
+                .filter { priorityOf(it.scheduled.value) < priority }
+                .maxWithOrNull(
+                    compareBy<Queued<T>> { it.scheduled.targetTimeNanos }
+                        .thenBy { it.insertionOrder },
+                )
+            val eviction = lowerPriority ?: queue.maxWithOrNull(
+                compareBy<Queued<T>> { it.scheduled.targetTimeNanos }
+                    .thenBy { it.insertionOrder },
+            )
+            val canEvict = lowerPriority != null || eviction?.let { candidate ->
+                priorityOf(candidate.scheduled.value) == priority &&
+                    candidate.scheduled.targetTimeNanos > targetTimeNanos
+            } == true
+            if (!canEvict || eviction == null) {
                 droppedEventCount++
                 droppedOverflowValues++
-                return scheduled
+                return RtpMidiJitterOfferResult(scheduled, accepted = false)
             }
-            queue.remove(latest)
+            queue.remove(eviction)
             droppedEventCount++
             droppedOverflowValues++
         }
         queue += Queued(scheduled, nextInsertionOrder++)
+        if (isChronological) previousScheduledTargetNanos = targetTimeNanos
         peakQueueSize = maxOf(peakQueueSize, queue.size)
-        return scheduled
+        return RtpMidiJitterOfferResult(scheduled, accepted = true)
     }
 
     @Synchronized
@@ -449,6 +490,11 @@ class RtpMidiJitterBuffer<T>(
 
     @Synchronized
     fun nextTargetTimeNanos(): Long? = queue.peek()?.scheduled?.targetTimeNanos
+
+    @Synchronized
+    internal fun clearQueuedValuesPreservingTiming() {
+        queue.clear()
+    }
 
     @Synchronized
     fun clear(resetAdaptation: Boolean = true) {

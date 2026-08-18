@@ -27,6 +27,14 @@ class MidiDeviceInputManager(
     private val appContext = context.applicationContext
     private val midiManager = appContext.getSystemService(Context.MIDI_SERVICE) as? MidiManager
     private val openDevices = ConcurrentHashMap<Int, OpenMidiDevice>()
+    /**
+     * Null means that no per-source filter has been configured and all local
+     * MIDI input ports are accepted. An explicitly configured empty set is
+     * retained as an "accept none" filter; this lets the settings UI disable
+     * every individual source while the global MIDI input switch remains on.
+     */
+    @Volatile
+    private var selectedInputIds: Set<String>? = null
     private val deviceCallback = object : MidiManager.DeviceCallback() {
         override fun onDeviceAdded(info: MidiDeviceInfo) {
             openDevice(info)
@@ -42,6 +50,78 @@ class MidiDeviceInputManager(
 
     val connectedDeviceCount: Int
         get() = openDevices.size
+
+    /**
+     * Returns the currently discoverable Android MIDI input ports.
+     *
+     * Android exposes an output port as an input source for this application,
+     * therefore only [MidiDeviceInfo.PortInfo.TYPE_OUTPUT] ports are listed.
+     * The app's own virtual output is omitted to avoid a feedback loop.
+     */
+    fun inputDevices(): List<MidiInputSource> {
+        val manager = midiManager ?: return emptyList()
+        val devices = runCatching { manager.devices }
+            .onFailure { error -> Log.w(TAG, "Could not enumerate MIDI input devices", error) }
+            .getOrNull()
+            ?: return emptyList()
+        val selected = selectedInputIds
+        return devices.asSequence()
+            .filter { info -> !info.isOwnVirtualOutput() }
+            .flatMap { info ->
+                val baseName = info.displayName()
+                val model = info.properties.getString(MidiDeviceInfo.PROPERTY_PRODUCT)
+                    ?.trim()
+                    ?.takeIf(String::isNotEmpty)
+                val manufacturer = info.properties
+                    .getString(MidiDeviceInfo.PROPERTY_MANUFACTURER)
+                    ?.trim()
+                    ?.takeIf(String::isNotEmpty)
+                val transport = info.transportName()
+                info.ports.asSequence()
+                    .filter { port -> port.type == MidiDeviceInfo.PortInfo.TYPE_OUTPUT }
+                    .map { port ->
+                        val id = inputSourceId(info.id, port.portNumber)
+                        MidiInputSource(
+                            id = id,
+                            deviceId = info.id,
+                            portNumber = port.portNumber,
+                            name = port.displayName(baseName),
+                            model = model,
+                            manufacturer = manufacturer,
+                            transport = transport,
+                            selected = selected == null || id in selected,
+                            connected = openDevices.containsKey(info.id),
+                        )
+                    }
+            }
+            .sortedWith(compareBy(String.CASE_INSENSITIVE_ORDER) { it.name })
+            .toList()
+    }
+
+    /**
+     * Restricts local input to the supplied port IDs. When [configured] is
+     * false, the filter is cleared and the historical "all inputs" behaviour
+     * is restored. A configured empty list intentionally accepts no local
+     * sources.
+     */
+    fun setInputDeviceIds(ids: Collection<String>, configured: Boolean = true) {
+        val normalized = ids.asSequence()
+            .map(String::trim)
+            .filter(String::isNotEmpty)
+            .filter { it.startsWith(INPUT_ID_PREFIX) }
+            .toSet()
+        selectedInputIds = if (configured) normalized else null
+        if (!started) return
+
+        // Rebuild open devices so a changed port selection takes effect
+        // immediately. Device callbacks are delivered on the same handler.
+        openDevices.keys.toList().forEach { deviceId ->
+            midiManager?.devices
+                ?.firstOrNull { it.id == deviceId }
+                ?.let(::closeDevice)
+        }
+        midiManager?.devices?.forEach(::openDevice)
+    }
 
     @Volatile
     private var started = false
@@ -79,7 +159,7 @@ class MidiDeviceInputManager(
         // Flutter MIDI input stream (note-on -> output -> input -> note-on),
         // causing a feedback loop during score playback. Other virtual MIDI
         // devices remain valid input sources and are intentionally untouched.
-        if (!started || info.isOwnVirtualOutput() || !info.hasOutputPorts() ||
+        if (!started || info.isOwnVirtualOutput() || !info.hasSelectedOutputPorts() ||
             openDevices.containsKey(info.id)
         ) {
             return
@@ -112,8 +192,12 @@ class MidiDeviceInputManager(
         listener.onDeviceDisconnected(info.toMidiInputDevice(portCount))
     }
 
-    private fun MidiDeviceInfo.hasOutputPorts(): Boolean {
-        return ports.any { it.type == MidiDeviceInfo.PortInfo.TYPE_OUTPUT }
+    private fun MidiDeviceInfo.hasSelectedOutputPorts(): Boolean {
+        val selected = selectedInputIds
+        return ports.any { port ->
+            port.type == MidiDeviceInfo.PortInfo.TYPE_OUTPUT &&
+                (selected == null || inputSourceId(id, port.portNumber) in selected)
+        }
     }
 
     private fun MidiDeviceInfo.isOwnVirtualOutput(): Boolean {
@@ -128,8 +212,11 @@ class MidiDeviceInputManager(
 
     private fun MidiDevice.outputPortConnections(): List<OpenMidiPort> {
         val opened = mutableListOf<OpenMidiPort>()
+        val selected = selectedInputIds
         for (port in info.ports) {
-            if (port.type != MidiDeviceInfo.PortInfo.TYPE_OUTPUT) {
+            if (port.type != MidiDeviceInfo.PortInfo.TYPE_OUTPUT ||
+                (selected != null && inputSourceId(info.id, port.portNumber) !in selected)
+            ) {
                 continue
             }
             val receiver = createReceiver()
@@ -169,14 +256,38 @@ class MidiDeviceInputManager(
     }
 
     private fun MidiDeviceInfo.toMidiInputDevice(portCount: Int): MidiInputDevice {
-        val name = properties.getString(MidiDeviceInfo.PROPERTY_NAME)
-            ?: properties.getString(MidiDeviceInfo.PROPERTY_PRODUCT)
-            ?: "MIDI ${id}"
+        val name = displayName()
         return MidiInputDevice(
             id = id,
             name = name,
             portCount = portCount
         )
+    }
+
+    private fun MidiDeviceInfo.displayName(): String {
+        return properties.getString(MidiDeviceInfo.PROPERTY_NAME)
+            ?.trim()
+            ?.takeIf(String::isNotEmpty)
+            ?: properties.getString(MidiDeviceInfo.PROPERTY_PRODUCT)
+                ?.trim()
+                ?.takeIf(String::isNotEmpty)
+            ?: "MIDI $id"
+    }
+
+    private fun MidiDeviceInfo.transportName(): String = when (type) {
+        MidiDeviceInfo.TYPE_USB -> "usb"
+        MidiDeviceInfo.TYPE_BLUETOOTH -> "bluetooth"
+        MidiDeviceInfo.TYPE_VIRTUAL -> "virtual"
+        else -> "system"
+    }
+
+    private fun MidiDeviceInfo.PortInfo.displayName(deviceName: String): String {
+        val portName = name?.trim()?.takeIf(String::isNotEmpty)
+        return if (portName == null || portName.equals(deviceName, ignoreCase = true)) {
+            deviceName
+        } else {
+            "$deviceName - $portName"
+        }
     }
 
     private data class OpenMidiDevice(
@@ -199,9 +310,13 @@ class MidiDeviceInputManager(
 
     companion object {
         private const val TAG = "MidiDeviceInput"
+        const val INPUT_ID_PREFIX = "android-midi-input:"
         private const val OWN_OUTPUT_NAME = "XenSynth MIDI Output"
         private const val OWN_MANUFACTURER = "XenSynth"
         private const val OWN_PRODUCT = "XenSynth"
+
+        fun inputSourceId(deviceId: Int, portNumber: Int): String =
+            "$INPUT_ID_PREFIX$deviceId:$portNumber"
     }
 }
 
@@ -209,4 +324,17 @@ data class MidiInputDevice(
     val id: Int,
     val name: String,
     val portCount: Int
+)
+
+/** A port-level Android MIDI source exposed to the settings UI. */
+data class MidiInputSource(
+    val id: String,
+    val deviceId: Int,
+    val portNumber: Int,
+    val name: String,
+    val model: String?,
+    val manufacturer: String?,
+    val transport: String,
+    val selected: Boolean,
+    val connected: Boolean,
 )

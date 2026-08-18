@@ -97,6 +97,8 @@ internal class AppleMidiServiceRegistry {
         val chosen = records.maxWithOrNull(
             compareBy<Record> {
                 AppleMidiServiceEndpoint.from(it.service) in connectedEndpoints
+            }.thenBy {
+                it.service.controlPort == UdpPortPair.FIXED_CONTROL_PORT
             }.thenBy(Record::conflictOrdinal)
                 .thenBy(Record::resolutionOrder),
         ) ?: error("A service group must contain at least one record")

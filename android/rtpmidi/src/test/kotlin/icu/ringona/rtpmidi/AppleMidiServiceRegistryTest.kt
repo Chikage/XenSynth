@@ -8,7 +8,7 @@ import java.net.InetAddress
 
 class AppleMidiServiceRegistryTest {
     @Test
-    fun conflictRenamedServicesOnOneHostExposeNewestAliasOnce() {
+    fun conflictRenamedServicesOnOneHostPreferFixedPortOnce() {
         val registry = AppleMidiServiceRegistry()
         val base = service("base", "JustPiano Android", "192.168.1.20", 5_004)
         val renamed = service("renamed", "JustPiano Android (2)", "192.168.1.20", 51_000)
@@ -18,8 +18,17 @@ class AppleMidiServiceRegistryTest {
 
         val snapshot = registry.snapshots().single()
         assertEquals(stableId, snapshot.id)
-        assertEquals(51_000, snapshot.service.controlPort)
+        assertEquals(5_004, snapshot.service.controlPort)
         assertEquals(setOf("base", "renamed"), snapshot.instanceIds)
+    }
+
+    @Test
+    fun fixedPortWinsWhenBothAliasesAreDisconnected() {
+        val registry = AppleMidiServiceRegistry()
+        registry.upsert(service("random", "XenSynth Android (2)", "192.168.1.20", 51_000))
+        registry.upsert(service("fixed", "XenSynth Android", "192.168.1.20", 5_004))
+
+        assertEquals(5_004, registry.snapshots().single().service.controlPort)
     }
 
     @Test

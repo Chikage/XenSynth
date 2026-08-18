@@ -27,6 +27,7 @@ class RtpMidiCodecTest {
             hex("80 61 12 34 01 02 03 04 AA BB CC DD 06 90 3C 64 0A 40 6E"),
             encoded,
         )
+        assertEquals(0xAABB_CCDDL, RtpMidiCodec.readSsrcOrNull(encoded))
         assertEquals(packet, RtpMidiCodec.decode(encoded))
     }
 
@@ -79,6 +80,25 @@ class RtpMidiCodecTest {
     }
 
     @Test
+    fun longHeaderCarriesCommandSectionsLargerThanOneOctet() {
+        val commands = List(200) { index ->
+            TimedMidiMessage(0, MidiChannelMessage(0x90, index and 0x7F, 100))
+        }
+        val packet = RtpMidiPacket(
+            sequenceNumber = 2,
+            timestamp = 3,
+            ssrc = 4,
+            commands = commands,
+        )
+
+        val encoded = RtpMidiCodec.encode(packet)
+        val decoded = RtpMidiCodec.decode(encoded)
+
+        assertTrue(encoded.size > 255)
+        assertEquals(packet, decoded)
+    }
+
+    @Test
     fun decoderExpandsRunningStatusAfterEveryDelta() {
         val encoded = hex(
             "80 61 00 02 00 00 00 10 00 00 00 20 " +
@@ -98,15 +118,19 @@ class RtpMidiCodecTest {
     }
 
     @Test
-    fun phantomStatusCanUseTheOwningSessionsPreviousChannelStatus() {
-        val encoded = hex(
+    fun phantomStatusStillRequiresTheFirstChannelStatus() {
+        val missingStatus = hex(
             "80 61 00 03 00 00 00 10 00 00 00 20 12 3C 64",
         )
 
         assertThrows(AppleMidiProtocolException::class.java) {
-            RtpMidiCodec.decode(encoded)
+            RtpMidiCodec.decode(missingStatus)
         }
-        val decoded = RtpMidiCodec.decode(encoded, initialRunningStatus = 0x90)
+
+        val explicitStatus = hex(
+            "80 61 00 03 00 00 00 10 00 00 00 20 13 90 3C 64",
+        )
+        val decoded = RtpMidiCodec.decode(explicitStatus)
 
         assertTrue(decoded.phantomStatus)
         assertEquals(
@@ -138,6 +162,27 @@ class RtpMidiCodecTest {
     }
 
     @Test
+    fun journalHeartbeatHasNoCommandsAndKeepsMarkerClear() {
+        val packet = RtpMidiPacket(
+            sequenceNumber = 9,
+            timestamp = 10,
+            ssrc = 11,
+            commands = emptyList(),
+            marker = false,
+            firstDeltaEncoded = false,
+            journal = hex("80 00 08"),
+        )
+
+        val encoded = RtpMidiCodec.encode(packet)
+        val decoded = RtpMidiCodec.decode(encoded)
+
+        assertEquals(16, encoded.size)
+        assertEquals(packet, decoded)
+        assertTrue(decoded.commands.isEmpty())
+        assertFalse(decoded.marker)
+    }
+
+    @Test
     fun malformedRtpAndMidiListsAreRejected() {
         val wrongPayload = hex("80 60 00 00 00 00 00 00 00 00 00 00 00")
         val truncatedCommands = hex("80 61 00 00 00 00 00 00 00 00 00 00 04 90 3C")
@@ -160,6 +205,7 @@ class RtpMidiCodecTest {
             assertNull(RtpMidiCodec.decodeOrNull(bytes))
         }
         assertFalse(RtpMidiCodec.isRtpMidiPacket(wrongPayload))
+        assertNull(RtpMidiCodec.readSsrcOrNull(wrongPayload))
         assertTrue(RtpMidiCodec.isRtpMidiPacket(truncatedCommands))
     }
 }

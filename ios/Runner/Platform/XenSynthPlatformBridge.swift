@@ -192,6 +192,21 @@ final class XenSynthPlatformBridge: NSObject, FlutterStreamHandler, UIDocumentPi
         setMidiInputEnabled(arguments.bool(forAnyKey: ["enabled"]) ?? true)
         result(true)
 
+      case "getMidiInputDevices":
+        result(midiController.inputDevices())
+
+      case "setMidiInputDeviceIds":
+        midiController.setInputSourceIds(
+          stringList(from: arguments["ids"]) ?? [],
+          configured: arguments.bool(forAnyKey: ["configured"]) ?? true
+        )
+        result(true)
+
+      case "getMidiOutputDevices":
+        // CoreMIDI destinations cover USB, Bluetooth and virtual/system MIDI
+        // endpoints. AppleMIDI peers are returned by scanNetworkMidiOutputs.
+        result(midiOutput.bluetoothDestinations())
+
       case "setMidiOutputEnabled":
         midiOutput.setOutputEnabled(arguments.bool(forAnyKey: ["enabled"]) ?? true)
         result(true)
@@ -492,6 +507,11 @@ final class XenSynthPlatformBridge: NSObject, FlutterStreamHandler, UIDocumentPi
       previewPrograms = Array(repeating: program.clamped(to: 0...127), count: 16)
     }
     setMidiInputEnabled((settings["midiInputEnabled"] as? Bool) ?? true)
+    midiController.setInputSourceIds(
+      stringList(from: settings["midiInputDeviceIds"]) ?? [],
+      configured: (settings["midiInputDeviceSelectionConfigured"] as? Bool) ??
+        (settings["midiInputDeviceIds"] != nil)
+    )
     midiOutput.setOutputEnabled((settings["midiOutputEnabled"] as? Bool) ?? true)
     midiOutput.configureNetwork(
       enabled: (settings["networkMidiEnabled"] as? Bool) ?? true
@@ -506,11 +526,20 @@ final class XenSynthPlatformBridge: NSObject, FlutterStreamHandler, UIDocumentPi
 
   private func setMidiInputEnabled(_ enabled: Bool) {
     midiController.setInputEnabled(enabled)
-    guard enabled, midiEventSink != nil else { return }
+    guard enabled else { return }
     do {
       try midiController.start()
     } catch {
-      midiEventSink?(flutterError(error))
+      let nativeError = flutterError(error)
+      if let midiEventSink {
+        midiEventSink(nativeError)
+      } else {
+        NSLog(
+          "Xen Synth could not start MIDI input (%@): %@",
+          nativeError.code,
+          nativeError.message ?? ""
+        )
+      }
     }
   }
 
@@ -665,7 +694,6 @@ final class XenSynthPlatformBridge: NSObject, FlutterStreamHandler, UIDocumentPi
 
   func onCancel(withArguments arguments: Any?) -> FlutterError? {
     midiEventSink = nil
-    midiController.stop()
     return nil
   }
 
@@ -690,6 +718,9 @@ final class XenSynthPlatformBridge: NSObject, FlutterStreamHandler, UIDocumentPi
     "externalMidiControlsProgram": false,
     "midiInputEnabled": true,
     "midiOutputEnabled": true,
+    "midiInputDeviceIds": [String](),
+    "midiInputDeviceSelectionConfigured": false,
+    "midiOutputDeviceIds": [String](),
     "networkMidiEnabled": true,
     "networkMidiDestinationIds": [String](),
     "bluetoothMidiOutputIds": [String](),

@@ -12,7 +12,7 @@ import android.os.Looper
 import android.util.Log
 import java.io.Closeable
 
-/** Opens selected Android Bluetooth MIDI input ports and exposes them to the common output router. */
+/** Opens selected Android MIDI input ports and exposes them to the common output router. */
 @Suppress("DEPRECATION")
 internal class MidiOutputDestinationManager(context: Context) : Closeable {
     private val midiManager = context.getSystemService(MidiManager::class.java)
@@ -34,29 +34,32 @@ internal class MidiOutputDestinationManager(context: Context) : Closeable {
         midiManager?.registerDeviceCallback(deviceCallback, handler)
     }
 
-    fun bluetoothDestinations(): List<Map<String, Any>> {
+    /** Lists USB, Bluetooth, virtual, and other system MIDI output targets. */
+    fun destinations(): List<Map<String, Any>> {
         val manager = midiManager ?: return emptyList()
         val devices = runCatching { manager.devices }
-            .onFailure { error -> Log.w(TAG, "Could not list Bluetooth MIDI outputs", error) }
+            .onFailure { error -> Log.w(TAG, "Could not list MIDI outputs", error) }
             .getOrNull()
             ?: return emptyList()
         return devices
             .asSequence()
-            .filter { it.type == MidiDeviceInfo.TYPE_BLUETOOTH }
             .flatMap { info ->
                 info.ports.asSequence()
                     .filter { it.type == MidiDeviceInfo.PortInfo.TYPE_INPUT }
-                    .map { port ->
-                        mapOf(
-                            "id" to destinationId(info.id, port.portNumber),
-                            "name" to displayName(info, port.portNumber),
-                        )
-                    }
+                    .map { port -> destinationMap(info, port) }
             }
+            .sortedBy { it["name"]?.toString()?.lowercase().orEmpty() }
             .toList()
     }
 
+    /** Legacy bridge API retained for settings migration. */
+    fun bluetoothDestinations(): List<Map<String, Any>> {
+        return destinations().filter { it["transport"] == "bluetooth" }
+    }
+
     fun selectBluetoothDestinations(ids: Collection<String>) {
+        // The method name is retained for the persisted Flutter API, but IDs
+        // now cover every Android MIDI destination transport.
         selectedIds = ids.filter { it.isNotBlank() }.toSet()
         refresh()
     }
@@ -65,17 +68,16 @@ internal class MidiOutputDestinationManager(context: Context) : Closeable {
         if (closed) return
         val manager = midiManager ?: return
         val devices = runCatching { manager.devices }
-            .onFailure { error -> Log.w(TAG, "Could not refresh Bluetooth MIDI outputs", error) }
+            .onFailure { error -> Log.w(TAG, "Could not refresh MIDI outputs", error) }
             .getOrNull()
             ?: return
         val candidates = devices
-            .filter { it.type == MidiDeviceInfo.TYPE_BLUETOOTH }
             .flatMap { info ->
                 info.ports
                     .filter { it.type == MidiDeviceInfo.PortInfo.TYPE_INPUT }
                     .map { port -> Destination(info, port.portNumber) }
             }
-            .associateBy { destinationId(it.info.id, it.portNumber) }
+            .associateBy { destinationId(it.info, it.portNumber) }
 
         openDestinations.keys
             .filter { it !in selectedIds || it !in candidates }
@@ -100,7 +102,7 @@ internal class MidiOutputDestinationManager(context: Context) : Closeable {
                 return@OnDeviceOpenedListener
             }
             val port = runCatching { device.openInputPort(destination.portNumber) }
-                .onFailure { error -> Log.w(TAG, "Could not open Bluetooth MIDI output", error) }
+                .onFailure { error -> Log.w(TAG, "Could not open MIDI output", error) }
                 .getOrNull()
             if (port == null) {
                 runCatching { device.close() }
@@ -119,7 +121,7 @@ internal class MidiOutputDestinationManager(context: Context) : Closeable {
             }
         }.onFailure { error ->
             openingIds -= id
-            Log.w(TAG, "Could not connect Bluetooth MIDI output", error)
+            Log.w(TAG, "Could not connect MIDI output", error)
         }
     }
 
@@ -149,18 +151,69 @@ internal class MidiOutputDestinationManager(context: Context) : Closeable {
         val properties = info.properties
         val name = properties.getString(MidiDeviceInfo.PROPERTY_NAME)
             ?: properties.getString(MidiDeviceInfo.PROPERTY_PRODUCT)
-            ?: "Bluetooth MIDI ${info.id}"
-        return "$name - Port ${portNumber + 1}"
+            ?: "MIDI ${info.id}"
+        val portName = info.ports
+            .firstOrNull { it.portNumber == portNumber }
+            ?.name
+            ?.trim()
+            ?.takeIf(String::isNotEmpty)
+        return when {
+            portName == null || portName.equals(name, ignoreCase = true) -> name
+            else -> "$name - $portName"
+        }
     }
 
-    private fun destinationId(deviceId: Int, portNumber: Int): String =
-        "bluetooth:$deviceId:$portNumber"
+    private fun destinationMap(
+        info: MidiDeviceInfo,
+        port: MidiDeviceInfo.PortInfo,
+    ): Map<String, Any> {
+        val map = linkedMapOf<String, Any>(
+            "id" to destinationId(info, port.portNumber),
+            "name" to displayName(info, port.portNumber),
+            "transport" to transportName(info),
+            "type" to transportName(info),
+            "port" to port.portNumber,
+            "selected" to (destinationId(info, port.portNumber) in selectedIds),
+            "connected" to (destinationId(info, port.portNumber) in openDestinations),
+        )
+        info.properties.getString(MidiDeviceInfo.PROPERTY_PRODUCT)
+            ?.trim()
+            ?.takeIf(String::isNotEmpty)
+            ?.let { map["model"] = it }
+        info.properties.getString(MidiDeviceInfo.PROPERTY_MANUFACTURER)
+            ?.trim()
+            ?.takeIf(String::isNotEmpty)
+            ?.let { map["manufacturer"] = it }
+        return map
+    }
+
+    private fun destinationId(info: MidiDeviceInfo, portNumber: Int): String =
+        outputDestinationId(info.id, portNumber, info.type)
+
+    private fun transportName(info: MidiDeviceInfo): String = when (info.type) {
+        MidiDeviceInfo.TYPE_USB -> "usb"
+        MidiDeviceInfo.TYPE_BLUETOOTH -> "bluetooth"
+        MidiDeviceInfo.TYPE_VIRTUAL -> "virtual"
+        else -> "system"
+    }
 
     private data class Destination(val info: MidiDeviceInfo, val portNumber: Int)
 
     private data class OpenDestination(val device: MidiDevice, val port: MidiInputPort)
 
-    private companion object {
-        const val TAG = "MidiOutputDestinations"
+    companion object {
+        private const val TAG = "MidiOutputDestinations"
+        internal const val OUTPUT_ID_PREFIX = "android-midi-output:"
+
+        internal fun outputDestinationId(
+            deviceId: Int,
+            portNumber: Int,
+            deviceType: Int,
+        ): String = if (deviceType == MidiDeviceInfo.TYPE_BLUETOOTH) {
+            // Preserve IDs written by previous releases.
+            "bluetooth:$deviceId:$portNumber"
+        } else {
+            "$OUTPUT_ID_PREFIX$deviceId:$portNumber"
+        }
     }
 }
