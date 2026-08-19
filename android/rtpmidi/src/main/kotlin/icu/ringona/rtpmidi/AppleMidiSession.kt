@@ -133,7 +133,10 @@ internal class AppleMidiSession(
         if (dataChannel) {
             remoteDataPort = remote.port
             dataAccepted = true
-            state = AppleMidiSessionState.SYNCHRONIZING
+            // The two invitation exchanges establish the media path. Clock
+            // synchronization improves timestamp mapping but is not required
+            // before RTP-MIDI can flow; CoreMIDI may defer CK until later.
+            state = AppleMidiSessionState.CONNECTED
         } else {
             remoteControlPort = remote.port
             controlAccepted = true

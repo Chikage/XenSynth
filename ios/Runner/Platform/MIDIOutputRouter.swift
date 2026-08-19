@@ -552,6 +552,7 @@ final class MIDIOutputRouter {
   private let outputStateLock = NSLock()
   private let midiSendLock = NSLock()
   private var networkEnabled = false
+  private var networkDestinationSelected = false
 
   init() {
     let buffer = NetworkMIDIOutputBuffer()
@@ -561,13 +562,16 @@ final class MIDIOutputRouter {
     }
   }
 
-  func bluetoothDestinations() -> [[String: Any]] {
+  /// Returns every local CoreMIDI destination, including virtual endpoints
+  /// published by software on this device.
+  func localDestinations() -> [[String: Any]] {
     endpoints().compactMap { endpoint in
       guard endpoint != networkSession.destinationEndpoint else { return nil }
       guard let id = endpointId(for: endpoint) else { return nil }
       let name = displayName(for: endpoint)
       var destination: [String: Any] = [
         "id": id,
+        "targetId": MIDIEndpointIdentity.targetId(for: endpoint),
         "name": name,
         "transport": localTransportName(for: endpoint, name: name),
       ]
@@ -578,8 +582,32 @@ final class MIDIOutputRouter {
     }
   }
 
+  /// Legacy bridge name retained for stored-client compatibility. The list has
+  /// always included all local CoreMIDI destinations, not only Bluetooth.
+  func bluetoothDestinations() -> [[String: Any]] {
+    localDestinations()
+  }
+
+  func targetId(forDestinationId id: String) -> String {
+    if id.hasPrefix("applemidi:") {
+      return networkSession.targetId(forPeerId: id)
+    }
+    for endpoint in endpoints() where endpointId(for: endpoint) == id {
+      return MIDIEndpointIdentity.targetId(for: endpoint)
+    }
+    return id
+  }
+
+  func targetId(forPeerId id: String) -> String {
+    networkSession.targetId(forPeerId: id)
+  }
+
+  func setLocalDestinationIds(_ ids: [String]) {
+    selectedBluetoothDestinationIds = Set(ids.lazy.filter { !$0.isEmpty }.prefix(1))
+  }
+
   func setBluetoothDestinationIds(_ ids: [String]) {
-    selectedBluetoothDestinationIds = Set(ids.filter { !$0.isEmpty })
+    setLocalDestinationIds(ids)
   }
 
   func scanNetworkDestinations(completion: @escaping ([[String: Any]]) -> Void) {
@@ -588,6 +616,17 @@ final class MIDIOutputRouter {
 
   func setNetworkDestinationIds(_ ids: [String]) {
     networkSession.setDestinationIds(ids)
+    let selected = ids.contains { $0.hasPrefix("applemidi:") }
+    outputStateLock.lock()
+    networkDestinationSelected = selected
+    outputStateLock.unlock()
+    if !selected {
+      networkOutputBuffer.clear()
+    }
+  }
+
+  func setNetworkInputIds(_ ids: [String]) {
+    networkSession.setInputIds(ids)
   }
 
   func setOutputEnabled(_ enabled: Bool) {
@@ -614,9 +653,8 @@ final class MIDIOutputRouter {
     if !enabled {
       networkOutputBuffer.clear()
     }
-    // The CoreMIDI network session is shared with MIDIKeyboardController for
-    // input. Turning output off must not tear down inbound connections.
-    networkSession.setEnabled(true)
+    networkSession.setDiscoveryEnabled(enabled)
+    networkSession.setEnabled(enabled)
   }
 
   @discardableResult
@@ -721,7 +759,12 @@ final class MIDIOutputRouter {
 
   private func sendNetworkMessages(_ messages: [[UInt8]]) {
     let state = outputState()
-    guard state.outputEnabled, state.networkEnabled else { return }
+    guard state.outputEnabled,
+          state.networkEnabled,
+          (state.networkDestinationSelected || networkSession.hasConnectedPeer) else {
+      networkOutputBuffer.clear()
+      return
+    }
     guard networkSession.allowsActiveTransport,
           networkSession.destinationEndpoint != 0 else {
       networkOutputBuffer.clear()
@@ -740,6 +783,7 @@ final class MIDIOutputRouter {
     let networkDestination = networkSession.destinationEndpoint
     guard state.outputEnabled,
           state.networkEnabled,
+          (state.networkDestinationSelected || networkSession.hasConnectedPeer),
           networkSession.allowsActiveTransport,
           networkDestination != 0 else { return false }
     return send(messages, to: networkDestination)
@@ -785,10 +829,14 @@ final class MIDIOutputRouter {
     return status == noErr
   }
 
-  private func outputState() -> (outputEnabled: Bool, networkEnabled: Bool) {
+  private func outputState() -> (
+    outputEnabled: Bool,
+    networkEnabled: Bool,
+    networkDestinationSelected: Bool
+  ) {
     outputStateLock.lock()
     defer { outputStateLock.unlock() }
-    return (outputEnabled, networkEnabled)
+    return (outputEnabled, networkEnabled, networkDestinationSelected)
   }
 
   private func prepareOutputPort() -> Bool {
@@ -850,7 +898,15 @@ final class MIDIOutputRouter {
     if identity.contains("usb") {
       return "usb"
     }
+    if isSoftwareDestination(endpoint) {
+      return "software"
+    }
     return "coremidi"
+  }
+
+  private func isSoftwareDestination(_ endpoint: MIDIEndpointRef) -> Bool {
+    var entity = MIDIEntityRef()
+    return MIDIEndpointGetEntity(endpoint, &entity) != noErr || entity == 0
   }
 
   private func controlChange(channel: Int, controller: Int, value: Int) -> [UInt8] {
@@ -893,11 +949,13 @@ final class MIDIOutputRouter {
 ///
 /// CoreMIDI implements the AppleMIDI control channel, RTP-MIDI payloads, clock
 /// synchronization, packet recovery, and sequential control/data UDP port fallback.
-private final class AppleMIDINetworkSession: NSObject {
+final class AppleMIDINetworkSession: NSObject {
   private static let destinationIdPrefix = "applemidi:"
   // NetService may report the IPv6 address first and deliver the IPv4 A
   // record on a later run-loop turn. Leave enough time for both callbacks.
   private static let scanDuration: TimeInterval = 2.5
+  private static let browserRetryDelays: [TimeInterval] = [0.25, 1.0, 3.0, 10.0]
+  private static let resolutionRetryDelays: [TimeInterval] = [0.25, 1.0, 3.0, 10.0]
 
   private struct DestinationCandidate {
     let id: String
@@ -908,16 +966,24 @@ private final class AppleMIDINetworkSession: NSObject {
   }
 
   private let session = MIDINetworkSession.default()
-  private let browser = NetServiceBrowser()
+  private var browser = NetServiceBrowser()
   private var servicesById: [String: NetService] = [:]
   /// NetServiceBrowser can report the same service once per active interface.
   /// Keep aliases so an IPv6-only callback cannot replace a resolved IPv4 one.
   private var serviceAliasesById: [String: [NetService]] = [:]
   private var ipv4AddressesById: [String: String] = [:]
   private var selectedDestinationIds = Set<String>()
+  private var selectedInputIds = Set<String>()
   private var initiatedConnections: [String: MIDINetworkConnection] = [:]
   private var pendingScans: [([[String: Any]]) -> Void] = []
   private var browserStarted = false
+  private var browserRetryScheduled = false
+  private var browserRetryAttempt = 0
+  private var resolutionAttempts: [String: Int] = [:]
+  private var resolutionRetryGenerations: [String: UInt64] = [:]
+  private var nextResolutionGeneration: UInt64 = 0
+  private var discoveryEnabled = true
+  private var discoveryGeneration: UInt64 = 0
   private var enabled = false
   private var closed = false
 
@@ -932,10 +998,15 @@ private final class AppleMIDINetworkSession: NSObject {
     )
   }
 
+  /// A peer that initiated a CoreMIDI connection is a valid duplex route even
+  /// when this device has not independently selected a directional endpoint.
+  var hasConnectedPeer: Bool {
+    !session.connections().isEmpty
+  }
+
   override init() {
     super.init()
-    browser.delegate = self
-    browser.includesPeerToPeer = true
+    configureBrowser()
     NotificationCenter.default.addObserver(
       self,
       selector: #selector(sessionDidChange),
@@ -949,6 +1020,10 @@ private final class AppleMIDINetworkSession: NSObject {
       guard let self, !self.closed else { return }
       self.enabled = enabled
       if enabled {
+        // The system session has one broadcast destination for every peer. Keep the session
+        // open to incoming AppleMIDI connections; each local direction is still restricted by
+        // selectedConnectionIds below. Using `.noOne` here makes a selected peer's addConnection
+        // request fail on the other device, so both apps appear discovered but never exchange MIDI.
         self.session.connectionPolicy = .anyone
         self.session.isEnabled = true
         self.startBrowserIfNeeded()
@@ -961,12 +1036,39 @@ private final class AppleMIDINetworkSession: NSObject {
     }
   }
 
+  /// Enables or pauses Bonjour discovery independently from the CoreMIDI
+  /// network session. Existing CoreMIDI connections are intentionally kept so
+  /// disabling the device list cannot interrupt inbound MIDI.
+  func setDiscoveryEnabled(_ enabled: Bool) {
+    onMain { [weak self] in
+      guard let self, !self.closed else { return }
+      guard self.discoveryEnabled != enabled else {
+        if enabled { self.startBrowserIfNeeded() }
+        return
+      }
+      self.discoveryEnabled = enabled
+      self.discoveryGeneration &+= 1
+      if enabled {
+        self.resetBrowser()
+        self.startBrowserIfNeeded()
+        return
+      }
+
+      self.resetBrowser()
+      self.clearDiscoveredServices()
+      let scans = self.pendingScans
+      self.pendingScans.removeAll()
+      scans.forEach { $0([]) }
+    }
+  }
+
   func setDestinationIds(_ ids: [String]) {
     onMain { [weak self] in
       guard let self, !self.closed else { return }
-      let next = Set(ids.filter { $0.hasPrefix(Self.destinationIdPrefix) })
+      let next = Set(ids.lazy.filter { $0.hasPrefix(Self.destinationIdPrefix) }.prefix(1))
       self.selectedDestinationIds = next
-      let obsoleteConnections = self.initiatedConnections.filter { !next.contains($0.key) }
+      let selectedIds = self.selectedConnectionIds
+      let obsoleteConnections = self.initiatedConnections.filter { !selectedIds.contains($0.key) }
       for (id, connection) in obsoleteConnections {
         _ = self.removeConnection(connection)
         self.initiatedConnections.removeValue(forKey: id)
@@ -975,16 +1077,46 @@ private final class AppleMIDINetworkSession: NSObject {
     }
   }
 
+  func setInputIds(_ ids: [String]) {
+    onMain { [weak self] in
+      guard let self, !self.closed else { return }
+      let next = Set(
+        ids.lazy.filter { $0.hasPrefix(Self.destinationIdPrefix) }.prefix(1)
+      )
+      self.selectedInputIds = next
+      let selectedIds = self.selectedConnectionIds
+      let obsoleteConnections = self.initiatedConnections.filter { !selectedIds.contains($0.key) }
+      for (id, connection) in obsoleteConnections {
+        _ = self.removeConnection(connection)
+        self.initiatedConnections.removeValue(forKey: id)
+      }
+      self.reconcileConnections()
+    }
+  }
+
+  /// CoreMIDI exposes one shared endpoint, but connections are still selected
+  /// per Bonjour peer. Keep the UI identity per LAN address so separate devices
+  /// are not collapsed into one row.
+  func targetId(forPeerId id: String) -> String {
+    guard let address = ipv4AddressesById[id], !address.isEmpty else { return id }
+    return "network:\(address.lowercased())"
+  }
+
   func scan(completion: @escaping ([[String: Any]]) -> Void) {
     onMain { [weak self] in
-      guard let self, !self.closed else {
+      guard let self, !self.closed, self.discoveryEnabled else {
         completion([])
         return
       }
+      let generation = self.discoveryGeneration
       self.pendingScans.append(completion)
       self.startBrowserIfNeeded()
       DispatchQueue.main.asyncAfter(deadline: .now() + Self.scanDuration) { [weak self] in
-        self?.finishPendingScans()
+        guard let self,
+              !self.closed,
+              self.discoveryEnabled,
+              self.discoveryGeneration == generation else { return }
+        self.finishPendingScans()
       }
     }
   }
@@ -994,15 +1126,15 @@ private final class AppleMIDINetworkSession: NSObject {
       guard !closed else { return }
       closed = true
       enabled = false
+      discoveryEnabled = false
+      discoveryGeneration &+= 1
       browser.stop()
       browser.delegate = nil
       browserStarted = false
       disconnectAll()
       session.connectionPolicy = .noOne
       session.isEnabled = false
-      servicesById.removeAll()
-      serviceAliasesById.removeAll()
-      ipv4AddressesById.removeAll()
+      clearDiscoveredServices()
       let scans = pendingScans
       pendingScans.removeAll()
       scans.forEach { $0([]) }
@@ -1023,8 +1155,38 @@ private final class AppleMIDINetworkSession: NSObject {
     }
   }
 
+  private func configureBrowser() {
+    browser.delegate = self
+    browser.includesPeerToPeer = true
+  }
+
+  /// Replaces the browser object so callbacks queued by a stopped search can
+  /// never be mistaken for results from the next discovery generation.
+  private func resetBrowser() {
+    browser.stop()
+    browser.delegate = nil
+    browserStarted = false
+    browser = NetServiceBrowser()
+    configureBrowser()
+    browserRetryScheduled = false
+    browserRetryAttempt = 0
+  }
+
+  private func clearDiscoveredServices() {
+    let services = Array(servicesById.values) + serviceAliasesById.values.flatMap { $0 }
+    services.forEach {
+      $0.stop()
+      $0.delegate = nil
+    }
+    servicesById.removeAll()
+    serviceAliasesById.removeAll()
+    ipv4AddressesById.removeAll()
+    resolutionAttempts.removeAll()
+    resolutionRetryGenerations.removeAll()
+  }
+
   private func startBrowserIfNeeded() {
-    guard !browserStarted, !closed else { return }
+    guard discoveryEnabled, !browserStarted, !browserRetryScheduled, !closed else { return }
     browserStarted = true
     browser.searchForServices(
       ofType: MIDINetworkBonjourServiceType,
@@ -1032,8 +1194,23 @@ private final class AppleMIDINetworkSession: NSObject {
     )
   }
 
+  private func scheduleBrowserRetry() {
+    guard discoveryEnabled, !closed, !browserStarted, !browserRetryScheduled else { return }
+    let index = min(browserRetryAttempt, Self.browserRetryDelays.count - 1)
+    browserRetryAttempt = min(browserRetryAttempt + 1, Self.browserRetryDelays.count - 1)
+    browserRetryScheduled = true
+    let generation = discoveryGeneration
+    DispatchQueue.main.asyncAfter(deadline: .now() + Self.browserRetryDelays[index]) {
+      guard self.discoveryEnabled,
+            !self.closed,
+            self.discoveryGeneration == generation else { return }
+      self.browserRetryScheduled = false
+      self.startBrowserIfNeeded()
+    }
+  }
+
   private func finishPendingScans() {
-    guard !pendingScans.isEmpty else { return }
+    guard discoveryEnabled, !pendingScans.isEmpty else { return }
     let snapshot = destinationSnapshot()
     let scans = pendingScans
     pendingScans.removeAll()
@@ -1041,6 +1218,7 @@ private final class AppleMIDINetworkSession: NSObject {
   }
 
   private func destinationSnapshot() -> [[String: Any]] {
+    guard discoveryEnabled else { return [] }
     let candidates = servicesById.compactMap { id, service -> DestinationCandidate? in
       let displayService = preferredService(for: id) ?? service
       guard !isLocalService(displayService) else { return nil }
@@ -1075,11 +1253,13 @@ private final class AppleMIDINetworkSession: NSObject {
       .map { candidate in
         [
           "id": candidate.id,
+          "targetId": "network:\(candidate.address.lowercased())",
           "name": candidate.service.name,
           "model": deviceModel(for: candidate.service),
           "hostAddress": candidate.address,
           "port": candidate.port,
           "protocol": "rtp-midi",
+          "transport": "network",
           "connected": candidate.connected,
         ]
       }
@@ -1092,7 +1272,8 @@ private final class AppleMIDINetworkSession: NSObject {
   }
 
   private func destinationGroupKey(_ candidate: DestinationCandidate) -> String {
-    "\(logicalServiceName(candidate.service.name).lowercased())\u{0}\(candidate.address)"
+    // Treat every service published by one LAN address as the same target.
+    candidate.address.lowercased()
   }
 
   private func logicalServiceName(_ name: String) -> String {
@@ -1108,10 +1289,32 @@ private final class AppleMIDINetworkSession: NSObject {
   }
 
   private func reconcileConnections() {
-    guard !closed, enabled, session.isEnabled else { return }
+    guard !closed, enabled, discoveryEnabled, session.isEnabled else { return }
     guard allowsActiveTransport else {
       disconnectInitiatedConnections()
       return
+    }
+    let selectedIds = selectedConnectionIds
+    let locallyInitiatedConnectionKeys = Set(
+      initiatedConnections.values.map { connectionKey($0) }
+    )
+    let initialConnections = session.connections()
+    for connection in initialConnections {
+      let retained = selectedIds.contains { id in
+        guard let service = preferredService(for: id), !isLocalService(service) else {
+          return false
+        }
+        return connectionMatches(connection, service: service, id: id)
+      }
+      // MIDINetworkSession accepts incoming connections under its open policy.
+      // Do not immediately remove passive connections merely because this
+      // device has not selected the peer yet: the invitation is the one-step
+      // duplex pairing action. Locally initiated connections remain governed
+      // by the selection and are removed on disconnect.
+      if !retained,
+         locallyInitiatedConnectionKeys.contains(connectionKey(connection)) {
+        _ = session.removeConnection(connection)
+      }
     }
     let liveConnections = session.connections()
     let liveConnectionsByKey = Dictionary(
@@ -1132,7 +1335,7 @@ private final class AppleMIDINetworkSession: NSObject {
         initiatedConnections.removeValue(forKey: id)
       }
     }
-    for id in selectedDestinationIds where initiatedConnections[id] == nil {
+    for id in selectedConnectionIds where initiatedConnections[id] == nil {
       guard let service = preferredService(for: id), !isLocalService(service) else { continue }
       guard let host = host(for: service, id: id) else { continue }
       if liveConnections.contains(where: { connectionMatches($0, service: service, id: id) }) {
@@ -1145,6 +1348,10 @@ private final class AppleMIDINetworkSession: NSObject {
         NSLog("XenSynth could not connect to AppleMIDI peer %@", service.name)
       }
     }
+  }
+
+  private var selectedConnectionIds: Set<String> {
+    selectedDestinationIds.union(selectedInputIds)
   }
 
   private func disconnectAll() {
@@ -1245,6 +1452,8 @@ private final class AppleMIDINetworkSession: NSObject {
     let previousAddress = ipv4AddressesById[id]
     if let nextAddress {
       ipv4AddressesById[id] = nextAddress
+      resolutionAttempts.removeValue(forKey: id)
+      resolutionRetryGenerations.removeValue(forKey: id)
     } else if previousAddress == nil {
       // NetService can briefly expose only its IPv6 result. Do not discard a
       // previously resolved IPv4 endpoint during that transient callback.
@@ -1321,6 +1530,24 @@ private final class AppleMIDINetworkSession: NSObject {
     return Self.destinationIdPrefix + encoded
   }
 
+  private func retryResolution(for service: NetService) {
+    let id = destinationId(for: service)
+    guard servicesById[id] != nil, discoveryEnabled, !closed else { return }
+    let attempt = resolutionAttempts[id, default: 0]
+    let index = min(attempt, Self.resolutionRetryDelays.count - 1)
+    resolutionAttempts[id] = min(attempt + 1, Self.resolutionRetryDelays.count - 1)
+    nextResolutionGeneration &+= 1
+    let generation = nextResolutionGeneration
+    resolutionRetryGenerations[id] = generation
+    DispatchQueue.main.asyncAfter(deadline: .now() + Self.resolutionRetryDelays[index]) {
+      guard self.discoveryEnabled,
+            !self.closed,
+            self.servicesById[id] != nil,
+            self.resolutionRetryGenerations[id] == generation else { return }
+      service.resolve(withTimeout: 1.0)
+    }
+  }
+
   @objc private func sessionDidChange() {
     onMain { [weak self] in
       self?.reconcileConnections()
@@ -1334,6 +1561,7 @@ private final class AppleMIDINetworkSession: NSObject {
 
 extension AppleMIDINetworkSession: NetServiceBrowserDelegate {
   func netServiceBrowserWillSearch(_ browser: NetServiceBrowser) {
+    guard browser === self.browser, discoveryEnabled, !closed else { return }
     browserStarted = true
   }
 
@@ -1342,7 +1570,9 @@ extension AppleMIDINetworkSession: NetServiceBrowserDelegate {
     didFind service: NetService,
     moreComing: Bool
   ) {
-    guard !closed, !isLocalService(service) else { return }
+    guard browser === self.browser, discoveryEnabled, !closed, !isLocalService(service) else {
+      return
+    }
     let id = destinationId(for: service)
     if let previous = servicesById[id] {
       if previous !== service,
@@ -1352,6 +1582,8 @@ extension AppleMIDINetworkSession: NetServiceBrowserDelegate {
     } else {
       servicesById[id] = service
     }
+    resolutionAttempts[id] = 0
+    resolutionRetryGenerations[id] = nil
     service.delegate = self
     service.resolve(withTimeout: 1.0)
     updateResolvedService(service)
@@ -1363,6 +1595,7 @@ extension AppleMIDINetworkSession: NetServiceBrowserDelegate {
     didRemove service: NetService,
     moreComing: Bool
   ) {
+    guard browser === self.browser, discoveryEnabled, !closed else { return }
     let id = destinationId(for: service)
     service.stop()
     if servicesById[id] === service {
@@ -1375,6 +1608,8 @@ extension AppleMIDINetworkSession: NetServiceBrowserDelegate {
         servicesById.removeValue(forKey: id)
         serviceAliasesById.removeValue(forKey: id)
         ipv4AddressesById.removeValue(forKey: id)
+        resolutionAttempts.removeValue(forKey: id)
+        resolutionRetryGenerations.removeValue(forKey: id)
       }
     } else if var aliases = serviceAliasesById[id] {
       aliases.removeAll { $0 === service }
@@ -1392,20 +1627,23 @@ extension AppleMIDINetworkSession: NetServiceBrowserDelegate {
     _ browser: NetServiceBrowser,
     didNotSearch errorDict: [String: NSNumber]
   ) {
+    guard browser === self.browser, discoveryEnabled, !closed else { return }
     browserStarted = false
     NSLog("XenSynth AppleMIDI Bonjour search failed: %@", errorDict)
-    finishPendingScans()
+    scheduleBrowserRetry()
   }
 
   func netServiceBrowserDidStopSearch(_ browser: NetServiceBrowser) {
+    guard browser === self.browser else { return }
     browserStarted = false
+    scheduleBrowserRetry()
   }
 }
 
 extension AppleMIDINetworkSession: NetServiceDelegate {
   func netServiceDidResolveAddress(_ sender: NetService) {
     onMain { [weak self] in
-      guard let self, !self.closed else { return }
+      guard let self, !self.closed, self.discoveryEnabled else { return }
       self.updateResolvedService(sender)
     }
   }
@@ -1417,8 +1655,9 @@ extension AppleMIDINetworkSession: NetServiceDelegate {
       errorDict
     )
     onMain { [weak self] in
-      guard let self, !self.closed else { return }
+      guard let self, !self.closed, self.discoveryEnabled else { return }
       self.updateResolvedService(sender)
+      self.retryResolution(for: sender)
     }
   }
 }

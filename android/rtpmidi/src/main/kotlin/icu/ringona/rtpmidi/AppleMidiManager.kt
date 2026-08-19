@@ -74,11 +74,17 @@ class AppleMidiManager(
     private var gapWakeupGeneration = 0L
     private var gapWakeupFuture: ScheduledFuture<*>? = null
     private var nextGapWakeupNanos: Long? = null
+    /** Bounds retry traffic when a selected CoreMIDI peer replaces its session. */
+    private var lastOutgoingSessionReconciliationNanos: Long? = null
+    private var outputDiagnosticCount = 0
+    private var inputDiagnosticCount = 0
 
     @Volatile
     private var running = false
     @Volatile
     private var closed = false
+    @Volatile
+    private var discoveryEnabled = true
     private var portPair: UdpPortPair? = null
     private var transportHealthy = false
     private var directory: NsdDirectory? = null
@@ -153,7 +159,7 @@ class AppleMidiManager(
                 },
                 onResolved = ::onServiceResolved,
                 onLost = ::onServiceLost,
-            ).also(NsdDirectory::start)
+            ).also { it.start(discover = discoveryEnabled) }
             ioExecutor.execute { receiveLoop(pair, pair.control, dataChannel = false) }
             ioExecutor.execute { receiveLoop(pair, pair.data, dataChannel = true) }
             scheduler.scheduleWithFixedDelay(::tickSafely, 0, TICK_MILLIS, TimeUnit.MILLISECONDS)
@@ -161,24 +167,62 @@ class AppleMidiManager(
         }
     }
 
-    /** Returns the current cache, waiting briefly for the first DNS-SD result when it is empty. */
+    /**
+     * Returns a snapshot after giving DNS-SD a complete discovery window.
+     *
+     * Do not return early just because the cache already contains another peer. A browser can
+     * report services in separate multicast batches, so an early return made a second device
+     * appear to be missing whenever the first device had already been discovered.
+     */
     @JvmOverloads
-    fun scan(timeoutMillis: Long = 1_500): List<AppleMidiPeer> {
+    fun scan(timeoutMillis: Long = 2_500): List<AppleMidiPeer> {
+        if (!discoveryEnabled) return emptyList()
         if (!running && !start()) return emptyList()
-        val initial = peers()
-        if (initial.isNotEmpty() || timeoutMillis <= 0L) return initial
+        if (!discoveryEnabled) return emptyList()
+        if (timeoutMillis <= 0L) return peers()
         val waiter = CountDownLatch(1)
-        scanWaiters += waiter
-        if (peers().isNotEmpty()) waiter.countDown()
-        runCatching { waiter.await(timeoutMillis.coerceAtMost(5_000), TimeUnit.MILLISECONDS) }
-        scanWaiters -= waiter
+        synchronized(lock) {
+            if (!discoveryEnabled) return emptyList()
+            scanWaiters += waiter
+        }
+        try {
+            // The latch is released when discovery is disabled or the manager closes. Otherwise
+            // wait for the full window so peers announced after an already cached peer are seen.
+            runCatching {
+                waiter.await(timeoutMillis.coerceAtMost(5_000), TimeUnit.MILLISECONDS)
+            }
+        } finally {
+            scanWaiters -= waiter
+        }
         return peers()
     }
 
     fun peers(): List<AppleMidiPeer> = synchronized(lock) {
-        discovered.snapshots(connectedEndpointsLocked())
-            .map(::peerSnapshot)
-            .sortedBy { it.name.lowercase() }
+        if (!discoveryEnabled) {
+            emptyList()
+        } else {
+            discovered.snapshots(connectedEndpointsLocked())
+                .map(::peerSnapshot)
+                .sortedBy { it.name.lowercase() }
+        }
+    }
+
+    /** Controls Bonjour browsing without tearing down active AppleMIDI sessions. */
+    fun setDiscoveryEnabled(enabled: Boolean) {
+        val (activeDirectory, waitersToRelease) = synchronized(lock) {
+            if (closed) return
+            discoveryEnabled = enabled
+            if (!enabled) discovered.clear()
+            val waiters = if (enabled) {
+                emptyList()
+            } else {
+                scanWaiters.toList().also { scanWaiters.clear() }
+            }
+            directory to waiters
+        }
+        activeDirectory?.setDiscoveryEnabled(enabled)
+        waitersToRelease.forEach(CountDownLatch::countDown)
+        publishPeers()
     }
 
     /**
@@ -190,7 +234,10 @@ class AppleMidiManager(
         val sessionsToClose: List<AppleMidiSession>
         synchronized(lock) {
             selectedPeerIds.clear()
-            selectedPeerIds += ids.filter { it.startsWith(DESTINATION_PREFIX) }
+            selectedPeerIds += ids.asSequence()
+                .filter { it.startsWith(DESTINATION_PREFIX) }
+                .take(1)
+                .toList()
             val connectedEndpoints = connectedEndpointsLocked()
             val selectedConnections = selectedConnectionPeerIdsLocked()
             servicesToConnect = if (activeMidiTransportAllowedLocked()) {
@@ -207,13 +254,20 @@ class AppleMidiManager(
         }
         sessionsToClose.forEach { closeSession(it, notifyRemote = true) }
         servicesToConnect.forEach(::ensureOutgoingSession)
+        logOutputDiagnostic {
+            "Selected ${ids.count { it.startsWith(DESTINATION_PREFIX) }} AppleMIDI output(s); " +
+                "connectCandidates=${servicesToConnect.size}"
+        }
         publishPeers()
     }
 
     /**
-     * Selects peers that may deliver MIDI into the app. When [configured] is
-     * false, passive input remains enabled for every peer for migration from
-     * the pre-directional settings model.
+     * Selects locally initiated peers that may deliver MIDI into the app.
+     *
+     * A peer which invited this device is already an explicit AppleMIDI
+     * connection request, so it remains duplex without requiring a second UI
+     * confirmation on this device. This gives a selected LAN peer the same
+     * one-action connection behavior as a Bluetooth device.
      */
     @JvmOverloads
     fun setInputIds(ids: Collection<String>, configured: Boolean = true) {
@@ -223,7 +277,10 @@ class AppleMidiManager(
             inputSelectionConfigured = configured
             selectedInputPeerIds.clear()
             if (configured) {
-                selectedInputPeerIds += ids.filter { it.startsWith(DESTINATION_PREFIX) }
+                selectedInputPeerIds += ids.asSequence()
+                    .filter { it.startsWith(DESTINATION_PREFIX) }
+                    .take(1)
+                    .toList()
             }
             val selectedConnections = selectedConnectionPeerIdsLocked()
             val connectedEndpoints = connectedEndpointsLocked()
@@ -251,8 +308,13 @@ class AppleMidiManager(
         if (safeMessages.isEmpty() ||
             !synchronized(lock) { activeMidiTransportAllowedLocked() }
         ) {
+            logOutputDiagnostic {
+                "Dropped outbound MIDI before queueing; supported=${safeMessages.size} " +
+                    "transportActive=${synchronized(lock) { activeMidiTransportAllowedLocked() }}"
+            }
             return
         }
+        logOutputDiagnostic { "Queued ${safeMessages.size} outbound MIDI message(s)" }
         synchronized(pendingOutputLock) {
             if (!running) return
             val now = System.nanoTime()
@@ -303,14 +365,13 @@ class AppleMidiManager(
         val snapshot: AppleMidiServiceSnapshot
         val shouldConnect: Boolean
         synchronized(lock) {
-            if (!running) return
+            if (!running || !discoveryEnabled) return
             val peerId = discovered.upsert(service)
             sessions.values.filter { it.connectsTo(service) }.forEach { it.peerId = peerId }
             snapshot = discovered.snapshot(peerId, connectedEndpointsLocked()) ?: return
             shouldConnect = peerId in selectedConnectionPeerIdsLocked() &&
                 activeMidiTransportAllowedLocked()
         }
-        scanWaiters.forEach(CountDownLatch::countDown)
         publishPeers()
         if (shouldConnect) ensureOutgoingSession(snapshot)
     }
@@ -319,6 +380,7 @@ class AppleMidiManager(
         val fallback: AppleMidiServiceSnapshot?
         val shouldConnect: Boolean
         synchronized(lock) {
+            if (!running || !discoveryEnabled) return
             val peerId = discovered.peerIdForInstance(instanceId)
             discovered.remove(instanceId)
             fallback = peerId?.let { discovered.snapshot(it, connectedEndpointsLocked()) }
@@ -339,7 +401,8 @@ class AppleMidiManager(
                 peerId !in selectedConnectionPeerIdsLocked()
             ) return
             sessions.values.filter {
-                it.peerId == peerId && !it.connectsTo(service) &&
+                it.initiatedLocally &&
+                    it.peerId == peerId && !it.connectsTo(service) &&
                     it.state != AppleMidiSessionState.CONNECTED
             }
         }
@@ -351,10 +414,12 @@ class AppleMidiManager(
             ) {
                 return
             }
+            // A peer selected only as an input may already have invited us.
+            // Do not create a competing local invitation while that passive
+            // control/data exchange is still alive.
             if (sessions.values.any {
-                    it.peerId == peerId && it.state == AppleMidiSessionState.CONNECTED
-                }
-            ) {
+                    it.peerId == peerId && it.state in LIVE_SESSION_STATES
+                }) {
                 return
             }
             sessions.values.firstOrNull { it.peerId == peerId && it.connectsTo(service) }
@@ -482,10 +547,13 @@ class AppleMidiManager(
         remote: InetSocketAddress,
         dataChannel: Boolean,
     ) {
-        var rejected = false
-        val session = synchronized(lock) {
-            if (!running) return
-            var match = findSessionLocked(remote.address, packet.initiatorToken, packet.ssrc)
+       var rejected = false
+       val session = synchronized(lock) {
+            if (!running || !discoveryEnabled) {
+                rejected = true
+                return@synchronized null
+            }
+           var match = findSessionLocked(remote.address, packet.initiatorToken, packet.ssrc)
             if (!dataChannel && match == null) {
                 val simultaneous = sessions.values.firstOrNull {
                     it.initiatedLocally &&
@@ -545,7 +613,10 @@ class AppleMidiManager(
             if (dataChannel && match != null) {
                 match.remoteDataPort = remote.port
                 match.dataAccepted = true
-                match.state = AppleMidiSessionState.SYNCHRONIZING
+                // A completed data invitation is sufficient for duplex MIDI.
+                // Keep CK synchronization opportunistic so a CoreMIDI peer
+                // that delays CK2 cannot leave this session permanently muted.
+                match.state = AppleMidiSessionState.CONNECTED
             } else if (!dataChannel && match != null) {
                 match.remoteControlPort = remote.port
                 match.controlAccepted = true
@@ -790,6 +861,7 @@ class AppleMidiManager(
         inviteAgain.forEach { sendInvitation(it, dataChannel = it.controlAccepted) }
         synchronize.forEach(::sendClockRequest)
         expired.distinctBy { it.id }.forEach(::failSession)
+        reconcileSelectedOutgoingSessions(now)
         journalHeartbeats
             .filterNot { heartbeat -> expired.any { it.id == heartbeat.first.id } }
             .forEach { (session, urgent) -> queueJournalHeartbeat(session, urgent) }
@@ -799,6 +871,43 @@ class AppleMidiManager(
                 sendReceiverFeedback(session, sequenceNumber)
             }
         drainJitterBuffers(now)
+    }
+
+    /**
+     * CoreMIDI may replace a network session while its DNS-SD record and the user's selection
+     * remain unchanged. Discovery callbacks do not fire in that case, so periodically restore
+     * only the selected connection(s) that have no live invitation or media session.
+     */
+    private fun reconcileSelectedOutgoingSessions(nowNanos: Long) {
+        val servicesToConnect = synchronized(lock) {
+            val lastAttempt = lastOutgoingSessionReconciliationNanos
+            if (!activeMidiTransportAllowedLocked() ||
+                (lastAttempt != null &&
+                    nowNanos - lastAttempt < OUTGOING_SESSION_RECONCILIATION_NANOS)
+            ) {
+                return
+            }
+            lastOutgoingSessionReconciliationNanos = nowNanos
+            val connectedEndpoints = connectedEndpointsLocked()
+            selectedConnectionPeerIdsLocked().mapNotNull { peerId ->
+                val hasLiveSession = sessions.values.any { session ->
+                    session.peerId == peerId && session.state in LIVE_SESSION_STATES
+                }
+                if (hasLiveSession) {
+                    null
+                } else {
+                    discovered.snapshot(peerId, connectedEndpoints)
+                }
+            }
+        }
+        if (servicesToConnect.isEmpty()) return
+        logOutputDiagnostic {
+            "Reconciling selected AppleMIDI peer(s): " +
+                servicesToConnect.joinToString { service ->
+                    "${service.service.name}@${service.service.host.hostAddress}:${service.service.controlPort}"
+                }
+        }
+        servicesToConnect.forEach(::ensureOutgoingSession)
     }
 
     private fun sendControl(
@@ -933,7 +1042,17 @@ class AppleMidiManager(
         activeMidiTransportAllowedLocked() &&
             sessions[session.id] === session &&
             session.state == AppleMidiSessionState.CONNECTED &&
-            session.peerId?.let(selectedPeerIds::contains) == true
+            appleMidiSessionOutputAllowed(
+                initiatedLocally = session.initiatedLocally,
+                selectedForOutput = session.peerId?.let(selectedPeerIds::contains) == true,
+            )
+
+    private fun midiInputAllowedLocked(session: AppleMidiSession): Boolean =
+        appleMidiSessionInputAllowed(
+            inputSelectionConfigured = inputSelectionConfigured,
+            initiatedLocally = session.initiatedLocally,
+            selectedForInput = session.peerId in selectedInputPeerIds,
+        )
 
     private fun isConnectionPeerSelectedLocked(peerId: String): Boolean =
         peerId in selectedPeerIds ||
@@ -979,6 +1098,7 @@ class AppleMidiManager(
         synchronized(lock) {
             if (closed) return
             closed = true
+            discoveryEnabled = false
             active = sessions.values.toList()
             pair = portPair
             running = false
@@ -1048,6 +1168,17 @@ class AppleMidiManager(
                 .groupBy { it.peerId ?: it.id }
                 .values
                 .map { peerSessions -> peerSessions.maxBy(AppleMidiSession::lastActivityNanos) }
+        }
+        logOutputDiagnostic {
+            val sessionSummary = synchronized(lock) {
+                sessions.values.joinToString(separator = ",") { session ->
+                    "${session.peerName}:${session.state}:selected=" +
+                        (session.peerId?.let(selectedPeerIds::contains) == true) +
+                        ":data=${session.dataAddress.address.hostAddress}:${session.dataAddress.port}"
+                }
+            }
+            "Draining ${output.messages.size} MIDI message(s) to ${targets.size} session(s); " +
+                "sessions=[$sessionSummary]"
         }
         targets.forEach { session ->
             sendRtpMidiToSession(session, output)
@@ -1179,8 +1310,41 @@ class AppleMidiManager(
                     )
                 }
             }
+            logOutputDiagnostic {
+                val header = prepared.bytes.take(14).joinToString(separator = " ") {
+                    (it.toInt() and 0xFF).toString(16).padStart(2, '0')
+                }
+                "Sent RTP-MIDI seq=${prepared.packet.sequenceNumber} " +
+                    "messages=${prepared.packet.commands.size} bytes=${prepared.bytes.size} " +
+                    "to=${session.dataAddress.address.hostAddress}:${session.dataAddress.port} " +
+                    "header=$header"
+            }
         }
         return sent
+    }
+
+    private fun logOutputDiagnostic(message: () -> String) {
+        val shouldLog = synchronized(lock) {
+            if (outputDiagnosticCount >= MAX_OUTPUT_DIAGNOSTICS) {
+                false
+            } else {
+                outputDiagnosticCount++
+                true
+            }
+        }
+        if (shouldLog) Log.i(TAG, message())
+    }
+
+    private fun logInputDiagnostic(message: () -> String) {
+        val shouldLog = synchronized(lock) {
+            if (inputDiagnosticCount >= MAX_INPUT_DIAGNOSTICS) {
+                false
+            } else {
+                inputDiagnosticCount++
+                true
+            }
+        }
+        if (shouldLog) Log.i(TAG, message())
     }
 
     private fun sendRecoveryOverflowPanic(
@@ -1261,9 +1425,38 @@ class AppleMidiManager(
 
     private fun handleRtpMidi(payload: ByteArray, remote: InetSocketAddress) {
         val packetSsrc = RtpMidiCodec.readSsrcOrNull(payload) ?: return
-        val session = synchronized(lock) {
-            selectRtpMidiSession(sessions.values, remote, packetSsrc)
-        } ?: return
+        val selection = synchronized(lock) {
+            val exact = selectRtpMidiSession(sessions.values, remote, packetSsrc)
+            val session = exact ?: selectRtpMidiSessionByHostAndSsrc(
+                sessions = sessions.values,
+                remote = remote,
+                remoteSsrc = packetSsrc,
+            )
+            if (exact == null && session != null && session.remoteDataPort != remote.port) {
+                // Some CoreMIDI builds replace the data socket when a
+                // connection resumes. SSRC keeps this fallback bound to one
+                // already-negotiated participant.
+                logInputDiagnostic {
+                    "RTP-MIDI peer ${session.peerName} moved data port " +
+                        "${session.remoteDataPort} -> ${remote.port}"
+                }
+                session.remoteDataPort = remote.port
+            }
+            session?.let { it to (exact != null) }
+        }
+        if (selection == null) {
+            logInputDiagnostic {
+                "Dropped RTP-MIDI from ${remote.address.hostAddress}:${remote.port}; " +
+                    "no unique session for SSRC=$packetSsrc"
+            }
+            return
+        }
+        val (session, exactMatch) = selection
+        logInputDiagnostic {
+            "Received RTP-MIDI bytes=${payload.size} from " +
+                "${remote.address.hostAddress}:${remote.port}; peer=${session.peerName}; " +
+                "match=${if (exactMatch) "exact" else "host+ssrc"}"
+        }
         val packet = RtpMidiCodec.decode(payload)
         val arrival = System.nanoTime()
         val release = synchronized(lock) {
@@ -1350,13 +1543,21 @@ class AppleMidiManager(
         ready.sortedBy { it.targetTimeNanos }.forEach { event ->
             val session = synchronized(lock) {
                 val candidate = sessions[event.sessionId] ?: return@synchronized null
-                if (inputSelectionConfigured && candidate.peerId !in selectedInputPeerIds) {
+                if (!midiInputAllowedLocked(candidate)) {
+                    logInputDiagnostic {
+                        "Dropped RTP-MIDI input from ${candidate.peerName}; peerId=${candidate.peerId}; " +
+                            "selected=$selectedInputPeerIds"
+                    }
                     return@synchronized null
                 }
                 candidate
             } ?: return@forEach
             session.deliverIfOpen {
                 session.observeMidi(event.bytes)
+                logInputDiagnostic {
+                    "Delivered RTP-MIDI bytes=${event.bytes.size} from ${session.peerName}; " +
+                        "session=${event.sessionId}"
+                }
                 listener.onMidiEvent(event)
             }
         }
@@ -1506,6 +1707,8 @@ class AppleMidiManager(
         const val FIXED_CONTROL_PORT = UdpPortPair.FIXED_CONTROL_PORT
         const val FIXED_DATA_PORT = UdpPortPair.FIXED_DATA_PORT
         private const val TAG = "AppleMidiManager"
+        private const val MAX_OUTPUT_DIAGNOSTICS = 160
+        private const val MAX_INPUT_DIAGNOSTICS = 160
         private const val RECEIVE_BUFFER_BYTES = 1_500
         private const val MAX_RTP_DATAGRAM_BYTES = 1_200
         private const val TICK_MILLIS = 10L
@@ -1513,11 +1716,17 @@ class AppleMidiManager(
         private const val CONTROL_FLUSH_TIMEOUT_MILLIS = 250L
         private const val NANOS_PER_MILLI = 1_000_000L
         private const val INVITATION_RETRY_NANOS = 1_000_000_000L
+        private const val OUTGOING_SESSION_RECONCILIATION_NANOS = 750_000_000L
         private const val RECEIVER_FEEDBACK_INTERVAL_NANOS = 25_000_000L
         private const val CRITICAL_RELEASE_HEARTBEAT_NANOS = 35_000_000L
         private const val JOURNAL_HEARTBEAT_NANOS = 100_000_000L
         private const val SESSION_TIMEOUT_NANOS = 35_000_000_000L
         private const val UINT32_MASK = 0xFFFF_FFFFL
+        private val LIVE_SESSION_STATES = setOf(
+            AppleMidiSessionState.INVITING,
+            AppleMidiSessionState.SYNCHRONIZING,
+            AppleMidiSessionState.CONNECTED,
+        )
 
         private fun isSupportedChannelMessage(bytes: ByteArray): Boolean {
             if (bytes.isEmpty()) return false
@@ -1534,6 +1743,22 @@ internal fun activeMidiTransportAllowed(
     portPair: UdpPortPair?,
     transportHealthy: Boolean,
 ): Boolean = running && transportHealthy && portPair != null
+
+/**
+ * An incoming AppleMIDI invitation is a deliberate peer connection request.
+ * It is therefore allowed to use the established RTP media session in both
+ * directions even when this device has no separately selected network row.
+ */
+internal fun appleMidiSessionOutputAllowed(
+    initiatedLocally: Boolean,
+    selectedForOutput: Boolean,
+): Boolean = !initiatedLocally || selectedForOutput
+
+internal fun appleMidiSessionInputAllowed(
+    inputSelectionConfigured: Boolean,
+    initiatedLocally: Boolean,
+    selectedForInput: Boolean,
+): Boolean = !inputSelectionConfigured || !initiatedLocally || selectedForInput
 
 internal fun appleMidiDeliveryLookaheadNanos(
     configuration: AppleMidiConfiguration,
@@ -1575,6 +1800,24 @@ internal fun selectRtpMidiSession(
             session.remoteSsrc == remoteSsrc
     }
     .maxByOrNull(AppleMidiSession::lastActivityNanos)
+
+/**
+ * CoreMIDI can replace its RTP data socket while retaining the negotiated
+ * SSRC. Only use this fallback when one connected session owns that exact
+ * host/SSRC pair, so a stale or unrelated packet cannot claim a session.
+ */
+internal fun selectRtpMidiSessionByHostAndSsrc(
+    sessions: Collection<AppleMidiSession>,
+    remote: InetSocketAddress,
+    remoteSsrc: Long,
+): AppleMidiSession? = sessions.asSequence()
+    .filter { session ->
+        session.state == AppleMidiSessionState.CONNECTED &&
+            session.transportAddress.sameNetworkHost(remote.address) &&
+            session.remoteSsrc == remoteSsrc
+    }
+    .toList()
+    .singleOrNull()
 
 internal fun selectReceiverFeedbackSession(
     sessions: Collection<AppleMidiSession>,

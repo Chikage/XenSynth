@@ -27,14 +27,9 @@ class MidiDeviceInputManager(
     private val appContext = context.applicationContext
     private val midiManager = appContext.getSystemService(Context.MIDI_SERVICE) as? MidiManager
     private val openDevices = ConcurrentHashMap<Int, OpenMidiDevice>()
-    /**
-     * Null means that no per-source filter has been configured and all local
-     * MIDI input ports are accepted. An explicitly configured empty set is
-     * retained as an "accept none" filter; this lets the settings UI disable
-     * every individual source while the global MIDI input switch remains on.
-     */
+    /** One selected local source, or no source when MIDI input is unassigned. */
     @Volatile
-    private var selectedInputIds: Set<String>? = null
+    private var selectedInputIds = emptySet<String>()
     private val deviceCallback = object : MidiManager.DeviceCallback() {
         override fun onDeviceAdded(info: MidiDeviceInfo) {
             openDevice(info)
@@ -89,7 +84,7 @@ class MidiDeviceInputManager(
                             model = model,
                             manufacturer = manufacturer,
                             transport = transport,
-                            selected = selected == null || id in selected,
+                            selected = id in selected,
                             connected = openDevices.containsKey(info.id),
                         )
                     }
@@ -98,19 +93,16 @@ class MidiDeviceInputManager(
             .toList()
     }
 
-    /**
-     * Restricts local input to the supplied port IDs. When [configured] is
-     * false, the filter is cleared and the historical "all inputs" behaviour
-     * is restored. A configured empty list intentionally accepts no local
-     * sources.
-     */
+    /** Restricts local input to one source ID. Empty means no local input. */
     fun setInputDeviceIds(ids: Collection<String>, configured: Boolean = true) {
         val normalized = ids.asSequence()
             .map(String::trim)
             .filter(String::isNotEmpty)
             .filter { it.startsWith(INPUT_ID_PREFIX) }
-            .toSet()
-        selectedInputIds = if (configured) normalized else null
+            .firstOrNull()
+            ?.let(::setOf)
+            .orEmpty()
+        selectedInputIds = normalized
         if (!started) return
 
         // Rebuild open devices so a changed port selection takes effect
@@ -196,7 +188,7 @@ class MidiDeviceInputManager(
         val selected = selectedInputIds
         return ports.any { port ->
             port.type == MidiDeviceInfo.PortInfo.TYPE_OUTPUT &&
-                (selected == null || inputSourceId(id, port.portNumber) in selected)
+                inputSourceId(id, port.portNumber) in selected
         }
     }
 
@@ -215,7 +207,7 @@ class MidiDeviceInputManager(
         val selected = selectedInputIds
         for (port in info.ports) {
             if (port.type != MidiDeviceInfo.PortInfo.TYPE_OUTPUT ||
-                (selected != null && inputSourceId(info.id, port.portNumber) !in selected)
+                inputSourceId(info.id, port.portNumber) !in selected
             ) {
                 continue
             }

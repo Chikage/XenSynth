@@ -20,6 +20,7 @@ internal object MidiOutputRouter {
     private var outputEnabled = true
     private var networkOutputEnabled = false
     private var networkSender: ((List<ByteArray>, Long) -> Unit)? = null
+    private var networkSendDiagnosticCount = 0
     private val activeNotes = LinkedHashMap<Int, ActiveNote>()
     private val activeIds = HashMap<Int, Int>()
     private var nextToken = 1
@@ -193,6 +194,23 @@ internal object MidiOutputRouter {
             )
         } ?: return
         val timestamp = System.nanoTime()
+        val shouldLogNetworkRoute = synchronized(lock) {
+            if (networkSendDiagnosticCount >= MAX_NETWORK_SEND_DIAGNOSTICS) {
+                false
+            } else {
+                networkSendDiagnosticCount++
+                true
+            }
+        }
+        if (shouldLogNetworkRoute) {
+            val first = messages.first()
+            Log.i(
+                TAG,
+                "Routing ${messages.size} MIDI message(s); requestedNetwork=$sendToNetwork " +
+                    "networkTarget=${targets.networkSender != null} firstStatus=" +
+                    "0x${(first[0].toInt() and 0xFF).toString(16)}",
+            )
+        }
         messages.forEach { message ->
             targets.receivers.forEach { receiver ->
                 runCatching { receiver.send(message, 0, message.size, timestamp) }
@@ -209,6 +227,8 @@ internal object MidiOutputRouter {
         controller.coerceIn(0, MIDI_MAX).toByte(),
         value.coerceIn(0, MIDI_MAX).toByte(),
     )
+
+    private const val MAX_NETWORK_SEND_DIAGNOSTICS = 80
 
     private fun pitchBendRange(channel: Int): List<ByteArray> = listOf(
         controlChange(channel, 101, 0),

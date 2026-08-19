@@ -346,15 +346,17 @@ final class MIDIKeyboardController {
   /// object identity cannot be used to decide whether a peer was removed.
   private var networkConnectionKeys = Set<String>()
   private var networkRefreshGeneration: UInt64 = 0
-  /// `nil` means that all currently available sources are enabled.  CoreMIDI
-  /// exposes one shared source for all AppleMIDI peers, so network input uses
-  /// the stable `applemidi:input` identity rather than a per-peer endpoint.
-  private var selectedInputSourceIds: Set<String>?
+  /// A source is opened only when it is explicitly selected. CoreMIDI exposes
+  /// one shared source for AppleMIDI peers, so any selected AppleMIDI peer ID
+  /// enables that source while peer connection ownership stays in the router.
+  private var selectedInputSourceIds = Set<String>()
   private let networkEventBuffer = NetworkMIDIEventBuffer()
   private let networkIngressLogLock = NSLock()
   private var didLogNetworkIngress = false
   private let inputEnabledLock = NSLock()
   private var storedInputEnabled = true
+  private let networkInputEnabledLock = NSLock()
+  private var storedNetworkInputEnabled = true
 
   var inputEnabled: Bool {
     inputEnabledLock.lock()
@@ -362,9 +364,15 @@ final class MIDIKeyboardController {
     return storedInputEnabled
   }
 
+  private var networkInputEnabled: Bool {
+    networkInputEnabledLock.lock()
+    defer { networkInputEnabledLock.unlock() }
+    return storedNetworkInputEnabled
+  }
+
   init() {
     networkEventBuffer.onEvents = { [weak self] events in
-      guard let self, self.inputEnabled else { return }
+      guard let self, self.inputEnabled, self.networkInputEnabled else { return }
       events.forEach(self.emit)
     }
     let session = MIDINetworkSession.default()
@@ -395,6 +403,21 @@ final class MIDIKeyboardController {
     storedInputEnabled = enabled
     inputEnabledLock.unlock()
     if !enabled { stop() }
+  }
+
+  func setNetworkInputEnabled(_ enabled: Bool) {
+    networkInputEnabledLock.lock()
+    let changed = storedNetworkInputEnabled != enabled
+    storedNetworkInputEnabled = enabled
+    networkInputEnabledLock.unlock()
+    guard changed else { return }
+    if !enabled {
+      networkEventBuffer.clear()
+      emit(["type": "allNotesOff", "source": "network"])
+    }
+    guard isStarted else { return }
+    refreshConnections()
+    if enabled { scheduleNetworkConnectionRefreshes() }
   }
 
   /// Returns every CoreMIDI source visible to the app, including the shared
@@ -443,10 +466,23 @@ final class MIDIKeyboardController {
     }
   }
 
+  func targetId(forInputSourceId id: String) -> String {
+    if id.hasPrefix("applemidi:") { return id }
+    let networkSource = MIDINetworkSession.default().sourceEndpoint()
+    for index in 0..<MIDIGetNumberOfSources() {
+      let source = MIDIGetSource(index)
+      guard source != 0, source != networkSource else { continue }
+      if Self.sourceId(for: source, isNetwork: false) == id {
+        return MIDIEndpointIdentity.targetId(for: source)
+      }
+    }
+    return id
+  }
+
   /// Applies the user-selected source IDs.  Passing `configured = false`
   /// preserves the pre-device-list behaviour (all sources enabled).
   func setInputSourceIds(_ ids: [String], configured: Bool = true) {
-    let next = configured ? Set(ids.filter { !$0.isEmpty }) : nil
+    let next = Set(ids.lazy.filter { !$0.isEmpty }.prefix(1))
     guard selectedInputSourceIds != next else { return }
     selectedInputSourceIds = next
     if isStarted {
@@ -462,8 +498,10 @@ final class MIDIKeyboardController {
   func start() throws {
     guard inputEnabled else { return }
     let networkSession = MIDINetworkSession.default()
-    networkSession.connectionPolicy = .anyone
-    networkSession.isEnabled = true
+    if networkInputEnabled {
+      networkSession.connectionPolicy = .anyone
+      networkSession.isEnabled = true
+    }
     guard !isStarted else {
       refreshConnections()
       scheduleNetworkConnectionRefreshes()
@@ -529,13 +567,21 @@ final class MIDIKeyboardController {
       return source == 0 ? nil : source
     }
     let networkSource = MIDINetworkSession.default().sourceEndpoint()
+    let hasNetworkConnection = !MIDINetworkSession.default().connections().isEmpty
     let sources = Self.inputSources(
       enumeratedSources: enumeratedSources,
       networkSource: networkSource
     ).filter { source in
-      guard let selectedInputSourceIds else { return true }
       let isNetwork = networkSource != 0 && source == networkSource
-      return selectedInputSourceIds.contains(Self.sourceId(for: source, isNetwork: isNetwork))
+      if isNetwork {
+        return networkInputEnabled && Self.shouldReceiveNetworkInput(
+          selectedInputSourceIds: selectedInputSourceIds,
+          hasActiveConnection: hasNetworkConnection
+        )
+      }
+      return selectedInputSourceIds.contains(
+        Self.sourceId(for: source, isNetwork: false)
+      )
     }
     if forceNetworkReconnect, networkSource != 0,
        sourceContext(for: networkSource) != nil {
@@ -567,6 +613,7 @@ final class MIDIKeyboardController {
       DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
         guard let self,
               self.inputEnabled,
+              self.networkInputEnabled,
               self.isStarted,
               self.networkRefreshGeneration == generation else { return }
         let networkSource = MIDINetworkSession.default().sourceEndpoint()
@@ -591,6 +638,16 @@ final class MIDIKeyboardController {
       sources.insert(networkSource)
     }
     return sources
+  }
+
+  /// A remote AppleMIDI invitation establishes a duplex peer connection.
+  /// Once CoreMIDI reports that connection, attach its shared source even if
+  /// this device has no separately selected network input row.
+  static func shouldReceiveNetworkInput(
+    selectedInputSourceIds: Set<String>,
+    hasActiveConnection: Bool
+  ) -> Bool {
+    hasActiveConnection || selectedInputSourceIds.contains { $0.hasPrefix("applemidi:") }
   }
 
   private static let networkInputSourceId = "applemidi:input"
@@ -638,6 +695,9 @@ final class MIDIKeyboardController {
       "id": id,
       "name": displayName(for: source),
       "model": isNetwork ? "Network" : "CoreMIDI",
+      "targetId": isNetwork
+        ? Self.networkInputSourceId
+        : MIDIEndpointIdentity.targetId(for: source),
       "transport": transportName(for: source, isNetwork: isNetwork),
       "isNetwork": isNetwork,
     ]
@@ -784,7 +844,7 @@ final class MIDIKeyboardController {
     // unchanged but still requiring release recovery for notes it owned.
     let connectionWasRemoved = !networkConnectionKeys.subtracting(next).isEmpty
     networkConnectionKeys = next
-    if inputEnabled {
+    if inputEnabled && networkInputEnabled {
       // All peers feed CoreMIDI's shared source endpoint. A peer-list change
       // must not disconnect that endpoint; refreshConnections will replace it
       // naturally if CoreMIDI actually publishes a different endpoint ref.

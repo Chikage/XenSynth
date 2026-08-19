@@ -62,6 +62,8 @@ class XenSynthController extends ChangeNotifier {
   List<NativeMidiOutput> networkMidiOutputs = const <NativeMidiOutput>[];
   bool networkMidiScanning = false;
   bool midiDeviceRefreshing = false;
+  int _networkMidiRefreshGeneration = 0;
+  int? _activeNetworkMidiScanGeneration;
   bool pitchRecognizing = false;
   bool pitchRecognitionBusy = false;
   String pitchRecognitionPhase = 'unavailable';
@@ -101,8 +103,10 @@ class XenSynthController extends ChangeNotifier {
       !_microphoneTakeSaved &&
       !_microphoneTakeSaveDismissed;
   bool get showingFftSpectrum => _microphoneTake;
-  List<NativeMidiOutput> get midiOutputDevices =>
-      _deduplicateMidiDevices([...bluetoothMidiOutputs, ...networkMidiOutputs]);
+  List<NativeMidiOutput> get midiOutputDevices => _deduplicateMidiDevices([
+    ...bluetoothMidiOutputs,
+    if (settings.networkMidiEnabled) ...networkMidiOutputs,
+  ]);
   String get scoreTitle => score?.title ?? 'XEN SYNTH';
   String get tuningLabel => tuning.profile.isEmpty ? 'TUN' : tuning.profile;
   double get currentBpm {
@@ -750,9 +754,24 @@ class XenSynthController extends ChangeNotifier {
   }
 
   Future<void> updateSettings(XenSynthSettings next) async {
+    next = next.normalizedMidiSelections();
     final previous = settings;
     final pitchRecognitionModeChanged =
         next.pitchRecognitionMode != previous.pitchRecognitionMode;
+    final midiInputSelectionChanged =
+        next.midiInputDeviceSelectionConfigured !=
+            previous.midiInputDeviceSelectionConfigured ||
+        !listEquals(next.midiInputDeviceIds, previous.midiInputDeviceIds);
+    final midiOutputSelectionChanged = !listEquals(
+      next.midiOutputDeviceIds,
+      previous.midiOutputDeviceIds,
+    );
+    final networkMidiEnabledChanged =
+        next.networkMidiEnabled != previous.networkMidiEnabled;
+    final enablingMidiInput =
+        next.midiInputEnabled && !previous.midiInputEnabled;
+    final enablingMidiOutput =
+        next.midiOutputEnabled && !previous.midiOutputEnabled;
     final snapMappingChanged = _pitchSnapMappingChanged(previous, next);
     final playbackParametersChanged =
         !_microphoneTake &&
@@ -762,6 +781,12 @@ class XenSynthController extends ChangeNotifier {
     final clockActive = playing || waterfallAnimating;
     if (clockActive && playbackParametersChanged) {
       _syncClockPosition();
+    }
+    if (networkMidiEnabledChanged) {
+      _networkMidiRefreshGeneration++;
+      _activeNetworkMidiScanGeneration = null;
+      networkMidiScanning = false;
+      _clearNetworkMidiDeviceCache();
     }
     settings = next;
     if (clockActive && playbackParametersChanged && waterfallAnimating) {
@@ -799,36 +824,37 @@ class XenSynthController extends ChangeNotifier {
         snapMappingChanged) {
       await _configureNetworkAudio();
     }
-    if (next.midiInputEnabled != previous.midiInputEnabled) {
-      await _native.setMidiInputEnabled(next.midiInputEnabled);
-    }
-    if (next.midiInputDeviceSelectionConfigured !=
-            previous.midiInputDeviceSelectionConfigured ||
-        !listEquals(next.midiInputDeviceIds, previous.midiInputDeviceIds)) {
+    if (midiInputSelectionChanged && enablingMidiInput) {
       await _native.setMidiInputDeviceIds(
         next.midiInputDeviceIds,
         configured: next.midiInputDeviceSelectionConfigured,
       );
     }
+    if (next.midiInputEnabled != previous.midiInputEnabled) {
+      await _native.setMidiInputEnabled(next.midiInputEnabled);
+    }
+    if (midiInputSelectionChanged && !enablingMidiInput) {
+      await _native.setMidiInputDeviceIds(
+        next.midiInputDeviceIds,
+        configured: next.midiInputDeviceSelectionConfigured,
+      );
+    }
+    if (midiOutputSelectionChanged && enablingMidiOutput) {
+      await _native.setMidiOutputDeviceIds(next.midiOutputDeviceIds);
+    }
     if (next.midiOutputEnabled != previous.midiOutputEnabled) {
       await _native.setMidiOutputEnabled(next.midiOutputEnabled);
     }
-    if (next.networkMidiEnabled != previous.networkMidiEnabled) {
+    if (networkMidiEnabledChanged) {
       await _native.configureNetworkMidiOutput(
         enabled: next.networkMidiEnabled,
       );
+      if (next.networkMidiEnabled) {
+        await _refreshNetworkMidiDevices();
+      }
     }
-    if (!listEquals(
-      next.bluetoothMidiOutputIds,
-      previous.bluetoothMidiOutputIds,
-    )) {
-      await _native.setBluetoothMidiOutputIds(next.bluetoothMidiOutputIds);
-    }
-    if (!listEquals(
-      next.networkMidiDestinationIds,
-      previous.networkMidiDestinationIds,
-    )) {
-      await _native.setNetworkMidiOutputIds(next.networkMidiDestinationIds);
+    if (midiOutputSelectionChanged && !enablingMidiOutput) {
+      await _native.setMidiOutputDeviceIds(next.midiOutputDeviceIds);
     }
     if (next.microphoneSensitivity != previous.microphoneSensitivity) {
       await _native.setPitchRecognitionSensitivity(next.microphoneSensitivity);
@@ -870,9 +896,29 @@ class XenSynthController extends ChangeNotifier {
     }
   }
 
-  Future<void> refreshMidiInputDevices({bool notify = true}) async {
+  Future<void> refreshMidiInputDevices({
+    bool notify = true,
+    bool? includeNetwork,
+  }) async {
+    final shouldIncludeNetwork = includeNetwork ?? settings.networkMidiEnabled;
+    final networkGeneration = _networkMidiRefreshGeneration;
     try {
-      midiInputDevices = await _native.getMidiInputDevices();
+      final discovered = await _native.getMidiInputDevices(
+        includeNetwork: shouldIncludeNetwork,
+      );
+      final localDevices = discovered.where((device) => !device.isNetwork);
+      final networkDevices =
+          shouldIncludeNetwork &&
+              settings.networkMidiEnabled &&
+              networkGeneration == _networkMidiRefreshGeneration
+          ? discovered.where((device) => device.isNetwork)
+          : settings.networkMidiEnabled
+          ? midiInputDevices.where((device) => device.isNetwork)
+          : const <NativeMidiOutput>[];
+      midiInputDevices = _deduplicateMidiDevices([
+        ...localDevices,
+        ...networkDevices,
+      ]);
       if (notify) notifyListeners();
     } catch (error) {
       debugPrint('MIDI input device refresh failed: $error');
@@ -882,13 +928,15 @@ class XenSynthController extends ChangeNotifier {
 
   Future<void> refreshMidiDevices({bool notify = true}) async {
     if (midiDeviceRefreshing) return;
+    final includeNetwork = settings.networkMidiEnabled;
+    if (!includeNetwork) _clearNetworkMidiDeviceCache();
     midiDeviceRefreshing = true;
     if (notify) notifyListeners();
     try {
       await Future.wait([
-        refreshMidiInputDevices(notify: false),
+        refreshMidiInputDevices(notify: false, includeNetwork: includeNetwork),
         refreshBluetoothMidiOutputs(notify: false),
-        refreshNetworkMidiOutputs(notify: false),
+        if (includeNetwork) refreshNetworkMidiOutputs(notify: false),
       ]);
     } finally {
       midiDeviceRefreshing = false;
@@ -897,32 +945,70 @@ class XenSynthController extends ChangeNotifier {
   }
 
   Future<void> refreshNetworkMidiOutputs({bool notify = true}) async {
-    if (networkMidiScanning) return;
+    if (!settings.networkMidiEnabled) {
+      networkMidiOutputs = const <NativeMidiOutput>[];
+      _activeNetworkMidiScanGeneration = null;
+      networkMidiScanning = false;
+      if (notify) notifyListeners();
+      return;
+    }
+    final networkGeneration = _networkMidiRefreshGeneration;
+    if (networkMidiScanning &&
+        _activeNetworkMidiScanGeneration == networkGeneration) {
+      return;
+    }
+    _activeNetworkMidiScanGeneration = networkGeneration;
     networkMidiScanning = true;
     if (notify) notifyListeners();
     try {
-      networkMidiOutputs = await _native.scanNetworkMidiOutputs();
+      final discovered = await _native.scanNetworkMidiOutputs();
+      if (settings.networkMidiEnabled &&
+          networkGeneration == _networkMidiRefreshGeneration) {
+        networkMidiOutputs = discovered;
+      }
     } catch (error) {
       debugPrint('Network MIDI output scan failed: $error');
-      if (notify) _setStatus('NETWORK MIDI SCAN FAILED');
+      if (notify &&
+          settings.networkMidiEnabled &&
+          networkGeneration == _networkMidiRefreshGeneration) {
+        _setStatus('NETWORK MIDI SCAN FAILED');
+      }
     } finally {
-      networkMidiScanning = false;
-      if (notify) notifyListeners();
+      if (_activeNetworkMidiScanGeneration == networkGeneration) {
+        _activeNetworkMidiScanGeneration = null;
+        networkMidiScanning = false;
+        if (notify) notifyListeners();
+      }
     }
   }
 
-  Future<void> _configureMidi(XenSynthSettings value) async {
+  Future<void> _refreshNetworkMidiDevices() async {
+    if (!settings.networkMidiEnabled) return;
     await Future.wait([
-      _native.setMidiInputEnabled(value.midiInputEnabled),
-      _native.setMidiInputDeviceIds(
-        value.midiInputDeviceIds,
-        configured: value.midiInputDeviceSelectionConfigured,
-      ),
-      _native.setMidiOutputEnabled(value.midiOutputEnabled),
-      _native.configureNetworkMidiOutput(enabled: value.networkMidiEnabled),
-      _native.setBluetoothMidiOutputIds(value.bluetoothMidiOutputIds),
-      _native.setNetworkMidiOutputIds(value.networkMidiDestinationIds),
+      refreshMidiInputDevices(notify: false, includeNetwork: true),
+      refreshNetworkMidiOutputs(notify: false),
     ]);
+    if (!settings.networkMidiEnabled) return;
+    notifyListeners();
+  }
+
+  void _clearNetworkMidiDeviceCache() {
+    midiInputDevices = _deduplicateMidiDevices(
+      midiInputDevices.where((device) => !device.isNetwork),
+    );
+    networkMidiOutputs = const <NativeMidiOutput>[];
+  }
+
+  Future<void> _configureMidi(XenSynthSettings value) async {
+    value = value.normalizedMidiSelections();
+    await _native.setMidiInputEnabled(value.midiInputEnabled);
+    await _native.setMidiOutputEnabled(value.midiOutputEnabled);
+    await _native.setMidiInputDeviceIds(
+      value.midiInputDeviceIds,
+      configured: value.midiInputDeviceSelectionConfigured,
+    );
+    await _native.setMidiOutputDeviceIds(value.midiOutputDeviceIds);
+    await _native.configureNetworkMidiOutput(enabled: value.networkMidiEnabled);
   }
 
   static List<NativeMidiOutput> _deduplicateMidiDevices(

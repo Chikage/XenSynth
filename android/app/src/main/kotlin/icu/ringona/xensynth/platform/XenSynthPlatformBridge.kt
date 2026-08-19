@@ -27,7 +27,6 @@ import icu.ringona.xensynth.midi.MidiOutputRouter
 import icu.ringona.rtpmidi.AppleMidiConfiguration
 import icu.ringona.rtpmidi.AppleMidiEvent
 import icu.ringona.rtpmidi.AppleMidiManager
-import icu.ringona.rtpmidi.AppleMidiPeer
 import icu.ringona.rtpmidi.AppleMidiScheduledListener
 import icu.ringona.xensynth.playback.XenSynthPlaybackService
 import icu.ringona.xensynth.pitch.PitchRecognitionManager
@@ -126,7 +125,11 @@ internal class XenSynthPlatformBridge(
     private var hostResumed = false
     @Volatile
     private var midiInputEnabled = true
-    private var audioInitialized = false
+   @Volatile
+   private var midiOutputEnabled = true
+    @Volatile
+    private var networkMidiEnabled = true
+   private var audioInitialized = false
     private var audioInitializing = false
     @Volatile
     private var closed = false
@@ -139,27 +142,20 @@ internal class XenSynthPlatformBridge(
     private val manualNoteTokens = mutableMapOf<Int, ManualNoteToken>()
     private var nextManualNoteToken = 1
     private val networkMidiParsers = ConcurrentHashMap<String, TimedNetworkMidiParser>()
-    private val networkSessionInputIds = ConcurrentHashMap<String, String>()
-    private var midiInputDeviceSelectionConfigured = false
+    private var midiInputDeviceSelectionConfigured = true
     private var selectedMidiInputDeviceIds = emptySet<String>()
     @Volatile
-    private var selectedNetworkMidiInputIds: Set<String>? = null
+    private var selectedNetworkMidiInputIds: Set<String> = emptySet()
     private val networkMidiAudioScheduler = NetworkMidiAudioScheduler(nativeAudio)
     private val appleMidiManager = AppleMidiManager(
         context = activity.applicationContext,
         configuration = AppleMidiConfiguration(
             serviceName = "XenSynth - ${Build.MODEL.orEmpty().ifBlank { "Android" }}",
             eventDeliveryLookaheadMillis = NETWORK_AUDIO_LOOKAHEAD_MILLIS,
-        ),
-        listener = object : AppleMidiScheduledListener {
-            override fun onPeersChanged(peers: List<AppleMidiPeer>) {
-                // A passive session may acquire its stable Bonjour peer ID
-                // after the first packet; resolve it again on directory changes.
-                networkSessionInputIds.clear()
-            }
-
-            override fun onMidiEvent(event: AppleMidiEvent) {
-                if (!midiInputEnabled || closed || !networkMidiInputAllowed(event.sessionId)) return
+       ),
+       listener = object : AppleMidiScheduledListener {
+           override fun onMidiEvent(event: AppleMidiEvent) {
+                if (!midiInputEnabled || !networkMidiEnabled || closed) return
                 val nativeAudioHandled = networkMidiAudioScheduler.onMidiEvent(event)
                 val parser = networkMidiParsers.computeIfAbsent(event.sessionId) {
                     TimedNetworkMidiParser { midiEvent, targetTimeNanos, audioHandled ->
@@ -179,7 +175,6 @@ internal class XenSynthPlatformBridge(
             override fun onSessionClosed(sessionId: String) {
                 networkMidiAudioScheduler.releaseSession(sessionId)
                 networkMidiParsers.remove(sessionId)?.reset()
-                networkSessionInputIds.remove(sessionId)
                 if (midiInputEnabled && !closed) {
                     (0 until 16).forEach { channel ->
                         deliverMidiEvent(
@@ -301,7 +296,14 @@ internal class XenSynthPlatformBridge(
                     setMidiInputEnabled(boolean(arguments, "enabled", defaultValue = true))
                     result.success(true)
                 }
-                "getMidiInputDevices" -> getMidiInputDevices(result)
+                "getMidiInputDevices" -> getMidiInputDevices(
+                    includeNetwork = boolean(
+                        arguments,
+                        "includeNetwork",
+                        defaultValue = true,
+                    ),
+                    result = result,
+                )
                 "setMidiInputDeviceIds" -> {
                     setMidiInputDeviceIds(
                         ids = stringList(arguments["ids"]),
@@ -310,19 +312,24 @@ internal class XenSynthPlatformBridge(
                     result.success(true)
                 }
                 "setMidiOutputEnabled" -> {
-                    MidiOutputRouter.setOutputEnabled(
+                    setMidiOutputEnabled(
                         boolean(arguments, "enabled", defaultValue = true),
                     )
+                    result.success(true)
+                }
+                "setMidiOutputDeviceIds" -> {
+                    setMidiOutputDeviceIds(stringList(arguments["ids"]))
                     result.success(true)
                 }
                 "getMidiOutputDevices" -> result.success(
                     midiOutputDestinationManager.destinations(),
                 )
-                "configureNetworkMidiOutput" -> {
-                    // AppleMIDI destinations come exclusively from Bonjour service identities.
-                    MidiOutputRouter.setNetworkOutputEnabled(
-                        boolean(arguments, "enabled"),
-                    )
+               "configureNetworkMidiOutput" -> {
+                   val enabled = boolean(arguments, "enabled")
+                   // AppleMIDI destinations come exclusively from Bonjour service identities.
+                    networkMidiEnabled = enabled
+                   appleMidiManager.setDiscoveryEnabled(enabled)
+                   MidiOutputRouter.setNetworkOutputEnabled(enabled)
                     result.success(true)
                 }
                 "configureNetworkAudio" -> {
@@ -351,14 +358,18 @@ internal class XenSynthPlatformBridge(
                 }
                 "scanNetworkMidiOutputs" -> scanNetworkMidiOutputs(result)
                 "setNetworkMidiOutputIds", "setNetworkMidiDestinationIds" -> {
-                    appleMidiManager.setDestinationIds(stringList(arguments["ids"]))
+                    setMidiOutputDeviceIds(
+                        stringList(arguments["ids"]).filter { it.startsWith("applemidi:") },
+                    )
                     result.success(true)
                 }
                 "getBluetoothMidiOutputs" -> result.success(
                     midiOutputDestinationManager.bluetoothDestinations(),
                 )
                 "setBluetoothMidiOutputIds" -> {
-                    setBluetoothMidiOutputIds(stringList(arguments["ids"]))
+                    setMidiOutputDeviceIds(
+                        stringList(arguments["ids"]).filterNot { it.startsWith("applemidi:") },
+                    )
                     result.success(true)
                 }
                 "releaseInputNotes" -> {
@@ -562,12 +573,18 @@ internal class XenSynthPlatformBridge(
         }
     }
 
+    private fun setMidiOutputEnabled(enabled: Boolean) {
+        midiOutputEnabled = enabled
+        MidiOutputRouter.setOutputEnabled(enabled)
+    }
+
     private fun scanNetworkMidiOutputs(result: MethodChannel.Result) {
         worker.execute {
             val destinations = runCatching {
                 appleMidiManager.scan().map { peer ->
                     mapOf(
                         "id" to peer.id,
+                        "targetId" to networkMidiTargetId(peer.id, peer.hostAddress),
                         "name" to peer.name,
                         "model" to peer.model,
                         "hostAddress" to peer.hostAddress,
@@ -589,7 +606,10 @@ internal class XenSynthPlatformBridge(
      * destinations. Discovery runs off the platform channel thread because a
      * DNS-SD scan may wait for its initial response.
      */
-    private fun getMidiInputDevices(result: MethodChannel.Result) {
+    private fun getMidiInputDevices(
+        includeNetwork: Boolean,
+        result: MethodChannel.Result,
+    ) {
         worker.execute {
             val local = runCatching { midiInputManager.inputDevices() }
                 .getOrElse { error ->
@@ -597,12 +617,13 @@ internal class XenSynthPlatformBridge(
                     emptyList()
                 }
                 .map(::inputDeviceMap)
-            val network = runCatching {
+            val network = if (includeNetwork) runCatching {
                 val peers = appleMidiManager.scan()
                 val peerIds = peers.mapTo(HashSet()) { it.id }
                 val discovered = peers.map { peer ->
                     mapOf<String, Any>(
                         "id" to peer.id,
+                        "targetId" to networkMidiTargetId(peer.id, peer.hostAddress),
                         "name" to peer.name,
                         "model" to peer.model,
                         "hostAddress" to peer.hostAddress,
@@ -611,7 +632,7 @@ internal class XenSynthPlatformBridge(
                         "type" to "network",
                         "state" to peer.state.name.lowercase(),
                         "isInput" to true,
-                        "selected" to true,
+                        "selected" to (peer.id in selectedNetworkMidiInputIds),
                         "connected" to (peer.state.name == "CONNECTED"),
                     )
                 }
@@ -626,13 +647,15 @@ internal class XenSynthPlatformBridge(
                         mapOf<String, Any>(
                             "id" to (statistics.peerId
                                 ?: "applemidi-session:${statistics.sessionId}"),
+                            "targetId" to (statistics.peerId
+                                ?: "applemidi-session:${statistics.sessionId}"),
                             "name" to statistics.peerName,
                             "model" to statistics.peerName,
                             "transport" to "network",
                             "type" to "network",
                             "state" to "connected",
                             "isInput" to true,
-                            "selected" to true,
+                            "selected" to (statistics.peerId in selectedNetworkMidiInputIds),
                             "connected" to true,
                         )
                     }
@@ -640,7 +663,7 @@ internal class XenSynthPlatformBridge(
             }.getOrElse { error ->
                 android.util.Log.w("MidiInputDevices", "Could not scan network MIDI inputs", error)
                 emptyList()
-            }
+            } else emptyList()
             val merged = (local + network).distinctBy { it["id"]?.toString() }
             mainHandler.post {
                 if (!closed) result.success(merged) else result.success(emptyList<Map<String, Any>>())
@@ -651,6 +674,7 @@ internal class XenSynthPlatformBridge(
     private fun inputDeviceMap(source: MidiInputSource): Map<String, Any> {
         val map = linkedMapOf<String, Any>(
             "id" to source.id,
+            "targetId" to "android-midi:${source.deviceId}",
             "name" to source.name,
             "transport" to source.transport,
             "type" to source.transport,
@@ -665,27 +689,31 @@ internal class XenSynthPlatformBridge(
     }
 
     private fun setMidiInputDeviceIds(ids: List<String>, configured: Boolean) {
-        val normalizedIds = ids.filter(String::isNotBlank).toSet()
+        val normalizedIds = ids.asSequence()
+            .map(String::trim)
+            .filter(String::isNotEmpty)
+            .take(1)
+            .toSet()
+        val nextInputId = normalizedIds.singleOrNull()
         val selectionChanged =
-            midiInputDeviceSelectionConfigured != configured ||
+            !midiInputDeviceSelectionConfigured ||
                 selectedMidiInputDeviceIds != normalizedIds
-        midiInputDeviceSelectionConfigured = configured
+        midiInputDeviceSelectionConfigured = true
         selectedMidiInputDeviceIds = normalizedIds
-        midiInputManager.setInputDeviceIds(ids = ids, configured = configured)
-        val nextNetworkIds = if (configured) {
+        midiInputManager.setInputDeviceIds(ids = normalizedIds, configured = true)
+        val nextNetworkIds = if (nextInputId != null) {
             normalizedIds.filterTo(LinkedHashSet()) {
                 it.startsWith("applemidi:") || it.startsWith("applemidi-session:")
             }
         } else {
-            null
+            emptySet()
         }
         selectedNetworkMidiInputIds = nextNetworkIds
         appleMidiManager.setInputIds(
-            ids = nextNetworkIds ?: emptyList(),
-            configured = configured,
+            ids = nextNetworkIds,
+            configured = true,
         )
         if (!selectionChanged) return
-        networkSessionInputIds.clear()
         // Changing any source ownership must not leave notes sounding after a
         // deselected source's later Note Off is filtered or disconnected.
         networkMidiAudioScheduler.close()
@@ -698,19 +726,6 @@ internal class XenSynthPlatformBridge(
                 nativeAudioHandled = true,
             )
         }
-    }
-
-    private fun networkMidiInputAllowed(sessionId: String): Boolean {
-        val selected = selectedNetworkMidiInputIds ?: return true
-        val directId = "applemidi-session:$sessionId"
-        if (directId in selected) return true
-        val inputId = networkSessionInputIds.computeIfAbsent(sessionId) {
-            appleMidiManager.sessionStatistics()
-                .firstOrNull { it.sessionId == sessionId }
-                ?.peerId
-                ?: directId
-        }
-        return inputId in selected
     }
 
     private fun setBluetoothMidiOutputIds(ids: List<String>) {
@@ -739,6 +754,24 @@ internal class XenSynthPlatformBridge(
         }
         pendingBluetoothMidiOutputIds = emptyList()
         midiOutputDestinationManager.selectBluetoothDestinations(ids)
+    }
+
+    private fun setMidiOutputDeviceIds(ids: List<String>) {
+        val outputId = ids.asSequence()
+            .map(String::trim)
+            .firstOrNull(String::isNotEmpty)
+        if (outputId?.startsWith("applemidi:") == true) {
+            setBluetoothMidiOutputIds(emptyList())
+            appleMidiManager.setDestinationIds(listOf(outputId))
+        } else {
+            appleMidiManager.setDestinationIds(emptyList())
+            setBluetoothMidiOutputIds(outputId?.let(::listOf).orEmpty())
+        }
+    }
+
+    private fun networkMidiTargetId(id: String, hostAddress: String): String {
+        val host = hostAddress.trim().lowercase()
+        return if (host.isBlank()) id else "network:$host"
     }
 
     private fun startPlaybackService() {
@@ -1169,7 +1202,6 @@ internal class XenSynthPlatformBridge(
         appleMidiManager.close()
         networkMidiAudioScheduler.close()
         networkMidiParsers.clear()
-        networkSessionInputIds.clear()
         midiOutputDestinationManager.close()
         pitchRecognitionManager.close()
         releaseManualNotes()

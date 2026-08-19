@@ -34,7 +34,13 @@ internal class MidiOutputDestinationManager(context: Context) : Closeable {
         midiManager?.registerDeviceCallback(deviceCallback, handler)
     }
 
-    /** Lists USB, Bluetooth, virtual, and other system MIDI output targets. */
+    /**
+     * Lists every local MIDI destination that accepts data from Xen Synth.
+     *
+     * A receiving app exposes an input port through [MidiDeviceService]. Those
+     * ports are [MidiDeviceInfo.TYPE_VIRTUAL] devices, so they must be kept in
+     * the same destination list as USB and Bluetooth hardware.
+     */
     fun destinations(): List<Map<String, Any>> {
         val manager = midiManager ?: return emptyList()
         val devices = runCatching { manager.devices }
@@ -60,7 +66,11 @@ internal class MidiOutputDestinationManager(context: Context) : Closeable {
     fun selectBluetoothDestinations(ids: Collection<String>) {
         // The method name is retained for the persisted Flutter API, but IDs
         // now cover every Android MIDI destination transport.
-        selectedIds = ids.filter { it.isNotBlank() }.toSet()
+        selectedIds = ids.asSequence()
+            .map(String::trim)
+            .firstOrNull(String::isNotEmpty)
+            ?.let(::setOf)
+            .orEmpty()
         refresh()
     }
 
@@ -169,6 +179,7 @@ internal class MidiOutputDestinationManager(context: Context) : Closeable {
     ): Map<String, Any> {
         val map = linkedMapOf<String, Any>(
             "id" to destinationId(info, port.portNumber),
+            "targetId" to "android-midi:${info.id}",
             "name" to displayName(info, port.portNumber),
             "transport" to transportName(info),
             "type" to transportName(info),
@@ -193,7 +204,7 @@ internal class MidiOutputDestinationManager(context: Context) : Closeable {
     private fun transportName(info: MidiDeviceInfo): String = when (info.type) {
         MidiDeviceInfo.TYPE_USB -> "usb"
         MidiDeviceInfo.TYPE_BLUETOOTH -> "bluetooth"
-        MidiDeviceInfo.TYPE_VIRTUAL -> "virtual"
+        MidiDeviceInfo.TYPE_VIRTUAL -> "software"
         else -> "system"
     }
 

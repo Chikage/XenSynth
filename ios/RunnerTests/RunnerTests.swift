@@ -382,6 +382,27 @@ class RunnerTests: XCTestCase {
     )
   }
 
+  func testIncomingAppleMidiConnectionEnablesSharedNetworkInput() {
+    XCTAssertTrue(
+      MIDIKeyboardController.shouldReceiveNetworkInput(
+        selectedInputSourceIds: [],
+        hasActiveConnection: true
+      )
+    )
+    XCTAssertFalse(
+      MIDIKeyboardController.shouldReceiveNetworkInput(
+        selectedInputSourceIds: [],
+        hasActiveConnection: false
+      )
+    )
+    XCTAssertTrue(
+      MIDIKeyboardController.shouldReceiveNetworkInput(
+        selectedInputSourceIds: ["applemidi:studio-ipad"],
+        hasActiveConnection: false
+      )
+    )
+  }
+
   func testMidiNetworkConnectionKeyPrefersStableBonjourIdentity() {
     let first = MIDIKeyboardController.networkConnectionKey(
       serviceDomain: "LOCAL.",

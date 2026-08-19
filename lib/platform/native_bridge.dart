@@ -1,6 +1,8 @@
 import 'dart:async';
 import 'package:flutter/services.dart';
 
+import '../core/midi_device_selection.dart';
+
 class NativeDocument {
   const NativeDocument({required this.name, required this.bytes, this.path});
 
@@ -65,6 +67,7 @@ class NativeMidiOutput {
   const NativeMidiOutput({
     required this.id,
     required this.name,
+    this.targetId,
     this.hostAddress,
     this.port,
     this.model,
@@ -74,13 +77,25 @@ class NativeMidiOutput {
 
   final String id;
   final String name;
+  final String? targetId;
   final String? hostAddress;
   final int? port;
   final String? model;
   final String? transport;
   final bool isInput;
 
-  bool get isNetwork => id.startsWith('applemidi:');
+  bool get isNetwork {
+    final normalizedTransport = transport?.trim().toLowerCase();
+    return id.startsWith('applemidi:') ||
+        id.startsWith('applemidi-session:') ||
+        normalizedTransport == 'network' ||
+        normalizedTransport == 'applemidi' ||
+        normalizedTransport == 'rtp-midi';
+  }
+
+  String get selectionTargetId => targetId == null || targetId!.isEmpty
+      ? midiTargetIdentity(id)
+      : midiTargetIdentity(targetId!);
 
   String get displayName {
     final identity =
@@ -97,6 +112,8 @@ class NativeMidiOutput {
     final transportLabel = switch (transport?.toLowerCase()) {
       'usb' => 'USB',
       'bluetooth' || 'bluetoothmidi' => 'Bluetooth',
+      'software' || 'virtual' => 'Software',
+      'coremidi' || 'system' => 'System MIDI',
       'network' || 'applemidi' || 'rtp-midi' => 'LAN',
       _ => null,
     };
@@ -115,6 +132,7 @@ class NativeMidiOutput {
     final id = map['id']?.toString().trim();
     if (id == null || id.isEmpty) return null;
     final name = map['name']?.toString().trim();
+    final targetId = map['targetId']?.toString().trim();
     final hostAddress = map['hostAddress']?.toString().trim();
     final rawPort = map['port'];
     final port = rawPort is num
@@ -132,6 +150,7 @@ class NativeMidiOutput {
       name: name == null || name.isEmpty
           ? (isInput ? 'MIDI input' : 'MIDI output')
           : name,
+      targetId: targetId == null || targetId.isEmpty ? null : targetId,
       hostAddress: hostAddress == null || hostAddress.isEmpty
           ? null
           : hostAddress,
@@ -291,8 +310,12 @@ class XenSynthNativeBridge {
     });
   }
 
-  Future<List<NativeMidiOutput>> getMidiInputDevices() async {
-    final result = await _invoke('getMidiInputDevices');
+  Future<List<NativeMidiOutput>> getMidiInputDevices({
+    bool includeNetwork = true,
+  }) async {
+    final result = await _invoke('getMidiInputDevices', <String, Object?>{
+      'includeNetwork': includeNetwork,
+    });
     if (result is! List) return const <NativeMidiOutput>[];
     return result
         .map((message) {
@@ -329,6 +352,10 @@ class XenSynthNativeBridge {
     return _invokeVoid('setMidiOutputEnabled', <String, Object?>{
       'enabled': enabled,
     });
+  }
+
+  Future<void> setMidiOutputDeviceIds(List<String> ids) {
+    return _invokeVoid('setMidiOutputDeviceIds', <String, Object?>{'ids': ids});
   }
 
   Future<void> configureNetworkMidiOutput({required bool enabled}) {

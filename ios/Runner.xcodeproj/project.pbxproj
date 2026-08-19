@@ -30,6 +30,7 @@
 		A1B2C3D4000000000000000C /* PitchRecording.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D4000000000000010B /* PitchRecording.swift */; };
 		A1B2C3D4000000000000000D /* PitchRecognitionManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D4000000000000010C /* PitchRecognitionManager.swift */; };
 		A1B2C3D4000000000000000E /* MIDIOutputRouter.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D4000000000000010D /* MIDIOutputRouter.swift */; };
+		A1B2C3D4000000000000000F /* MIDIEndpointIdentity.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D4000000000000010E /* MIDIEndpointIdentity.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -87,6 +88,7 @@
 		A1B2C3D4000000000000010B /* PitchRecording.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PitchRecording.swift; sourceTree = "<group>"; };
 		A1B2C3D4000000000000010C /* PitchRecognitionManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PitchRecognitionManager.swift; sourceTree = "<group>"; };
 		A1B2C3D4000000000000010D /* MIDIOutputRouter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MIDIOutputRouter.swift; sourceTree = "<group>"; };
+		A1B2C3D4000000000000010E /* MIDIEndpointIdentity.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MIDIEndpointIdentity.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -174,6 +176,7 @@
 				A1B2C3D4000000000000010B /* PitchRecording.swift */,
 				A1B2C3D4000000000000010C /* PitchRecognitionManager.swift */,
 				A1B2C3D4000000000000010D /* MIDIOutputRouter.swift */,
+				A1B2C3D4000000000000010E /* MIDIEndpointIdentity.swift */,
 			);
 			path = Platform;
 			sourceTree = "<group>";
@@ -359,6 +362,7 @@
 				A1B2C3D4000000000000000C /* PitchRecording.swift in Sources */,
 				A1B2C3D4000000000000000D /* PitchRecognitionManager.swift in Sources */,
 				A1B2C3D4000000000000000E /* MIDIOutputRouter.swift in Sources */,
+				A1B2C3D4000000000000000F /* MIDIEndpointIdentity.swift in Sources */,
 				74858FAF1ED2DC5600515810 /* AppDelegate.swift in Sources */,
 				1498D2341E8E89220040F4C2 /* GeneratedPluginRegistrant.m in Sources */,
 				7884E8682EC3CC0700C636F2 /* SceneDelegate.swift in Sources */,

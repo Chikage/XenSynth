@@ -1,4 +1,5 @@
 import 'package:flutter_test/flutter_test.dart';
+import 'package:xensynth/core/midi_device_selection.dart';
 import 'package:xensynth/app/xensynth_settings.dart';
 import 'package:xensynth/core/hex_keyboard.dart';
 
@@ -323,7 +324,7 @@ void main() {
       );
     });
 
-    test('round-trips MIDI input, output, network, and Bluetooth settings', () {
+    test('normalizes MIDI settings to one input and one output target', () {
       const configured = XenSynthSettings(
         midiInputEnabled: false,
         midiOutputEnabled: false,
@@ -339,17 +340,38 @@ void main() {
 
       expect(restored.midiInputEnabled, isFalse);
       expect(restored.midiOutputEnabled, isFalse);
-      expect(restored.midiInputDeviceIds, ['coremidi:12', 'applemidi:input']);
+      expect(restored.midiInputDeviceIds, ['coremidi:12']);
       expect(restored.midiInputDeviceSelectionConfigured, isTrue);
-      expect(
-        restored.midiOutputDeviceIds,
-        containsAll(['applemidi:SnVzdFBpYW5v', 'bluetooth:42:0']),
-      );
+      expect(restored.midiOutputDeviceIds, ['applemidi:SnVzdFBpYW5v']);
       expect(restored.networkMidiEnabled, isTrue);
       expect(restored.networkMidiDestinationIds, ['applemidi:SnVzdFBpYW5v']);
-      expect(restored.bluetoothMidiOutputIds, ['bluetooth:42:0']);
+      expect(restored.bluetoothMidiOutputIds, isEmpty);
       expect(restored.toMap(), isNot(contains('networkMidiHost')));
       expect(restored.toMap(), isNot(contains('networkMidiPort')));
+    });
+
+    test('allows one MIDI target to be enabled in both directions', () {
+      const inputId = 'android-midi-input:42:0';
+      const outputId = 'android-midi-output:42:1';
+
+      final inputDisabled = const XenSynthSettings(
+        midiInputEnabled: false,
+        midiInputDeviceIds: [inputId],
+        midiOutputDeviceIds: [outputId],
+      ).normalizedMidiSelections();
+      final outputDisabled = const XenSynthSettings(
+        midiOutputEnabled: false,
+        midiInputDeviceIds: [inputId],
+        midiOutputDeviceIds: [outputId],
+      ).normalizedMidiSelections();
+
+      expect(inputDisabled.midiInputDeviceIds, [inputId]);
+      expect(inputDisabled.midiOutputDeviceIds, [outputId]);
+      expect(outputDisabled.midiInputDeviceIds, [inputId]);
+      expect(outputDisabled.midiOutputDeviceIds, [outputId]);
+      final bothEnabled = inputDisabled.copyWith(midiInputEnabled: true);
+      expect(bothEnabled.midiInputDeviceIds, [inputId]);
+      expect(bothEnabled.midiOutputDeviceIds, [outputId]);
     });
 
     test('migrates unified MIDI output IDs from transport-specific lists', () {
@@ -358,8 +380,8 @@ void main() {
         'bluetoothMidiOutputIds': ['coremidi:9'],
       });
 
-      expect(restored.midiOutputDeviceIds, ['applemidi:peer', 'coremidi:9']);
-      expect(restored.midiInputDeviceSelectionConfigured, isFalse);
+      expect(restored.midiOutputDeviceIds, ['applemidi:peer']);
+      expect(restored.midiInputDeviceSelectionConfigured, isTrue);
     });
 
     test('applies pitch offset with the opposite sign', () {
@@ -404,6 +426,16 @@ void main() {
       expect(perspective.toMap()['spatialProjection'], 'obliquePerspective');
       expect(cabinet.toMap()['spatialProjection'], 'cabinet');
     });
+  });
+
+  test('normalizes LAN target identity by IP rather than service port', () {
+    expect(
+      isSameMidiTarget(
+        'network:192.168.1.12:5004',
+        'network:192.168.1.12:5005',
+      ),
+      isTrue,
+    );
   });
 }
 

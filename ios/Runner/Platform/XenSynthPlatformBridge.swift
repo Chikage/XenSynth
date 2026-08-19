@@ -27,6 +27,10 @@ final class XenSynthPlatformBridge: NSObject, FlutterStreamHandler, UIDocumentPi
   private var isPlaying = false
   private var latencyMilliseconds = 0.0
   private var previewPrograms = Array(repeating: 0, count: 16)
+  private var midiInputEnabled = true
+  private var midiOutputEnabled = true
+  private var selectedMidiInputId: String?
+  private var selectedMidiOutputId: String?
 
   init(messenger: FlutterBinaryMessenger) {
     methodChannel = FlutterMethodChannel(
@@ -193,28 +197,43 @@ final class XenSynthPlatformBridge: NSObject, FlutterStreamHandler, UIDocumentPi
         result(true)
 
       case "getMidiInputDevices":
-        result(midiController.inputDevices())
+        let local = midiController.inputDevices().filter {
+          ($0["id"] as? String) != "applemidi:input"
+        }
+        if arguments.bool(forAnyKey: ["includeNetwork"]) ?? true {
+          midiOutput.scanNetworkDestinations { peers in
+            let network = peers.map { peer -> [String: Any] in
+              var input = peer
+              input["isInput"] = true
+              return input
+            }
+            result(local + network)
+          }
+        } else {
+          result(local)
+        }
 
       case "setMidiInputDeviceIds":
-        midiController.setInputSourceIds(
-          stringList(from: arguments["ids"]) ?? [],
-          configured: arguments.bool(forAnyKey: ["configured"]) ?? true
-        )
+        setMidiInputDeviceIds(stringList(from: arguments["ids"]) ?? [])
         result(true)
 
       case "getMidiOutputDevices":
         // CoreMIDI destinations cover USB, Bluetooth and virtual/system MIDI
         // endpoints. AppleMIDI peers are returned by scanNetworkMidiOutputs.
-        result(midiOutput.bluetoothDestinations())
+        result(midiOutput.localDestinations())
 
       case "setMidiOutputEnabled":
-        midiOutput.setOutputEnabled(arguments.bool(forAnyKey: ["enabled"]) ?? true)
+        setMidiOutputEnabled(arguments.bool(forAnyKey: ["enabled"]) ?? true)
+        result(true)
+
+      case "setMidiOutputDeviceIds":
+        setMidiOutputDeviceIds(stringList(from: arguments["ids"]) ?? [])
         result(true)
 
       case "configureNetworkMidiOutput":
-        midiOutput.configureNetwork(
-          enabled: arguments.bool(forAnyKey: ["enabled"]) ?? true
-        )
+       let enabled = arguments.bool(forAnyKey: ["enabled"]) ?? true
+       midiController.setNetworkInputEnabled(enabled)
+       midiOutput.configureNetwork(enabled: enabled)
         result(true)
 
       case "scanNetworkMidiOutputs":
@@ -223,14 +242,18 @@ final class XenSynthPlatformBridge: NSObject, FlutterStreamHandler, UIDocumentPi
         }
 
       case "setNetworkMidiOutputIds":
-        midiOutput.setNetworkDestinationIds(stringList(from: arguments["ids"]) ?? [])
+        setMidiOutputDeviceIds(
+          (stringList(from: arguments["ids"]) ?? []).filter { $0.hasPrefix("applemidi:") }
+        )
         result(true)
 
       case "getBluetoothMidiOutputs":
-        result(midiOutput.bluetoothDestinations())
+        result(midiOutput.localDestinations())
 
       case "setBluetoothMidiOutputIds":
-        midiOutput.setBluetoothDestinationIds(stringList(from: arguments["ids"]) ?? [])
+        setMidiOutputDeviceIds(
+          (stringList(from: arguments["ids"]) ?? []).filter { !$0.hasPrefix("applemidi:") }
+        )
         result(true)
 
       case "setPitchRecognitionSensitivity":
@@ -507,24 +530,41 @@ final class XenSynthPlatformBridge: NSObject, FlutterStreamHandler, UIDocumentPi
       previewPrograms = Array(repeating: program.clamped(to: 0...127), count: 16)
     }
     setMidiInputEnabled((settings["midiInputEnabled"] as? Bool) ?? true)
-    midiController.setInputSourceIds(
-      stringList(from: settings["midiInputDeviceIds"]) ?? [],
-      configured: (settings["midiInputDeviceSelectionConfigured"] as? Bool) ??
-        (settings["midiInputDeviceIds"] != nil)
-    )
-    midiOutput.setOutputEnabled((settings["midiOutputEnabled"] as? Bool) ?? true)
-    midiOutput.configureNetwork(
-      enabled: (settings["networkMidiEnabled"] as? Bool) ?? true
-    )
-    midiOutput.setBluetoothDestinationIds(
-      stringList(from: settings["bluetoothMidiOutputIds"]) ?? []
-    )
-    midiOutput.setNetworkDestinationIds(
-      stringList(from: settings["networkMidiDestinationIds"]) ?? []
+    setMidiInputDeviceIds(stringList(from: settings["midiInputDeviceIds"]) ?? [])
+    setMidiOutputEnabled((settings["midiOutputEnabled"] as? Bool) ?? true)
+    let networkEnabled = (settings["networkMidiEnabled"] as? Bool) ?? true
+    midiController.setNetworkInputEnabled(networkEnabled)
+    midiOutput.configureNetwork(enabled: networkEnabled)
+    let outputIds = stringList(from: settings["midiOutputDeviceIds"])
+      ?? stringList(from: settings["networkMidiDestinationIds"])
+      ?? stringList(from: settings["bluetoothMidiOutputIds"])
+      ?? []
+    setMidiOutputDeviceIds(outputIds)
+  }
+
+  private func setMidiInputDeviceIds(_ ids: [String]) {
+    let inputId = ids.first { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+    selectedMidiInputId = inputId
+    midiController.setInputSourceIds(inputId.map { [$0] } ?? [], configured: true)
+    midiOutput.setNetworkInputIds(
+      inputId?.hasPrefix("applemidi:") == true ? [inputId!] : []
     )
   }
 
+  private func setMidiOutputDeviceIds(_ ids: [String]) {
+    let outputId = ids.first { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+    selectedMidiOutputId = outputId
+    if let outputId, outputId.hasPrefix("applemidi:") {
+      midiOutput.setLocalDestinationIds([])
+      midiOutput.setNetworkDestinationIds([outputId])
+    } else {
+      midiOutput.setNetworkDestinationIds([])
+      midiOutput.setLocalDestinationIds(outputId.map { [$0] } ?? [])
+    }
+  }
+
   private func setMidiInputEnabled(_ enabled: Bool) {
+    midiInputEnabled = enabled
     midiController.setInputEnabled(enabled)
     guard enabled else { return }
     do {
@@ -541,6 +581,11 @@ final class XenSynthPlatformBridge: NSObject, FlutterStreamHandler, UIDocumentPi
         )
       }
     }
+  }
+
+  private func setMidiOutputEnabled(_ enabled: Bool) {
+    midiOutputEnabled = enabled
+    midiOutput.setOutputEnabled(enabled)
   }
 
   private func loadSettings(keys: [String]?) -> [String: Any] {
@@ -719,7 +764,7 @@ final class XenSynthPlatformBridge: NSObject, FlutterStreamHandler, UIDocumentPi
     "midiInputEnabled": true,
     "midiOutputEnabled": true,
     "midiInputDeviceIds": [String](),
-    "midiInputDeviceSelectionConfigured": false,
+    "midiInputDeviceSelectionConfigured": true,
     "midiOutputDeviceIds": [String](),
     "networkMidiEnabled": true,
     "networkMidiDestinationIds": [String](),

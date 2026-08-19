@@ -50,14 +50,19 @@ internal class NsdDirectory(
     }
     private val resolutionQueue = ArrayDeque<PendingResolution>()
     private val discoveryGenerations = HashMap<String, Long>()
+    /** One service can be announced once per active network interface. */
+    private val activeDiscoveryInstances = HashMap<String, MutableSet<Int>>()
     private var nextDiscoveryGeneration = 0L
     private var registeredName: String? = null
     private var registrationRequested = false
     private var registrationActive = false
     private var registrationRetryScheduled = false
     private var registrationRetryAttempt = 0
+    private var discoveryEnabled = false
     private var discoveryRequested = false
     private var discoveryActive = false
+    private var discoveryRetryScheduled = false
+    private var discoveryRetryAttempt = 0
     private var resolving = false
     private var closed = false
     private var multicastLock: WifiManager.MulticastLock? = null
@@ -101,7 +106,9 @@ internal class NsdDirectory(
     private val discoveryListener = object : NsdManager.DiscoveryListener {
         override fun onDiscoveryStarted(serviceType: String) {
             discoveryRequested = false
-            if (closed) {
+            discoveryRetryAttempt = 0
+            if (closed || !discoveryEnabled) {
+                discoveryActive = true
                 runCatching { nsdManager.stopServiceDiscovery(this) }
                 return
             }
@@ -109,8 +116,11 @@ internal class NsdDirectory(
         }
 
         override fun onServiceFound(serviceInfo: NsdServiceInfo) {
+            if (!discoveryEnabled) return
             if (!serviceInfo.serviceType.isAppleMidiServiceType()) return
             val identity = serviceIdentity(serviceInfo.serviceName, serviceInfo.serviceType)
+            activeDiscoveryInstances.getOrPut(identity) { LinkedHashSet() }
+                .add(System.identityHashCode(serviceInfo))
             val generation = ++nextDiscoveryGeneration
             discoveryGenerations[identity] = generation
             resolutionQueue.removeAll { it.identity == identity }
@@ -119,7 +129,17 @@ internal class NsdDirectory(
         }
 
         override fun onServiceLost(serviceInfo: NsdServiceInfo) {
+            if (!discoveryEnabled) return
             val identity = serviceIdentity(serviceInfo.serviceName, serviceInfo.serviceType)
+            val instances = activeDiscoveryInstances[identity]
+            if (instances != null) {
+                val removed = instances.remove(System.identityHashCode(serviceInfo))
+                // A few Android releases recreate NsdServiceInfo for the lost callback. Treat an
+                // unmatched callback as one lost interface rather than keeping a stale record.
+                if (!removed && instances.isNotEmpty()) instances.remove(instances.first())
+                if (instances.isNotEmpty()) return
+                activeDiscoveryInstances.remove(identity)
+            }
             discoveryGenerations.remove(identity)
             resolutionQueue.removeAll { it.identity == identity }
             onLost(identity)
@@ -128,6 +148,7 @@ internal class NsdDirectory(
         override fun onDiscoveryStopped(serviceType: String) {
             discoveryRequested = false
             discoveryActive = false
+            requestDiscovery()
         }
 
         override fun onStartDiscoveryFailed(serviceType: String, errorCode: Int) {
@@ -135,34 +156,79 @@ internal class NsdDirectory(
             discoveryActive = false
             Log.w(TAG, "Could not browse AppleMIDI services: NSD error $errorCode")
             runCatching { nsdManager.stopServiceDiscovery(this) }
+            scheduleDiscoveryRetry()
         }
 
         override fun onStopDiscoveryFailed(serviceType: String, errorCode: Int) {
+            discoveryRequested = false
             discoveryActive = false
             Log.w(TAG, "Could not stop AppleMIDI browsing: NSD error $errorCode")
+            requestDiscovery()
         }
     }
 
     @Suppress("DEPRECATION")
-    fun start() {
+    fun start(discover: Boolean = true) {
         mainHandler.post {
             if (closed) return@post
+            discoveryEnabled = discover
             acquireMulticastLock()
             requestRegistration()
-            if (!discoveryActive && !discoveryRequested) {
-                discoveryRequested = true
-                runCatching {
-                    nsdManager.discoverServices(
-                        SERVICE_TYPE,
-                        NsdManager.PROTOCOL_DNS_SD,
-                        discoveryListener,
-                    )
-                }.onFailure { error ->
-                    discoveryRequested = false
-                    Log.w(TAG, "Could not start AppleMIDI browsing", error)
-                }
+            requestDiscovery()
+        }
+    }
+
+    fun setDiscoveryEnabled(enabled: Boolean) {
+        mainHandler.post {
+            if (closed) return@post
+            discoveryEnabled = enabled
+            if (enabled) {
+                requestDiscovery()
+                return@post
+            }
+            resolutionQueue.clear()
+            discoveryGenerations.clear()
+            activeDiscoveryInstances.clear()
+            if (discoveryActive || discoveryRequested) {
+                runCatching { nsdManager.stopServiceDiscovery(discoveryListener) }
+            } else {
+                discoveryRequested = false
+                discoveryActive = false
             }
         }
+    }
+
+    @Suppress("DEPRECATION")
+    private fun requestDiscovery() {
+        if (closed || !discoveryEnabled || discoveryActive || discoveryRequested ||
+            discoveryRetryScheduled
+        ) return
+        discoveryRequested = true
+        runCatching {
+            nsdManager.discoverServices(
+                SERVICE_TYPE,
+                NsdManager.PROTOCOL_DNS_SD,
+                discoveryListener,
+            )
+        }.onFailure { error ->
+            discoveryRequested = false
+            Log.w(TAG, "Could not start AppleMIDI browsing", error)
+            scheduleDiscoveryRetry()
+        }
+    }
+
+    private fun scheduleDiscoveryRetry() {
+        if (closed || !discoveryEnabled || discoveryActive || discoveryRequested ||
+            discoveryRetryScheduled
+        ) return
+        val index = discoveryRetryAttempt.coerceAtMost(DISCOVERY_RETRY_DELAYS_MILLIS.lastIndex)
+        discoveryRetryAttempt = (discoveryRetryAttempt + 1)
+            .coerceAtMost(DISCOVERY_RETRY_DELAYS_MILLIS.lastIndex)
+        discoveryRetryScheduled = true
+        mainHandler.postDelayed({
+            discoveryRetryScheduled = false
+            requestDiscovery()
+        }, DISCOVERY_RETRY_DELAYS_MILLIS[index])
     }
 
     /** Registration can race Wi-Fi address assignment during process boot. */
@@ -214,7 +280,7 @@ internal class NsdDirectory(
 
     @Suppress("DEPRECATION")
     private fun resolveNext() {
-        if (closed || resolving) return
+        if (closed || !discoveryEnabled || resolving) return
         val pending = resolutionQueue.pollFirst() ?: return
         val service = pending.serviceInfo
         resolving = true
@@ -239,7 +305,7 @@ internal class NsdDirectory(
                             val isOwnParticipant = host != null &&
                                 port in 1 until 65_535 &&
                                 isThisParticipant(serviceInfo.serviceName, host, port, localName)
-                            if (!closed && resolutionIsCurrent && host != null &&
+                            if (!closed && discoveryEnabled && resolutionIsCurrent && host != null &&
                                 port in 1 until 65_535 && !isOwnParticipant
                             ) {
                                 onResolved(
@@ -254,7 +320,9 @@ internal class NsdDirectory(
                                         }.getOrNull(),
                                     ),
                                 )
-                            } else if (!closed && resolutionIsCurrent && !isOwnParticipant) {
+                            } else if (!closed && discoveryEnabled &&
+                                resolutionIsCurrent && !isOwnParticipant
+                            ) {
                                 Log.d(
                                     TAG,
                                     "Ignoring ${serviceInfo.serviceName}: unresolved LAN address",
@@ -276,11 +344,15 @@ internal class NsdDirectory(
     }
 
     private fun retryResolution(pending: PendingResolution) {
-        if (closed || discoveryGenerations[pending.identity] != pending.generation) return
+        if (closed || !discoveryEnabled ||
+            discoveryGenerations[pending.identity] != pending.generation
+        ) return
         val attempt = pending.attempt + 1
         val delayIndex = attempt.coerceAtMost(RESOLUTION_RETRY_DELAYS_MILLIS.lastIndex)
         mainHandler.postDelayed({
-            if (closed || discoveryGenerations[pending.identity] != pending.generation) return@postDelayed
+            if (closed || !discoveryEnabled ||
+                discoveryGenerations[pending.identity] != pending.generation
+            ) return@postDelayed
             resolutionQueue.removeAll { it.identity == pending.identity }
             resolutionQueue.addLast(pending.copy(attempt = attempt))
             resolveNext()
@@ -307,6 +379,14 @@ internal class NsdDirectory(
             serviceInfo.host?.let(::add)
         }.toList()
         val hostname = if (Build.VERSION.SDK_INT >= 34) serviceInfo.hostname else null
+
+        // A resolved IPv4 address is already enough to browse and connect. Do not make a scan
+        // wait for reverse DNS or a second `.local` lookup when NSD has supplied a usable address.
+        // Those lookups are only useful when the platform returned a hostname without an address.
+        if (selectAppleMidiAddress(advertised, addressPolicy) != null) {
+            mainHandler.post { callback(advertised) }
+            return
+        }
         runCatching {
             addressResolver.execute {
                 val expanded = LinkedHashSet<InetAddress>()
@@ -399,9 +479,13 @@ internal class NsdDirectory(
         mainHandler.post {
             if (closed) return@post
             closed = true
+            discoveryEnabled = false
             resolutionQueue.clear()
             discoveryGenerations.clear()
-            if (discoveryActive) runCatching { nsdManager.stopServiceDiscovery(discoveryListener) }
+            activeDiscoveryInstances.clear()
+            if (discoveryActive || discoveryRequested) {
+                runCatching { nsdManager.stopServiceDiscovery(discoveryListener) }
+            }
             if (registrationActive) runCatching { nsdManager.unregisterService(registrationListener) }
             mainHandler.removeCallbacksAndMessages(null)
             discoveryActive = false
@@ -417,6 +501,7 @@ internal class NsdDirectory(
         private const val TAG = "AppleMidiNsd"
         private val REGISTRATION_RETRY_DELAYS_MILLIS = longArrayOf(250, 1_000, 3_000, 10_000)
         private val RESOLUTION_RETRY_DELAYS_MILLIS = longArrayOf(250, 1_000, 3_000, 10_000)
+        private val DISCOVERY_RETRY_DELAYS_MILLIS = longArrayOf(250, 1_000, 3_000, 10_000)
 
         fun serviceIdentity(name: String, type: String): String {
             val canonical = "$name\u0000${type.trimEnd('.').lowercase()}"

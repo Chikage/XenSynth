@@ -103,7 +103,7 @@ void main() {
   });
 
   testWidgets(
-    'MIDI panel exposes input output network and Bluetooth controls',
+    'MIDI panel exposes per-device input output and network controls',
     (tester) async {
       await tester.binding.setSurfaceSize(const Size(874, 402));
       addTearDown(() => tester.binding.setSurfaceSize(null));
@@ -138,24 +138,33 @@ void main() {
             widget is Scrollable && widget.axisDirection == AxisDirection.down,
       );
       await tester.scrollUntilVisible(
-        find.text('MIDI input'),
+        find.text('MIDI'),
         100,
         scrollable: scrollable,
       );
       expect(find.text('MIDI'), findsOneWidget);
-      expect(find.text('MIDI input'), findsOneWidget);
-      await tester.scrollUntilVisible(
-        find.text('MIDI output'),
-        100,
-        scrollable: scrollable,
-      );
-      expect(find.text('MIDI output'), findsOneWidget);
       await tester.scrollUntilVisible(
         find.text('RTP-MIDI / AppleMIDI'),
         100,
         scrollable: scrollable,
       );
       expect(find.text('RTP-MIDI / AppleMIDI'), findsOneWidget);
+      expect(find.text('MIDI input', skipOffstage: false), findsNothing);
+      expect(find.text('MIDI output', skipOffstage: false), findsNothing);
+      expect(
+        find.byKey(
+          const ValueKey('midi-input-enabled-switch'),
+          skipOffstage: false,
+        ),
+        findsNothing,
+      );
+      expect(
+        find.byKey(
+          const ValueKey('midi-output-enabled-switch'),
+          skipOffstage: false,
+        ),
+        findsNothing,
+      );
       expect(
         find.byKey(const ValueKey('network-midi-host-input')),
         findsNothing,
@@ -171,13 +180,102 @@ void main() {
       );
       expect(find.text('Controller'), findsOneWidget);
 
-      await tester.tap(find.byType(Checkbox));
+      final outputSwitch = find.byKey(
+        const ValueKey('midi-output-toggle-android-midi:9'),
+      );
+      expect(outputSwitch, findsOneWidget);
+      expect(tester.widget<Switch>(outputSwitch).onChanged, isNotNull);
+      await tester.tap(outputSwitch);
       await tester.pump();
+      expect(settings.midiOutputEnabled, isTrue);
       expect(settings.bluetoothMidiOutputIds, ['bluetooth:9:0']);
     },
   );
 
-  testWidgets('MIDI settings omit standalone input and output headings', (
+  testWidgets('disabled RTP-MIDI hides LAN devices and skips LAN refresh', (
+    tester,
+  ) async {
+    await tester.binding.setSurfaceSize(const Size(874, 700));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+
+    var localRefreshes = 0;
+    var networkRefreshes = 0;
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: AppPalette.theme(),
+        home: Scaffold(
+          body: Align(
+            alignment: Alignment.topRight,
+            child: SizedBox(
+              height: 650,
+              child: SettingsPanel(
+                settings: const XenSynthSettings(networkMidiEnabled: false),
+                midiInputDevices: const <NativeMidiOutput>[
+                  NativeMidiOutput(
+                    id: 'android-midi-input:7:0',
+                    name: 'USB Keyboard',
+                    transport: 'usb',
+                    isInput: true,
+                  ),
+                  NativeMidiOutput(
+                    id: 'applemidi:lan-input',
+                    name: 'Stale LAN Keyboard',
+                    transport: 'network',
+                    isInput: true,
+                  ),
+                ],
+                bluetoothMidiOutputs: const <NativeMidiOutput>[
+                  NativeMidiOutput(
+                    id: 'bluetooth:9:0',
+                    name: 'Bluetooth Synth',
+                    transport: 'bluetooth',
+                  ),
+                ],
+                networkMidiOutputs: const <NativeMidiOutput>[
+                  NativeMidiOutput(
+                    id: 'applemidi:lan-output',
+                    name: 'Stale LAN Synth',
+                    transport: 'network',
+                  ),
+                ],
+                onRefreshBluetoothMidiOutputs: () => localRefreshes++,
+                onRefreshNetworkMidiOutputs: () => networkRefreshes++,
+                onChanged: (_) {},
+                onReset: () {},
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+
+    final scrollable = find.byWidgetPredicate(
+      (widget) =>
+          widget is Scrollable && widget.axisDirection == AxisDirection.down,
+    );
+    await tester.scrollUntilVisible(
+      find.textContaining('USB Keyboard'),
+      100,
+      scrollable: scrollable,
+    );
+
+    expect(find.textContaining('USB Keyboard'), findsOneWidget);
+    expect(find.textContaining('Bluetooth Synth'), findsOneWidget);
+    expect(
+      find.textContaining('Stale LAN Keyboard', skipOffstage: false),
+      findsNothing,
+    );
+    expect(
+      find.textContaining('Stale LAN Synth', skipOffstage: false),
+      findsNothing,
+    );
+
+    await tester.tap(find.byKey(const ValueKey('scan-network-midi-outputs')));
+    expect(localRefreshes, 1);
+    expect(networkRefreshes, 0);
+  });
+
+  testWidgets('MIDI settings omit standalone input and output switches', (
     tester,
   ) async {
     await tester.binding.setSurfaceSize(const Size(874, 900));
@@ -204,23 +302,119 @@ void main() {
 
     final midiHeading = find.text('MIDI');
     final networkMidiToggle = find.text('RTP-MIDI / AppleMIDI');
-    final midiInputToggle = find.text('MIDI input');
+    final deviceHeader = find.text('AVAILABLE MIDI DEVICES');
 
     expect(find.text('MIDI INPUT'), findsNothing);
     expect(find.text('MIDI OUTPUT'), findsNothing);
-    expect(midiInputToggle, findsOneWidget);
-    expect(find.text('MIDI output'), findsOneWidget);
+    expect(find.text('MIDI input'), findsNothing);
+    expect(find.text('MIDI output'), findsNothing);
+    expect(
+      find.byKey(const ValueKey('midi-input-enabled-switch')),
+      findsNothing,
+    );
+    expect(
+      find.byKey(const ValueKey('midi-output-enabled-switch')),
+      findsNothing,
+    );
     expect(
       tester.getTopLeft(networkMidiToggle).dy,
       greaterThan(tester.getTopLeft(midiHeading).dy),
     );
     expect(
       tester.getTopLeft(networkMidiToggle).dy,
-      lessThan(tester.getTopLeft(midiInputToggle).dy),
+      lessThan(tester.getTopLeft(deviceHeader).dy),
     );
   });
 
-  testWidgets('MIDI input and output devices use separate selectable lists', (
+  testWidgets(
+    'local MIDI directions remain separate while LAN devices use one link',
+    (tester) async {
+      await tester.binding.setSurfaceSize(const Size(874, 500));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+
+      var settings = const XenSynthSettings(
+        midiInputEnabled: false,
+        midiOutputEnabled: false,
+      );
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: AppPalette.theme(),
+          home: Scaffold(
+            body: Align(
+              alignment: Alignment.topRight,
+              child: SizedBox(
+                height: 430,
+                child: StatefulBuilder(
+                  builder: (context, setState) => SettingsPanel(
+                    settings: settings,
+                    midiInputDevices: const [
+                      NativeMidiOutput(
+                        id: 'coremidi:12',
+                        name: 'USB Keyboard',
+                        transport: 'usb',
+                        isInput: true,
+                      ),
+                    ],
+                    midiOutputDevices: const [
+                      NativeMidiOutput(
+                        id: 'applemidi:peer',
+                        name: 'Studio iPad',
+                        hostAddress: '192.168.1.12',
+                        port: 5004,
+                        transport: 'network',
+                      ),
+                    ],
+                    onChanged: (value) => setState(() => settings = value),
+                    onReset: () {},
+                  ),
+                ),
+              ),
+            ),
+          ),
+        ),
+      );
+
+      final scrollable = find
+          .byWidgetPredicate(
+            (widget) =>
+                widget is Scrollable &&
+                widget.axisDirection == AxisDirection.down,
+          )
+          .first;
+      await tester.scrollUntilVisible(
+        find.textContaining('USB Keyboard'),
+        100,
+        scrollable: scrollable,
+      );
+      expect(find.textContaining('USB Keyboard'), findsOneWidget);
+      expect(find.textContaining('Studio iPad'), findsOneWidget);
+
+      final inputSwitch = find.byKey(
+        const ValueKey('midi-input-toggle-coremidi:12'),
+      );
+      await tester.ensureVisible(inputSwitch);
+      await tester.pump();
+      await tester.tap(inputSwitch);
+      await tester.pump();
+      expect(settings.midiInputEnabled, isTrue);
+      expect(settings.midiInputDeviceSelectionConfigured, isTrue);
+      expect(settings.midiInputDeviceIds, ['coremidi:12']);
+
+      final connectionSwitch = find.byKey(
+        const ValueKey('midi-connection-toggle-applemidi:peer'),
+      );
+      await tester.ensureVisible(connectionSwitch);
+      await tester.pump();
+      await tester.tap(connectionSwitch);
+      await tester.pump();
+      expect(settings.midiOutputEnabled, isTrue);
+      expect(settings.midiInputDeviceIds, ['applemidi:peer']);
+      expect(settings.midiOutputDeviceIds, ['applemidi:peer']);
+      expect(settings.networkMidiDestinationIds, ['applemidi:peer']);
+    },
+  );
+
+  testWidgets('local software MIDI receivers appear as destinations', (
     tester,
   ) async {
     await tester.binding.setSurfaceSize(const Size(874, 500));
@@ -238,21 +432,11 @@ void main() {
               child: StatefulBuilder(
                 builder: (context, setState) => SettingsPanel(
                   settings: settings,
-                  midiInputDevices: const [
-                    NativeMidiOutput(
-                      id: 'coremidi:12',
-                      name: 'USB Keyboard',
-                      transport: 'usb',
-                      isInput: true,
-                    ),
-                  ],
                   midiOutputDevices: const [
                     NativeMidiOutput(
-                      id: 'applemidi:peer',
-                      name: 'Studio iPad',
-                      hostAddress: '192.168.1.12',
-                      port: 5004,
-                      transport: 'network',
+                      id: 'android-midi-output:41:0',
+                      name: 'Local Synth Host',
+                      transport: 'software',
                     ),
                   ],
                   onChanged: (value) => setState(() => settings = value),
@@ -265,51 +449,35 @@ void main() {
       ),
     );
 
-    final scrollable = find
-        .byWidgetPredicate(
-          (widget) =>
-              widget is Scrollable &&
-              widget.axisDirection == AxisDirection.down,
-        )
-        .first;
+    final scrollable = find.byWidgetPredicate(
+      (widget) =>
+          widget is Scrollable && widget.axisDirection == AxisDirection.down,
+    );
     await tester.scrollUntilVisible(
-      find.text('MIDI input'),
+      find.text('Local Synth Host [Software]'),
       100,
       scrollable: scrollable,
     );
-    expect(find.text('MIDI input'), findsOneWidget);
-    await tester.scrollUntilVisible(
-      find.textContaining('USB Keyboard'),
-      100,
-      scrollable: scrollable,
+    expect(
+      find.text('AVAILABLE MIDI DEVICES', skipOffstage: false),
+      findsOneWidget,
     );
 
-    await tester.tap(find.byType(Checkbox).first);
+    final outputSwitch = find.byKey(
+      const ValueKey('midi-output-toggle-android-midi:41'),
+    );
+    await tester.ensureVisible(outputSwitch);
     await tester.pump();
-    expect(settings.midiInputDeviceSelectionConfigured, isTrue);
-    expect(settings.midiInputDeviceIds, isEmpty);
+    await tester.tap(outputSwitch);
+    await tester.pump();
 
-    await tester.scrollUntilVisible(
-      find.text('MIDI output'),
-      100,
-      scrollable: scrollable,
-    );
-    expect(find.text('MIDI output'), findsOneWidget);
-    await tester.scrollUntilVisible(
-      find.textContaining('Studio iPad'),
-      100,
-      scrollable: scrollable,
-    );
-    await tester.tap(find.byType(Checkbox).last);
-    await tester.pump();
-    expect(settings.midiOutputDeviceIds, ['applemidi:peer']);
-    expect(settings.networkMidiDestinationIds, ['applemidi:peer']);
+    expect(settings.midiOutputDeviceIds, ['android-midi-output:41:0']);
   });
 
-  testWidgets('network scan results are selectable destinations', (
+  testWidgets('network scan results use one duplex connection control', (
     tester,
   ) async {
-    await tester.binding.setSurfaceSize(const Size(874, 402));
+    await tester.binding.setSurfaceSize(const Size(874, 500));
     addTearDown(() => tester.binding.setSurfaceSize(null));
 
     var settings = const XenSynthSettings();
@@ -321,7 +489,7 @@ void main() {
           body: Align(
             alignment: Alignment.topRight,
             child: SizedBox(
-              height: 330,
+              height: 430,
               child: StatefulBuilder(
                 builder: (context, setState) => SettingsPanel(
                   settings: settings,
@@ -359,9 +527,223 @@ void main() {
     expect(find.text('XenSynth iPhone'), findsOneWidget);
     await tester.tap(find.byKey(const ValueKey('scan-network-midi-outputs')));
     expect(scans, 1);
-    await tester.tap(find.byType(Checkbox).first);
+    await tester.scrollUntilVisible(
+      find.text('XenSynth iPhone'),
+      100,
+      scrollable: scrollable,
+    );
+    final connectionSwitch = find.byKey(
+      const ValueKey('midi-connection-toggle-applemidi:WGVuU3ludGg'),
+    );
+    await tester.ensureVisible(connectionSwitch);
     await tester.pump();
+    await tester.tap(connectionSwitch);
+    await tester.pump();
+    expect(settings.midiInputDeviceIds, ['applemidi:WGVuU3ludGg']);
     expect(settings.networkMidiDestinationIds, ['applemidi:WGVuU3ludGg']);
+  });
+
+  testWidgets('one RTP-MIDI peer can be enabled for input and output', (
+    tester,
+  ) async {
+    await tester.binding.setSurfaceSize(const Size(874, 500));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+
+    const peerId = 'applemidi:peer';
+    const inputTargetId = 'network:192.168.1.12:5004';
+    const outputTargetId = 'network:192.168.1.12:5005';
+    var settings = const XenSynthSettings(
+      midiInputDeviceIds: [peerId],
+      midiInputDeviceSelectionConfigured: true,
+    );
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: AppPalette.theme(),
+        home: Scaffold(
+          body: Align(
+            alignment: Alignment.topRight,
+            child: SizedBox(
+              height: 430,
+              child: StatefulBuilder(
+                builder: (context, setState) => SettingsPanel(
+                  settings: settings,
+                  midiInputDevices: const [
+                    NativeMidiOutput(
+                      id: peerId,
+                      name: 'Input iPad',
+                      targetId: inputTargetId,
+                      transport: 'network',
+                      isInput: true,
+                    ),
+                  ],
+                  midiOutputDevices: const [
+                    NativeMidiOutput(
+                      id: peerId,
+                      name: 'Output iPad',
+                      targetId: outputTargetId,
+                      transport: 'network',
+                    ),
+                  ],
+                  onChanged: (value) => setState(() => settings = value),
+                  onReset: () {},
+                ),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+
+    final scrollable = find.byWidgetPredicate(
+      (widget) =>
+          widget is Scrollable && widget.axisDirection == AxisDirection.down,
+    );
+    await tester.scrollUntilVisible(
+      find.textContaining('Output iPad'),
+      100,
+      scrollable: scrollable,
+    );
+    expect(find.textContaining('Output iPad'), findsOneWidget);
+    expect(find.textContaining('Input iPad'), findsNothing);
+    final connectionSwitch = find.byKey(
+      const ValueKey('midi-connection-toggle-192.168.1.12'),
+    );
+    expect(tester.widget<Switch>(connectionSwitch).onChanged, isNotNull);
+    expect(
+      find.byKey(const ValueKey('midi-input-toggle-192.168.1.12')),
+      findsNothing,
+    );
+    expect(
+      find.byKey(const ValueKey('midi-output-toggle-192.168.1.12')),
+      findsNothing,
+    );
+    await tester.ensureVisible(connectionSwitch);
+    await tester.pump();
+    await tester.tap(connectionSwitch);
+    await tester.pump();
+    expect(settings.midiInputDeviceIds, [peerId]);
+    expect(settings.midiOutputDeviceIds, [peerId]);
+    expect(tester.widget<Switch>(connectionSwitch).value, isTrue);
+  });
+
+  testWidgets('RTP-MIDI peers on different addresses remain separate rows', (
+    tester,
+  ) async {
+    await tester.binding.setSurfaceSize(const Size(874, 500));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: AppPalette.theme(),
+        home: Scaffold(
+          body: Align(
+            alignment: Alignment.topRight,
+            child: SizedBox(
+              height: 430,
+              child: SettingsPanel(
+                settings: const XenSynthSettings(),
+                networkMidiOutputs: const [
+                  NativeMidiOutput(
+                    id: 'applemidi:first',
+                    name: 'Studio iPad',
+                    targetId: 'network:192.168.1.12',
+                    transport: 'network',
+                  ),
+                  NativeMidiOutput(
+                    id: 'applemidi:second',
+                    name: 'Stage iPhone',
+                    targetId: 'network:192.168.1.13',
+                    transport: 'network',
+                  ),
+                ],
+                onChanged: (_) {},
+                onReset: () {},
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+
+    final scrollable = find.byWidgetPredicate(
+      (widget) =>
+          widget is Scrollable && widget.axisDirection == AxisDirection.down,
+    );
+    await tester.scrollUntilVisible(
+      find.textContaining('Studio iPad'),
+      100,
+      scrollable: scrollable,
+    );
+
+    expect(find.textContaining('Studio iPad'), findsOneWidget);
+    expect(find.textContaining('Stage iPhone'), findsOneWidget);
+    expect(
+      find.byKey(const ValueKey('midi-connection-toggle-192.168.1.12')),
+      findsOneWidget,
+    );
+    expect(
+      find.byKey(const ValueKey('midi-connection-toggle-192.168.1.13')),
+      findsOneWidget,
+    );
+  });
+
+  testWidgets('unsupported MIDI directions have disabled switches', (
+    tester,
+  ) async {
+    await tester.binding.setSurfaceSize(const Size(874, 700));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: AppPalette.theme(),
+        home: Scaffold(
+          body: Align(
+            alignment: Alignment.topRight,
+            child: SizedBox(
+              height: 650,
+              child: SettingsPanel(
+                settings: const XenSynthSettings(),
+                midiInputDevices: const [
+                  NativeMidiOutput(
+                    id: 'input-only',
+                    name: 'Input only keyboard',
+                    targetId: 'coremidi-device:7',
+                    isInput: true,
+                  ),
+                ],
+                midiOutputDevices: const [
+                  NativeMidiOutput(
+                    id: 'output-only',
+                    name: 'Output only synth',
+                    targetId: 'coremidi-device:9',
+                  ),
+                ],
+                onChanged: (_) {},
+                onReset: () {},
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+
+    final inputOnlyInput = find.byKey(
+      const ValueKey('midi-input-toggle-coremidi-device:7'),
+    );
+    final inputOnlyOutput = find.byKey(
+      const ValueKey('midi-output-toggle-coremidi-device:7'),
+    );
+    final outputOnlyInput = find.byKey(
+      const ValueKey('midi-input-toggle-coremidi-device:9'),
+    );
+    final outputOnlyOutput = find.byKey(
+      const ValueKey('midi-output-toggle-coremidi-device:9'),
+    );
+
+    expect(tester.widget<Switch>(inputOnlyInput).onChanged, isNotNull);
+    expect(tester.widget<Switch>(inputOnlyOutput).onChanged, isNull);
+    expect(tester.widget<Switch>(outputOnlyInput).onChanged, isNull);
+    expect(tester.widget<Switch>(outputOnlyOutput).onChanged, isNotNull);
   });
 
   testWidgets('settings controls keep clear vertical separation', (
@@ -421,7 +803,7 @@ void main() {
           body: Align(
             alignment: Alignment.topRight,
             child: SizedBox(
-              height: 330,
+              height: 390,
               child: StatefulBuilder(
                 builder: (context, setState) => SettingsPanel(
                   settings: settings,

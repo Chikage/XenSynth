@@ -98,7 +98,38 @@ class AppleMidiManagerTest {
     }
 
     @Test
-    fun invitationResponseCanMoveToAnotherAddressOnTheSameRemotePort() {
+    fun incomingInvitationCreatesAnImplicitDuplexPeer() {
+        assertTrue(
+            appleMidiSessionInputAllowed(
+                inputSelectionConfigured = true,
+                initiatedLocally = false,
+                selectedForInput = false,
+            ),
+        )
+        assertTrue(
+            appleMidiSessionOutputAllowed(
+                initiatedLocally = false,
+                selectedForOutput = false,
+            ),
+        )
+
+        assertFalse(
+            appleMidiSessionInputAllowed(
+                inputSelectionConfigured = true,
+                initiatedLocally = true,
+                selectedForInput = false,
+            ),
+        )
+        assertFalse(
+            appleMidiSessionOutputAllowed(
+                initiatedLocally = true,
+                selectedForOutput = false,
+            ),
+        )
+    }
+
+   @Test
+   fun invitationResponseCanMoveToAnotherAddressOnTheSameRemotePort() {
         val advertisedAddress = InetAddress.getByName("10.36.64.211")
         val responseAddress = InetAddress.getByName("10.36.64.107")
         val session = outgoingSession(advertisedAddress, initiatorToken = 0x1234)
@@ -205,6 +236,39 @@ class AppleMidiManagerTest {
     }
 
     @Test
+    fun acceptedDataInvitationMakesMediaUsableBeforeClockSynchronization() {
+        val address = InetAddress.getByName("10.36.64.211")
+        val session = outgoingSession(address, initiatorToken = 0x1234)
+        session.applyInvitationResponse(
+            packet = AppleMidiControlPacket.Invitation(
+                command = AppleMidiInvitationCommand.OK,
+                initiatorToken = 0x1234,
+                ssrc = 7,
+                name = "CoreMIDI peer",
+            ),
+            remote = InetSocketAddress(address, 5_004),
+            dataChannel = false,
+            nowNanos = 10,
+        )
+
+        session.applyInvitationResponse(
+            packet = AppleMidiControlPacket.Invitation(
+                command = AppleMidiInvitationCommand.OK,
+                initiatorToken = 0x1234,
+                ssrc = 7,
+                name = "CoreMIDI peer",
+            ),
+            remote = InetSocketAddress(address, 5_005),
+            dataChannel = true,
+            nowNanos = 20,
+        )
+
+        assertTrue(session.dataAccepted)
+        assertEquals(AppleMidiSessionState.CONNECTED, session.state)
+        assertFalse(session.sessionClock.isSynchronized)
+    }
+
+    @Test
     fun invitationResponseFallbackRejectsAmbiguousTokenAndPort() {
         val sessions = listOf(
             outgoingSession(InetAddress.getByName("10.36.64.211"), initiatorToken = 0x1234),
@@ -267,6 +331,38 @@ class AppleMidiManagerTest {
                 listOf(oldSession, newSession),
                 InetSocketAddress(address, 5_005),
                 remoteSsrc = 11,
+            ),
+        )
+    }
+
+    @Test
+    fun rtpSessionFallbackAcceptsOneConnectedHostAndSsrcAcrossDataPortChange() {
+        val address = InetAddress.getByName("10.36.64.211")
+        val session = connectedSession("coremidi", address, remoteSsrc = 22, lastActivityNanos = 200)
+        val resumedDataPort = InetSocketAddress(address, 51_234)
+
+        assertNull(selectRtpMidiSession(listOf(session), resumedDataPort, remoteSsrc = 22))
+        assertSame(
+            session,
+            selectRtpMidiSessionByHostAndSsrc(
+                sessions = listOf(session),
+                remote = resumedDataPort,
+                remoteSsrc = 22,
+            ),
+        )
+    }
+
+    @Test
+    fun rtpSessionFallbackRejectsAmbiguousSameHostAndSsrc() {
+        val address = InetAddress.getByName("10.36.64.211")
+        val oldSession = connectedSession("old", address, remoteSsrc = 22, lastActivityNanos = 100)
+        val newSession = connectedSession("new", address, remoteSsrc = 22, lastActivityNanos = 200)
+
+        assertNull(
+            selectRtpMidiSessionByHostAndSsrc(
+                sessions = listOf(oldSession, newSession),
+                remote = InetSocketAddress(address, 51_234),
+                remoteSsrc = 22,
             ),
         )
     }

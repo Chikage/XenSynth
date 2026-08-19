@@ -54,17 +54,73 @@ class SettingsPanel extends StatelessWidget {
   Widget build(BuildContext context) {
     final hexStepMaximum = settings.hexStepMaximum;
     final touchSensitivityPercent = settings.touchSensitivityPercent;
+    final effectiveMidiInputs = midiInputDevices
+        .where((device) => settings.networkMidiEnabled || !device.isNetwork)
+        .toList(growable: false);
     final effectiveMidiOutputs = _mergeMidiDevices(
-      midiOutputDevices.isNotEmpty
-          ? midiOutputDevices
-          : <NativeMidiOutput>[...bluetoothMidiOutputs, ...networkMidiOutputs],
+      <NativeMidiOutput>[
+        ...midiOutputDevices,
+        ...bluetoothMidiOutputs,
+        ...networkMidiOutputs,
+      ].where((device) => settings.networkMidiEnabled || !device.isNetwork),
+    );
+    final unifiedMidiDevices = _mergeUnifiedMidiDevices(
+      inputs: effectiveMidiInputs,
+      outputs: effectiveMidiOutputs,
     );
     final refreshMidiDevices =
         onRefreshMidiDevices ??
         () {
           onRefreshBluetoothMidiOutputs?.call();
-          onRefreshNetworkMidiOutputs?.call();
+          if (settings.networkMidiEnabled) {
+            onRefreshNetworkMidiOutputs?.call();
+          }
         };
+    void setMidiInputForDevice(_UnifiedMidiDevice device, bool enabled) {
+      final input = device.input;
+      if (input == null) return;
+      onChanged(
+        settings.copyWith(
+          midiInputEnabled: enabled,
+          midiInputDeviceIds: enabled ? <String>[input.id] : const <String>[],
+          midiInputDeviceSelectionConfigured: true,
+        ),
+      );
+    }
+
+    void setMidiOutputForDevice(_UnifiedMidiDevice device, bool enabled) {
+      final output = device.output;
+      if (output == null) return;
+      onChanged(
+        settings.copyWith(
+          midiOutputEnabled: enabled,
+          midiOutputDeviceIds: enabled ? <String>[output.id] : const <String>[],
+        ),
+      );
+    }
+
+    void setNetworkConnectionForDevice(
+      _UnifiedMidiDevice device,
+      bool connected,
+    ) {
+      final inputId = (device.input ?? device.output)?.id;
+      final outputId = (device.output ?? device.input)?.id;
+      if (inputId == null || outputId == null) return;
+      onChanged(
+        settings.copyWith(
+          // RTP-MIDI sessions are duplex. One connection owns both directions,
+          // while the native receiver accepts the corresponding peer invitation.
+          midiInputEnabled: true,
+          midiOutputEnabled: true,
+          midiInputDeviceIds: connected ? <String>[inputId] : const <String>[],
+          midiInputDeviceSelectionConfigured: true,
+          midiOutputDeviceIds: connected
+              ? <String>[outputId]
+              : const <String>[],
+        ),
+      );
+    }
+
     return Material(
       color: Colors.transparent,
       child: ToolSurface(
@@ -161,6 +217,7 @@ class SettingsPanel extends StatelessWidget {
                       onChanged: (value) =>
                           onChanged(settings.copyWith(audioLatencyMs: value)),
                     ),
+                    const _SectionLabel('MIDI'),
                     _SwitchRow(
                       label: 'MIDI controls program',
                       value: settings.externalMidiControlsProgram,
@@ -168,7 +225,6 @@ class SettingsPanel extends StatelessWidget {
                         settings.copyWith(externalMidiControlsProgram: value),
                       ),
                     ),
-                    const _SectionLabel('MIDI'),
                     _SwitchRow(
                       label: 'RTP-MIDI / AppleMIDI',
                       value: settings.networkMidiEnabled,
@@ -176,102 +232,58 @@ class SettingsPanel extends StatelessWidget {
                         settings.copyWith(networkMidiEnabled: value),
                       ),
                     ),
-                    _SwitchRow(
-                      label: 'MIDI input',
-                      value: settings.midiInputEnabled,
-                      onChanged: (value) =>
-                          onChanged(settings.copyWith(midiInputEnabled: value)),
-                    ),
                     _MidiDeviceHeader(
-                      label: 'USB / BLUETOOTH / LAN SOURCES',
-                      scanning: midiDeviceRefreshing,
+                      label: 'AVAILABLE MIDI DEVICES',
+                      scanning:
+                          midiDeviceRefreshing ||
+                          (settings.networkMidiEnabled && networkMidiScanning),
                       onRefresh: refreshMidiDevices,
-                      buttonKey: const ValueKey('refresh-midi-input-devices'),
-                      tooltip: 'Refresh MIDI input devices',
-                    ),
-                    if (midiInputDevices.isEmpty)
-                      const _MidiStatusRow('NO MIDI INPUT DEVICE')
-                    else
-                      ...midiInputDevices.map(
-                        (input) => _MidiOutputRow(
-                          label: input.displayName,
-                          selected:
-                              !settings.midiInputDeviceSelectionConfigured ||
-                              settings.midiInputDeviceIds.contains(input.id),
-                          onChanged: (selected) {
-                            final ids =
-                                settings.midiInputDeviceSelectionConfigured
-                                ? settings.midiInputDeviceIds.toSet()
-                                : midiInputDevices
-                                      .map((device) => device.id)
-                                      .toSet();
-                            if (selected) {
-                              ids.add(input.id);
-                            } else {
-                              ids.remove(input.id);
-                            }
-                            onChanged(
-                              settings.copyWith(
-                                midiInputDeviceIds: ids.toList()..sort(),
-                                midiInputDeviceSelectionConfigured: true,
-                              ),
-                            );
-                          },
-                        ),
-                      ),
-                    _SwitchRow(
-                      label: 'MIDI output',
-                      value: settings.midiOutputEnabled,
-                      onChanged: (value) => onChanged(
-                        settings.copyWith(midiOutputEnabled: value),
-                      ),
-                    ),
-                    _MidiDeviceHeader(
-                      label: 'USB / BLUETOOTH / LAN DESTINATIONS',
-                      scanning: networkMidiScanning || midiDeviceRefreshing,
-                      onRefresh: refreshMidiDevices,
+                      enabled: true,
                       buttonKey: const ValueKey('scan-network-midi-outputs'),
-                      tooltip: 'Refresh MIDI output devices',
+                      tooltip: 'Refresh MIDI devices',
                     ),
-                    if (effectiveMidiOutputs.isEmpty)
-                      const _MidiStatusRow('NO MIDI OUTPUT DEVICE')
+                    if (unifiedMidiDevices.isEmpty)
+                      const _MidiStatusRow('NO MIDI DEVICES AVAILABLE')
                     else
-                      ...effectiveMidiOutputs.map(
-                        (output) => _MidiOutputRow(
-                          label: output.displayName,
-                          selected: settings.midiOutputDeviceIds.contains(
-                            output.id,
-                          ),
-                          onChanged: (selected) {
-                            final ids = settings.midiOutputDeviceIds.toSet();
-                            final networkIds = settings
-                                .networkMidiDestinationIds
-                                .toSet();
-                            final localIds = settings.bluetoothMidiOutputIds
-                                .toSet();
-                            if (selected) {
-                              ids.add(output.id);
-                              if (output.isNetwork) {
-                                networkIds.add(output.id);
-                              } else {
-                                localIds.add(output.id);
-                              }
-                            } else {
-                              ids.remove(output.id);
-                              networkIds.remove(output.id);
-                              localIds.remove(output.id);
-                            }
-                            onChanged(
-                              settings.copyWith(
-                                midiOutputDeviceIds: ids.toList()..sort(),
-                                networkMidiDestinationIds: networkIds.toList()
-                                  ..sort(),
-                                bluetoothMidiOutputIds: localIds.toList()
-                                  ..sort(),
+                      Column(
+                        children: unifiedMidiDevices
+                            .map(
+                              (device) => _UnifiedMidiDeviceRow(
+                                device: device,
+                                inputEnabled:
+                                    settings.midiInputEnabled &&
+                                    _isMidiDeviceSelected(
+                                      settings.midiInputDeviceIds,
+                                      device.input,
+                                    ),
+                                outputEnabled:
+                                    settings.midiOutputEnabled &&
+                                    _isMidiDeviceSelected(
+                                      settings.midiOutputDeviceIds,
+                                      device.output,
+                                    ),
+                                connectionEnabled:
+                                    settings.networkMidiEnabled &&
+                                    (_isUnifiedMidiDeviceSelected(
+                                          settings.midiInputDeviceIds,
+                                          device,
+                                        ) &&
+                                        _isUnifiedMidiDeviceSelected(
+                                          settings.midiOutputDeviceIds,
+                                          device,
+                                        )),
+                                onInputChanged: (enabled) =>
+                                    setMidiInputForDevice(device, enabled),
+                                onOutputChanged: (enabled) =>
+                                    setMidiOutputForDevice(device, enabled),
+                                onConnectionChanged: (connected) =>
+                                    setNetworkConnectionForDevice(
+                                      device,
+                                      connected,
+                                    ),
                               ),
-                            );
-                          },
-                        ),
+                            )
+                            .toList(growable: false),
                       ),
                     if (pitchRecognitionAvailable) ...[
                       const _SectionLabel('MIC INPUT'),
@@ -515,6 +527,7 @@ class _MidiDeviceHeader extends StatelessWidget {
     required this.label,
     required this.scanning,
     required this.onRefresh,
+    required this.enabled,
     required this.buttonKey,
     required this.tooltip,
   });
@@ -522,38 +535,128 @@ class _MidiDeviceHeader extends StatelessWidget {
   final String label;
   final bool scanning;
   final VoidCallback? onRefresh;
+  final bool enabled;
   final Key buttonKey;
   final String tooltip;
 
   @override
   Widget build(BuildContext context) {
+    return Opacity(
+      opacity: enabled ? 1 : 0.42,
+      child: _SpacedControl(
+        child: SizedBox(
+          height: 28,
+          child: Row(
+            children: [
+              Expanded(
+                child: Text(
+                  label,
+                  style: const TextStyle(
+                    color: AppPalette.secondaryText,
+                    fontSize: 9,
+                  ),
+                ),
+              ),
+              if (scanning)
+                const SizedBox.square(
+                  dimension: 15,
+                  child: CircularProgressIndicator(strokeWidth: 1.5),
+                )
+              else
+                _CompactIconButton(
+                  buttonKey: buttonKey,
+                  tooltip: tooltip,
+                  onPressed: enabled ? onRefresh : null,
+                  icon: Icons.refresh_rounded,
+                  dimension: 26,
+                ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _UnifiedMidiDeviceRow extends StatelessWidget {
+  const _UnifiedMidiDeviceRow({
+    required this.device,
+    required this.inputEnabled,
+    required this.outputEnabled,
+    required this.connectionEnabled,
+    required this.onInputChanged,
+    required this.onOutputChanged,
+    required this.onConnectionChanged,
+  });
+
+  final _UnifiedMidiDevice device;
+  final bool inputEnabled;
+  final bool outputEnabled;
+  final bool connectionEnabled;
+  final ValueChanged<bool> onInputChanged;
+  final ValueChanged<bool> onOutputChanged;
+  final ValueChanged<bool> onConnectionChanged;
+
+  @override
+  Widget build(BuildContext context) {
+    final hasInput = device.input != null;
+    final hasOutput = device.output != null;
+    final name = device.displayName;
     return _SpacedControl(
       child: SizedBox(
-        height: 28,
+        height: 48,
         child: Row(
           children: [
             Expanded(
-              child: Text(
-                label,
-                style: const TextStyle(
-                  color: AppPalette.secondaryText,
-                  fontSize: 9,
+              child: Semantics(
+                label: name,
+                child: Text(
+                  name,
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(
+                    color: AppPalette.primaryText,
+                    fontSize: 9,
+                    height: 1.15,
+                  ),
                 ),
               ),
             ),
-            if (scanning)
-              const SizedBox.square(
-                dimension: 15,
-                child: CircularProgressIndicator(strokeWidth: 1.5),
+            if (device.isNetwork)
+              _MidiDirectionSwitch(
+                label: 'LINK',
+                value: connectionEnabled,
+                enabled: hasInput || hasOutput,
+                tooltip: connectionEnabled
+                    ? 'Disconnect $name'
+                    : 'Connect to $name',
+                switchKey: ValueKey(
+                  'midi-connection-toggle-${device.identity}',
+                ),
+                onChanged: hasInput || hasOutput ? onConnectionChanged : null,
               )
-            else
-              _CompactIconButton(
-                buttonKey: buttonKey,
-                tooltip: tooltip,
-                onPressed: onRefresh,
-                icon: Icons.refresh_rounded,
-                dimension: 26,
+            else ...[
+              _MidiDirectionSwitch(
+                label: 'IN',
+                value: inputEnabled,
+                enabled: hasInput,
+                tooltip: hasInput
+                    ? 'Enable MIDI input from $name'
+                    : 'MIDI input unavailable',
+                switchKey: ValueKey('midi-input-toggle-${device.identity}'),
+                onChanged: hasInput ? onInputChanged : null,
               ),
+              _MidiDirectionSwitch(
+                label: 'OUT',
+                value: outputEnabled,
+                enabled: hasOutput,
+                tooltip: hasOutput
+                    ? 'Enable MIDI output to $name'
+                    : 'MIDI output unavailable',
+                switchKey: ValueKey('midi-output-toggle-${device.identity}'),
+                onChanged: hasOutput ? onOutputChanged : null,
+              ),
+            ],
           ],
         ),
       ),
@@ -561,41 +664,53 @@ class _MidiDeviceHeader extends StatelessWidget {
   }
 }
 
-class _MidiOutputRow extends StatelessWidget {
-  const _MidiOutputRow({
+class _MidiDirectionSwitch extends StatelessWidget {
+  const _MidiDirectionSwitch({
     required this.label,
-    required this.selected,
+    required this.value,
+    required this.enabled,
+    required this.tooltip,
+    required this.switchKey,
     required this.onChanged,
   });
 
   final String label;
-  final bool selected;
-  final ValueChanged<bool> onChanged;
+  final bool value;
+  final bool enabled;
+  final String tooltip;
+  final Key switchKey;
+  final ValueChanged<bool>? onChanged;
 
   @override
   Widget build(BuildContext context) {
-    return _SpacedControl(
-      child: SizedBox(
-        height: 30,
-        child: Row(
+    return SizedBox(
+      width: 42,
+      height: 44,
+      child: Tooltip(
+        message: tooltip,
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
           children: [
-            SizedBox(
-              width: 28,
-              height: 28,
-              child: Checkbox(
-                value: selected,
-                onChanged: (value) => onChanged(value ?? false),
-                visualDensity: VisualDensity.compact,
+            Text(
+              label,
+              style: TextStyle(
+                color: enabled
+                    ? AppPalette.secondaryText
+                    : AppPalette.secondaryText.withValues(alpha: 0.42),
+                fontSize: 7,
+                fontWeight: FontWeight.w700,
               ),
             ),
-            Expanded(
-              child: Text(
-                label,
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style: const TextStyle(
-                  color: AppPalette.primaryText,
-                  fontSize: 9,
+            SizedBox(
+              width: 34,
+              height: 22,
+              child: FittedBox(
+                fit: BoxFit.contain,
+                child: Switch.adaptive(
+                  key: switchKey,
+                  value: value,
+                  onChanged: onChanged,
+                  materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
                 ),
               ),
             ),
@@ -625,6 +740,21 @@ class _MidiStatusRow extends StatelessWidget {
   }
 }
 
+class _UnifiedMidiDevice {
+  const _UnifiedMidiDevice({required this.identity, this.input, this.output});
+
+  final String identity;
+  final NativeMidiOutput? input;
+  final NativeMidiOutput? output;
+
+  bool get isNetwork => input?.isNetwork == true || output?.isNetwork == true;
+
+  String get displayName {
+    final primary = output ?? input;
+    return primary?.displayName ?? 'MIDI device';
+  }
+}
+
 List<NativeMidiOutput> _mergeMidiDevices(Iterable<NativeMidiOutput> devices) {
   final byId = <String, NativeMidiOutput>{};
   for (final device in devices) {
@@ -637,6 +767,61 @@ List<NativeMidiOutput> _mergeMidiDevices(Iterable<NativeMidiOutput> devices) {
     ),
   );
   return result;
+}
+
+List<_UnifiedMidiDevice> _mergeUnifiedMidiDevices({
+  required Iterable<NativeMidiOutput> inputs,
+  required Iterable<NativeMidiOutput> outputs,
+}) {
+  final inputByTarget = <String, NativeMidiOutput>{};
+  final outputByTarget = <String, NativeMidiOutput>{};
+
+  String targetKey(NativeMidiOutput device) {
+    final target = device.selectionTargetId.trim();
+    return target.isEmpty ? 'id:${device.id}' : target;
+  }
+
+  for (final input in inputs) {
+    inputByTarget.putIfAbsent(targetKey(input), () => input);
+  }
+  for (final output in outputs) {
+    outputByTarget.putIfAbsent(targetKey(output), () => output);
+  }
+
+  final targets = <String>{...inputByTarget.keys, ...outputByTarget.keys};
+  final devices = targets
+      .map(
+        (identity) => _UnifiedMidiDevice(
+          identity: identity,
+          input: inputByTarget[identity],
+          output: outputByTarget[identity],
+        ),
+      )
+      .toList(growable: false);
+  return devices..sort(
+    (left, right) => left.displayName.toLowerCase().compareTo(
+      right.displayName.toLowerCase(),
+    ),
+  );
+}
+
+bool _isMidiDeviceSelected(
+  Iterable<String> selectedIds,
+  NativeMidiOutput? device,
+) {
+  if (device == null) return false;
+  return selectedIds.any((id) => id.trim() == device.id);
+}
+
+bool _isUnifiedMidiDeviceSelected(
+  Iterable<String> selectedIds,
+  _UnifiedMidiDevice device,
+) {
+  final deviceIds = <String>{
+    if (device.input != null) device.input!.id,
+    if (device.output != null) device.output!.id,
+  };
+  return selectedIds.any((id) => deviceIds.contains(id.trim()));
 }
 
 class _SliderRow extends StatelessWidget {

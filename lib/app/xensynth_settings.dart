@@ -1,6 +1,7 @@
 // ignore_for_file: prefer_initializing_formals
 
 import '../core/hex_keyboard.dart';
+import '../core/midi_device_selection.dart';
 
 enum KeyboardLayoutMode { linear, hexagonal, spatial }
 
@@ -26,7 +27,7 @@ class XenSynthSettings {
     this.midiInputEnabled = true,
     this.midiOutputEnabled = true,
     this.midiInputDeviceIds = const <String>[],
-    this.midiInputDeviceSelectionConfigured = false,
+    this.midiInputDeviceSelectionConfigured = true,
     this.midiOutputDeviceIds = const <String>[],
     this.networkMidiEnabled = true,
     this.networkMidiDestinationIds = const <String>[],
@@ -74,8 +75,8 @@ class XenSynthSettings {
   final bool midiInputEnabled;
   final bool midiOutputEnabled;
 
-  /// Stable native IDs selected for input. An empty list is treated as all
-  /// sources until the user explicitly changes a row in the device list.
+  /// Stable native IDs selected for input. An empty list intentionally keeps
+  /// every input disconnected until the user chooses one source.
   final List<String> midiInputDeviceIds;
   final bool midiInputDeviceSelectionConfigured;
 
@@ -170,6 +171,28 @@ class XenSynthSettings {
       'linear' => KeyboardLayoutMode.linear,
       _ => defaults.layoutMode,
     };
+    final inputIds = singleMidiDeviceId(_stringList(map['midiInputDeviceIds']));
+    final midiInputEnabled = _bool(
+      map['midiInputEnabled'],
+      defaults.midiInputEnabled,
+    );
+    final midiOutputEnabled = _bool(
+      map['midiOutputEnabled'],
+      defaults.midiOutputEnabled,
+    );
+    final rawOutputIds = _stringList(map['midiOutputDeviceIds']).isNotEmpty
+        ? _stringList(map['midiOutputDeviceIds'])
+        : _mergeStringLists(
+            _stringList(map['networkMidiDestinationIds']),
+            _stringList(map['bluetoothMidiOutputIds']),
+          );
+    final outputIds = singleMidiDeviceId(rawOutputIds);
+    final networkOutputIds = outputIds
+        .where((id) => id.startsWith('applemidi:'))
+        .toList(growable: false);
+    final localOutputIds = outputIds
+        .where((id) => !id.startsWith('applemidi:'))
+        .toList(growable: false);
     return XenSynthSettings(
       layoutMode: requestedLayoutMode,
       playbackSpeed: _double(
@@ -192,31 +215,17 @@ class XenSynthSettings {
         map['externalMidiControlsProgram'],
         defaults.externalMidiControlsProgram,
       ),
-      midiInputEnabled: _bool(
-        map['midiInputEnabled'],
-        defaults.midiInputEnabled,
-      ),
-      midiOutputEnabled: _bool(
-        map['midiOutputEnabled'],
-        defaults.midiOutputEnabled,
-      ),
-      midiInputDeviceIds: _stringList(map['midiInputDeviceIds']),
-      midiInputDeviceSelectionConfigured: _bool(
-        map['midiInputDeviceSelectionConfigured'],
-        map.containsKey('midiInputDeviceIds'),
-      ),
-      midiOutputDeviceIds: _stringList(map['midiOutputDeviceIds']).isNotEmpty
-          ? _stringList(map['midiOutputDeviceIds'])
-          : _mergeStringLists(
-              _stringList(map['networkMidiDestinationIds']),
-              _stringList(map['bluetoothMidiOutputIds']),
-            ),
+      midiInputEnabled: midiInputEnabled,
+      midiOutputEnabled: midiOutputEnabled,
+      midiInputDeviceIds: inputIds,
+      midiInputDeviceSelectionConfigured: true,
+      midiOutputDeviceIds: outputIds,
       networkMidiEnabled: _bool(
         map['networkMidiEnabled'],
         defaults.networkMidiEnabled,
       ),
-      networkMidiDestinationIds: _stringList(map['networkMidiDestinationIds']),
-      bluetoothMidiOutputIds: _stringList(map['bluetoothMidiOutputIds']),
+      networkMidiDestinationIds: networkOutputIds,
+      bluetoothMidiOutputIds: localOutputIds,
       pitchRecognitionMode: pitchRecognitionMode,
       microphoneSensitivity: _double(
         map['microphoneSensitivity'],
@@ -335,6 +344,11 @@ class XenSynthSettings {
     return copyWith(edo: nextEdo, hexStepQ: steps.q, hexStepR: steps.r);
   }
 
+  /// Applies the single-device MIDI invariant to settings supplied by callers
+  /// that constructed this immutable value directly instead of using
+  /// [copyWith] or [fromMap].
+  XenSynthSettings normalizedMidiSelections() => copyWith();
+
   XenSynthSettings copyWith({
     KeyboardLayoutMode? layoutMode,
     double? playbackSpeed,
@@ -374,6 +388,26 @@ class XenSynthSettings {
     final nextEdo = (edo ?? this.edo).clamp(0, 72);
     final nextHexStepMaximum = hexStepMaximumForEdo(nextEdo);
     final requestedLayoutMode = layoutMode ?? this.layoutMode;
+    final nextMidiInputEnabled = midiInputEnabled ?? this.midiInputEnabled;
+    final nextMidiOutputEnabled = midiOutputEnabled ?? this.midiOutputEnabled;
+    final nextInputIds = singleMidiDeviceId(
+      midiInputDeviceIds ?? this.midiInputDeviceIds,
+    );
+    final requestedOutputIds =
+        midiOutputDeviceIds ??
+        ((networkMidiDestinationIds != null || bluetoothMidiOutputIds != null)
+            ? _mergeStringLists(
+                networkMidiDestinationIds ?? this.networkMidiDestinationIds,
+                bluetoothMidiOutputIds ?? this.bluetoothMidiOutputIds,
+              )
+            : this.midiOutputDeviceIds);
+    final nextOutputIds = singleMidiDeviceId(requestedOutputIds);
+    final nextNetworkOutputIds = nextOutputIds
+        .where((id) => id.startsWith('applemidi:'))
+        .toList(growable: false);
+    final nextLocalOutputIds = nextOutputIds
+        .where((id) => !id.startsWith('applemidi:'))
+        .toList(growable: false);
     return XenSynthSettings(
       layoutMode: requestedLayoutMode,
       playbackSpeed: playbackSpeed ?? this.playbackSpeed,
@@ -385,18 +419,14 @@ class XenSynthSettings {
       program: program ?? this.program,
       externalMidiControlsProgram:
           externalMidiControlsProgram ?? this.externalMidiControlsProgram,
-      midiInputEnabled: midiInputEnabled ?? this.midiInputEnabled,
-      midiOutputEnabled: midiOutputEnabled ?? this.midiOutputEnabled,
-      midiInputDeviceIds: midiInputDeviceIds ?? this.midiInputDeviceIds,
-      midiInputDeviceSelectionConfigured:
-          midiInputDeviceSelectionConfigured ??
-          this.midiInputDeviceSelectionConfigured,
-      midiOutputDeviceIds: midiOutputDeviceIds ?? this.midiOutputDeviceIds,
+      midiInputEnabled: nextMidiInputEnabled,
+      midiOutputEnabled: nextMidiOutputEnabled,
+      midiInputDeviceIds: nextInputIds,
+      midiInputDeviceSelectionConfigured: true,
+      midiOutputDeviceIds: nextOutputIds,
       networkMidiEnabled: networkMidiEnabled ?? this.networkMidiEnabled,
-      networkMidiDestinationIds:
-          networkMidiDestinationIds ?? this.networkMidiDestinationIds,
-      bluetoothMidiOutputIds:
-          bluetoothMidiOutputIds ?? this.bluetoothMidiOutputIds,
+      networkMidiDestinationIds: nextNetworkOutputIds,
+      bluetoothMidiOutputIds: nextLocalOutputIds,
       pitchRecognitionMode: pitchRecognitionMode ?? this.pitchRecognitionMode,
       microphoneSensitivity:
           (microphoneSensitivity ?? this.microphoneSensitivity).clamp(
