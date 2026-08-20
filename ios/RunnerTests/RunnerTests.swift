@@ -146,6 +146,21 @@ class RunnerTests: XCTestCase {
     ))
   }
 
+  func testAppleMIDIPortPolicyMatchesOnlyTheAdvertisedControlDataPair() {
+    XCTAssertTrue(
+      AppleMIDIPortPolicy.matchesConnectionPort(candidatePort: 0, controlPort: 5_004)
+    )
+    XCTAssertTrue(
+      AppleMIDIPortPolicy.matchesConnectionPort(candidatePort: 5_004, controlPort: 5_004)
+    )
+    XCTAssertTrue(
+      AppleMIDIPortPolicy.matchesConnectionPort(candidatePort: 5_005, controlPort: 5_004)
+    )
+    XCTAssertFalse(
+      AppleMIDIPortPolicy.matchesConnectionPort(candidatePort: 5_006, controlPort: 5_004)
+    )
+  }
+
   func testAppleMIDIIPv4SelectorPrefersPrivateLanAddress() {
     let selected = AppleMIDIIPv4AddressSelector.select(from: [
       socketAddressData("169.254.22.8"),
@@ -382,8 +397,8 @@ class RunnerTests: XCTestCase {
     )
   }
 
-  func testIncomingAppleMidiConnectionEnablesSharedNetworkInput() {
-    XCTAssertTrue(
+  func testNetworkInputRequiresSelectionAndActivePairing() {
+    XCTAssertFalse(
       MIDIKeyboardController.shouldReceiveNetworkInput(
         selectedInputSourceIds: [],
         hasActiveConnection: true
@@ -398,8 +413,62 @@ class RunnerTests: XCTestCase {
     XCTAssertTrue(
       MIDIKeyboardController.shouldReceiveNetworkInput(
         selectedInputSourceIds: ["applemidi:studio-ipad"],
+        hasActiveConnection: true
+      )
+    )
+    XCTAssertFalse(
+      MIDIKeyboardController.shouldReceiveNetworkInput(
+        selectedInputSourceIds: ["applemidi:studio-ipad"],
         hasActiveConnection: false
       )
+    )
+  }
+
+  func testAppleMidiInvitationPolicyRequiresAnEnabledLocalLink() {
+    XCTAssertFalse(
+      AppleMIDINetworkSession.acceptsIncomingInvitations(
+        transportEnabled: false,
+        discoveryEnabled: true,
+        hasSelectedPeer: true
+      )
+    )
+    XCTAssertFalse(
+      AppleMIDINetworkSession.acceptsIncomingInvitations(
+        transportEnabled: true,
+        discoveryEnabled: false,
+        hasSelectedPeer: true
+      )
+    )
+    XCTAssertFalse(
+      AppleMIDINetworkSession.acceptsIncomingInvitations(
+        transportEnabled: true,
+        discoveryEnabled: true,
+        hasSelectedPeer: false
+      )
+    )
+    XCTAssertTrue(
+      AppleMIDINetworkSession.acceptsIncomingInvitations(
+        transportEnabled: true,
+        discoveryEnabled: true,
+        hasSelectedPeer: true
+      )
+    )
+  }
+
+  func testAppleMidiDuplexLinkRequiresBothNativeSelectionMirrors() {
+    XCTAssertEqual(
+      AppleMIDINetworkSession.duplexConnectionIds(
+        destinationIds: ["applemidi:studio"],
+        inputIds: []
+      ),
+      []
+    )
+    XCTAssertEqual(
+      AppleMIDINetworkSession.duplexConnectionIds(
+        destinationIds: ["applemidi:studio"],
+        inputIds: ["applemidi:studio"]
+      ),
+      ["applemidi:studio"]
     )
   }
 

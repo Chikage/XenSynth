@@ -71,7 +71,7 @@ internal class NsdDirectory(
         @Suppress("DEPRECATION")
         override fun onServiceRegistered(serviceInfo: NsdServiceInfo) {
             registrationRequested = false
-            if (closed) {
+            if (closed || !discoveryEnabled) {
                 runCatching { nsdManager.unregisterService(this) }
                 return
             }
@@ -89,13 +89,14 @@ internal class NsdDirectory(
             registrationRequested = false
             registrationActive = false
             Log.w(TAG, "Could not publish AppleMIDI service: NSD error $errorCode")
-            scheduleRegistrationRetry()
+            if (discoveryEnabled) scheduleRegistrationRetry()
         }
 
         override fun onServiceUnregistered(serviceInfo: NsdServiceInfo) {
             registrationRequested = false
             registrationActive = false
-            if (!closed) scheduleRegistrationRetry()
+            registeredName = null
+            if (!closed && discoveryEnabled) scheduleRegistrationRetry()
         }
 
         override fun onUnregistrationFailed(serviceInfo: NsdServiceInfo, errorCode: Int) {
@@ -173,8 +174,10 @@ internal class NsdDirectory(
             if (closed) return@post
             discoveryEnabled = discover
             acquireMulticastLock()
-            requestRegistration()
-            requestDiscovery()
+            if (discover) {
+                requestRegistration()
+                requestDiscovery()
+            }
         }
     }
 
@@ -183,8 +186,12 @@ internal class NsdDirectory(
             if (closed) return@post
             discoveryEnabled = enabled
             if (enabled) {
+                requestRegistration()
                 requestDiscovery()
                 return@post
+            }
+            if (registrationActive) {
+                runCatching { nsdManager.unregisterService(registrationListener) }
             }
             resolutionQueue.clear()
             discoveryGenerations.clear()
@@ -234,7 +241,7 @@ internal class NsdDirectory(
     /** Registration can race Wi-Fi address assignment during process boot. */
     @Suppress("DEPRECATION")
     private fun requestRegistration() {
-        if (closed || registrationActive || registrationRequested) return
+        if (closed || !discoveryEnabled || registrationActive || registrationRequested) return
         val registrationHost = registrationHostAddress()
         if (addressPolicy == AppleMidiAddressPolicy.IPV4_ONLY && registrationHost == null) {
             Log.w(TAG, "Could not publish AppleMIDI service: no private IPv4 LAN address")
@@ -267,7 +274,9 @@ internal class NsdDirectory(
     }
 
     private fun scheduleRegistrationRetry() {
-        if (closed || registrationActive || registrationRequested || registrationRetryScheduled) return
+        if (closed || !discoveryEnabled || registrationActive || registrationRequested ||
+            registrationRetryScheduled
+        ) return
         val index = registrationRetryAttempt.coerceAtMost(REGISTRATION_RETRY_DELAYS_MILLIS.lastIndex)
         registrationRetryAttempt = (registrationRetryAttempt + 1)
             .coerceAtMost(REGISTRATION_RETRY_DELAYS_MILLIS.lastIndex)

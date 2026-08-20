@@ -171,7 +171,9 @@ class XenSynthSettings {
       'linear' => KeyboardLayoutMode.linear,
       _ => defaults.layoutMode,
     };
-    final inputIds = singleMidiDeviceId(_stringList(map['midiInputDeviceIds']));
+    final storedInputIds = singleMidiDeviceId(
+      _stringList(map['midiInputDeviceIds']),
+    );
     final midiInputEnabled = _bool(
       map['midiInputEnabled'],
       defaults.midiInputEnabled,
@@ -186,7 +188,14 @@ class XenSynthSettings {
             _stringList(map['networkMidiDestinationIds']),
             _stringList(map['bluetoothMidiOutputIds']),
           );
-    final outputIds = singleMidiDeviceId(rawOutputIds);
+    final storedOutputIds = singleMidiDeviceId(rawOutputIds);
+    final midiSelections = _normalizeNetworkLinkSelections(
+      inputIds: storedInputIds,
+      outputIds: storedOutputIds,
+      mirrorUnpairedNetworkSelection: true,
+    );
+    final inputIds = midiSelections.inputIds;
+    final outputIds = midiSelections.outputIds;
     final networkOutputIds = outputIds
         .where((id) => id.startsWith('applemidi:'))
         .toList(growable: false);
@@ -390,7 +399,7 @@ class XenSynthSettings {
     final requestedLayoutMode = layoutMode ?? this.layoutMode;
     final nextMidiInputEnabled = midiInputEnabled ?? this.midiInputEnabled;
     final nextMidiOutputEnabled = midiOutputEnabled ?? this.midiOutputEnabled;
-    final nextInputIds = singleMidiDeviceId(
+    final requestedInputIds = singleMidiDeviceId(
       midiInputDeviceIds ?? this.midiInputDeviceIds,
     );
     final requestedOutputIds =
@@ -401,7 +410,13 @@ class XenSynthSettings {
                 bluetoothMidiOutputIds ?? this.bluetoothMidiOutputIds,
               )
             : this.midiOutputDeviceIds);
-    final nextOutputIds = singleMidiDeviceId(requestedOutputIds);
+    final requestedSingleOutputIds = singleMidiDeviceId(requestedOutputIds);
+    final midiSelections = _normalizeNetworkLinkSelections(
+      inputIds: requestedInputIds,
+      outputIds: requestedSingleOutputIds,
+    );
+    final nextInputIds = midiSelections.inputIds;
+    final nextOutputIds = midiSelections.outputIds;
     final nextNetworkOutputIds = nextOutputIds
         .where((id) => id.startsWith('applemidi:'))
         .toList(growable: false);
@@ -582,5 +597,31 @@ class XenSynthSettings {
     List<String> second,
   ) {
     return <String>{...first, ...second}.toList(growable: false)..sort();
+  }
+
+  static ({List<String> inputIds, List<String> outputIds})
+  _normalizeNetworkLinkSelections({
+    required List<String> inputIds,
+    required List<String> outputIds,
+    bool mirrorUnpairedNetworkSelection = false,
+  }) {
+    final inputId = inputIds.isEmpty ? null : inputIds.first;
+    final outputId = outputIds.isEmpty ? null : outputIds.first;
+    final inputIsNetwork = inputId?.startsWith('applemidi:') == true;
+    final outputIsNetwork = outputId?.startsWith('applemidi:') == true;
+
+    if (inputIsNetwork && outputIsNetwork) {
+      // Prefer the output scan's ID because it is the identity used to create
+      // the native AppleMIDI connection, then mirror it to the input gate.
+      final peerId = outputId!;
+      return (inputIds: <String>[peerId], outputIds: <String>[peerId]);
+    }
+    if (mirrorUnpairedNetworkSelection && inputIsNetwork && outputId == null) {
+      return (inputIds: <String>[inputId!], outputIds: <String>[inputId]);
+    }
+    if (mirrorUnpairedNetworkSelection && outputIsNetwork && inputId == null) {
+      return (inputIds: <String>[outputId!], outputIds: <String>[outputId]);
+    }
+    return (inputIds: inputIds, outputIds: outputIds);
   }
 }

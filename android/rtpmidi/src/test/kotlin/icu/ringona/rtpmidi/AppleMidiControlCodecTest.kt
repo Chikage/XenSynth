@@ -28,16 +28,41 @@ class AppleMidiControlCodecTest {
 
     @Test
     fun acceptedAndRejectedInvitationsPreserveUtf8Names() {
-        for (command in listOf(AppleMidiInvitationCommand.OK, AppleMidiInvitationCommand.NO)) {
-            val packet = AppleMidiControlPacket.Invitation(
-                command = command,
+        val accepted = AppleMidiControlPacket.Invitation(
+            command = AppleMidiInvitationCommand.OK,
+            initiatorToken = 7,
+            ssrc = 9,
+            name = "钢琴",
+        )
+        assertEquals(accepted, AppleMidiControlCodec.decode(AppleMidiControlCodec.encode(accepted)))
+
+        val rejected = AppleMidiControlPacket.Invitation(
+            command = AppleMidiInvitationCommand.NO,
+            initiatorToken = 7,
+            ssrc = 9,
+            name = "钢琴",
+        )
+        val encodedRejected = AppleMidiControlCodec.encode(rejected)
+        assertEquals(16, encodedRejected.size)
+        assertEquals(
+            rejected.copy(name = ""),
+            AppleMidiControlCodec.decode(encodedRejected),
+        )
+    }
+
+    @Test
+    fun invitationWithoutSessionNameIsAccepted() {
+        val encoded = hex("FF FF 4E 4F 00 00 00 02 00 00 00 07 00 00 00 09")
+
+        assertEquals(
+            AppleMidiControlPacket.Invitation(
+                command = AppleMidiInvitationCommand.NO,
                 initiatorToken = 7,
                 ssrc = 9,
-                name = "钢琴",
-            )
-
-            assertEquals(packet, AppleMidiControlCodec.decode(AppleMidiControlCodec.encode(packet)))
-        }
+                name = "",
+            ),
+            AppleMidiControlCodec.decode(encoded),
+        )
     }
 
     @Test

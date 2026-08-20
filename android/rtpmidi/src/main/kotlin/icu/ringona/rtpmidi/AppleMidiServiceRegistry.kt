@@ -37,6 +37,18 @@ internal class AppleMidiServiceRegistry {
     private val recordsByInstanceId = LinkedHashMap<String, Record>()
     private var nextResolutionOrder = 0L
 
+    /** Computes the stable peer ID without mutating discovery state. */
+    fun peerIdFor(service: ResolvedAppleMidiService): String {
+        val parsedName = parseLogicalName(service.name)
+        return groupIdentity(
+            GroupKey(
+                logicalName = parsedName.first,
+                normalizedType = normalizeType(service.type),
+                hostAddress = service.host.hostAddress.orEmpty(),
+            ),
+        )
+    }
+
     fun upsert(service: ResolvedAppleMidiService): String {
         val parsedName = parseLogicalName(service.name)
         val groupKey = GroupKey(
@@ -50,7 +62,7 @@ internal class AppleMidiServiceRegistry {
             conflictOrdinal = parsedName.second,
             resolutionOrder = ++nextResolutionOrder,
         )
-        return groupIdentity(groupKey)
+        return peerIdFor(service)
     }
 
     fun remove(instanceId: String): String? {

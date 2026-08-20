@@ -98,18 +98,32 @@ class AppleMidiManagerTest {
     }
 
     @Test
-    fun incomingInvitationCreatesAnImplicitDuplexPeer() {
-        assertTrue(
+    fun incomingInvitationDoesNotAuthorizeAnUnselectedPeer() {
+        assertFalse(
             appleMidiSessionInputAllowed(
                 inputSelectionConfigured = true,
                 initiatedLocally = false,
                 selectedForInput = false,
             ),
         )
-        assertTrue(
+        assertFalse(
             appleMidiSessionOutputAllowed(
                 initiatedLocally = false,
                 selectedForOutput = false,
+            ),
+        )
+
+        assertTrue(
+            appleMidiSessionInputAllowed(
+                inputSelectionConfigured = true,
+                initiatedLocally = false,
+                selectedForInput = true,
+            ),
+        )
+        assertTrue(
+            appleMidiSessionOutputAllowed(
+                initiatedLocally = false,
+                selectedForOutput = true,
             ),
         )
 
@@ -128,8 +142,36 @@ class AppleMidiManagerTest {
         )
     }
 
-   @Test
-   fun invitationResponseCanMoveToAnotherAddressOnTheSameRemotePort() {
+    @Test
+    fun duplexLinkRequiresBothNativeSelectionMirrors() {
+        assertEquals(
+            emptySet<String>(),
+            appleMidiDuplexPeerIds(
+                outputPeerIds = setOf("applemidi:studio"),
+                inputPeerIds = emptySet(),
+                inputSelectionConfigured = true,
+            ),
+        )
+        assertEquals(
+            setOf("applemidi:studio"),
+            appleMidiDuplexPeerIds(
+                outputPeerIds = setOf("applemidi:studio"),
+                inputPeerIds = setOf("applemidi:studio"),
+                inputSelectionConfigured = true,
+            ),
+        )
+        assertEquals(
+            emptySet<String>(),
+            appleMidiDuplexPeerIds(
+                outputPeerIds = setOf("applemidi:studio"),
+                inputPeerIds = setOf("applemidi:studio"),
+                inputSelectionConfigured = false,
+            ),
+        )
+    }
+
+    @Test
+    fun invitationResponseCanMoveToAnotherAddressOnTheSameRemotePort() {
         val advertisedAddress = InetAddress.getByName("10.36.64.211")
         val responseAddress = InetAddress.getByName("10.36.64.107")
         val session = outgoingSession(advertisedAddress, initiatorToken = 0x1234)
@@ -385,6 +427,28 @@ class AppleMidiManagerTest {
             selectReceiverFeedbackSession(
                 listOf(oldSession, newSession),
                 InetSocketAddress(address, 5_005),
+                remoteSsrc = 22,
+            ),
+        )
+    }
+
+    @Test
+    fun clockSynchronizationSelectionUsesDataPortAndSsrc() {
+        val address = InetAddress.getByName("10.36.64.211")
+        val session = connectedSession("clock", address, remoteSsrc = 22, lastActivityNanos = 200)
+
+        assertSame(
+            session,
+            selectClockSynchronizationSession(
+                sessions = listOf(session),
+                remote = InetSocketAddress(address, 5_005),
+                remoteSsrc = 22,
+            ),
+        )
+        assertNull(
+            selectClockSynchronizationSession(
+                sessions = listOf(session),
+                remote = InetSocketAddress(address, 5_004),
                 remoteSsrc = 22,
             ),
         )

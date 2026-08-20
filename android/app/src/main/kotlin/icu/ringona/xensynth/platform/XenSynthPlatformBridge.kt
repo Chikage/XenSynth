@@ -328,8 +328,13 @@ internal class XenSynthPlatformBridge(
                    val enabled = boolean(arguments, "enabled")
                    // AppleMIDI destinations come exclusively from Bonjour service identities.
                     networkMidiEnabled = enabled
-                   appleMidiManager.setDiscoveryEnabled(enabled)
+                   // Give the output router one last authorized turn to send the panic/release
+                   // controllers before the manager tears down the UDP sessions on LINK off.
                    MidiOutputRouter.setNetworkOutputEnabled(enabled)
+                   if (!enabled) {
+                       appleMidiManager.flushPendingOutputSynchronously()
+                   }
+                   appleMidiManager.setDiscoveryEnabled(enabled)
                     result.success(true)
                 }
                 "configureNetworkAudio" -> {
@@ -697,11 +702,12 @@ internal class XenSynthPlatformBridge(
         val nextInputId = normalizedIds.singleOrNull()
         val selectionChanged =
             !midiInputDeviceSelectionConfigured ||
-                selectedMidiInputDeviceIds != normalizedIds
-        midiInputDeviceSelectionConfigured = true
+                selectedMidiInputDeviceIds != normalizedIds ||
+                midiInputDeviceSelectionConfigured != configured
+        midiInputDeviceSelectionConfigured = configured
         selectedMidiInputDeviceIds = normalizedIds
-        midiInputManager.setInputDeviceIds(ids = normalizedIds, configured = true)
-        val nextNetworkIds = if (nextInputId != null) {
+        midiInputManager.setInputDeviceIds(ids = normalizedIds, configured = configured)
+        val nextNetworkIds = if (configured && nextInputId != null) {
             normalizedIds.filterTo(LinkedHashSet()) {
                 it.startsWith("applemidi:") || it.startsWith("applemidi-session:")
             }
@@ -711,7 +717,7 @@ internal class XenSynthPlatformBridge(
         selectedNetworkMidiInputIds = nextNetworkIds
         appleMidiManager.setInputIds(
             ids = nextNetworkIds,
-            configured = true,
+            configured = configured,
         )
         if (!selectionChanged) return
         // Changing any source ownership must not leave notes sounding after a

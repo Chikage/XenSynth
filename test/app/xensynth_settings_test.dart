@@ -381,7 +381,18 @@ void main() {
       });
 
       expect(restored.midiOutputDeviceIds, ['applemidi:peer']);
+      expect(restored.midiInputDeviceIds, ['applemidi:peer']);
       expect(restored.midiInputDeviceSelectionConfigured, isTrue);
+    });
+
+    test('canonicalizes mismatched Bonjour aliases for one network link', () {
+      final restored = XenSynthSettings.fromMap(<String, Object?>{
+        'midiInputDeviceIds': ['applemidi:input-alias'],
+        'midiOutputDeviceIds': ['applemidi:output-alias'],
+      });
+
+      expect(restored.midiInputDeviceIds, ['applemidi:output-alias']);
+      expect(restored.midiOutputDeviceIds, ['applemidi:output-alias']);
     });
 
     test('applies pitch offset with the opposite sign', () {

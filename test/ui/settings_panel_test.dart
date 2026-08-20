@@ -626,6 +626,64 @@ void main() {
     expect(tester.widget<Switch>(connectionSwitch).value, isTrue);
   });
 
+  testWidgets('RTP-MIDI link mirrors one canonical ID across both scans', (
+    tester,
+  ) async {
+    await tester.binding.setSurfaceSize(const Size(874, 500));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+
+    var settings = const XenSynthSettings();
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: AppPalette.theme(),
+        home: Scaffold(
+          body: Align(
+            alignment: Alignment.topRight,
+            child: SizedBox(
+              height: 430,
+              child: StatefulBuilder(
+                builder: (context, setState) => SettingsPanel(
+                  settings: settings,
+                  midiInputDevices: const [
+                    NativeMidiOutput(
+                      id: 'applemidi:input-alias',
+                      name: 'Studio iPhone',
+                      targetId: 'network:192.168.1.24:5004',
+                      transport: 'network',
+                      isInput: true,
+                    ),
+                  ],
+                  networkMidiOutputs: const [
+                    NativeMidiOutput(
+                      id: 'applemidi:output-alias',
+                      name: 'Studio iPhone',
+                      targetId: 'network:192.168.1.24:5005',
+                      transport: 'network',
+                    ),
+                  ],
+                  onChanged: (value) => setState(() => settings = value),
+                  onReset: () {},
+                ),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+
+    final connectionSwitch = find.byKey(
+      const ValueKey('midi-connection-toggle-192.168.1.24'),
+    );
+    await tester.ensureVisible(connectionSwitch);
+    await tester.pump();
+    await tester.tap(connectionSwitch);
+    await tester.pump();
+
+    expect(settings.midiInputDeviceIds, ['applemidi:output-alias']);
+    expect(settings.midiOutputDeviceIds, ['applemidi:output-alias']);
+    expect(tester.widget<Switch>(connectionSwitch).value, isTrue);
+  });
+
   testWidgets('RTP-MIDI peers on different addresses remain separate rows', (
     tester,
   ) async {

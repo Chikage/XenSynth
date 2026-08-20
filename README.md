@@ -11,7 +11,7 @@ XenSynth 的 iOS / Android 跨平台版本。界面、乐谱解析、瀑布流�
 - JSON 调律、EDO、音高偏移、速度、音量、混响和延迟设置
 - USB / 系统 MIDI 键盘输入，支持延音踏板与音色切换
 - Android 系统虚拟 MIDI 输出，其他应用可接收键盘和乐谱播放的 MIDI 流
-- 可在设备列表中分别管理 MIDI 输入和输出；支持局域网 RTP-MIDI/AppleMIDI、蓝牙和系统 MIDI 端点
+- 可在设备列表中管理 MIDI 输入和输出；局域网 RTP-MIDI/AppleMIDI 设备使用一个 `LINK` 开关建立双向连接，蓝牙和系统 MIDI 端点仍可分别管理输入/输出
 - Android 后台乐谱播放与 MediaSession 通知栏控制（播放、暂停、停止、进度拖动）
 - iOS / Android 麦克风录音与实时分析：钢琴音符、YIN 连续基频和 FFT 频谱模式
 - FluidSynth SoundFont 合成；Android 使用 Oboe，iOS 使用原生音频排程
@@ -38,9 +38,9 @@ Android 乐谱播放由 `XenSynthPlaybackService` 持有 Android MediaSession。
 
 ## MIDI 设备
 
-设置面板的 `MIDI` 区域在每个设备行中提供 `IN` 和 `OUT` 开关，不再提供独立的全局输入、输出开关。关闭设备输入会断开该 MIDI 来源；关闭设备输出会立即向目标发送 Note Off / All Notes Off，并停止继续向该目标发送键盘和乐谱事件。
+设置面板的 `MIDI` 区域在本地设备行中提供 `IN` 和 `OUT` 开关，在网络设备行中只提供一个 `LINK` 开关，不再提供独立的全局输入、输出开关。`LINK` 会同时选择该 peer 的输入和输出；只有双方都处于 LINK 状态且会话获准后才收发 MIDI。任一方关闭 LINK 会立即清理会话、停止后续数据并释放活动音符。
 
-`RTP-MIDI / AppleMIDI` 使用 Bonjour `_apple-midi._udp` 自动发现，并从 5004/5005 开始按序选择可用的连续 UDP 控制/数据端口建立双向会话。发现的 XenSynth、JustPiano 或系统 AppleMIDI 端点会显示在 `AVAILABLE MIDI DEVICES` 中；关闭该开关会停止局域网扫描并立即移除缓存的 LAN 端点，但 USB、蓝牙和本机软件端点仍会保留。重新开启时会先保持局域网列表为空，再以新的 Bonjour 扫描结果填充，避免短暂显示旧端点。不再提供固定 host/port 或裸 UDP 兼容路径。Android 使用内置 RTP-MIDI 会话库，iOS 使用系统 CoreMIDI Network Session。本机软件公开的 MIDI 接收端口也会列出；Android 的虚拟 MIDI 设备和 iOS 的 CoreMIDI 虚拟 destination 会标为 `Software`。
+`RTP-MIDI / AppleMIDI` 使用 Bonjour `_apple-midi._udp` 自动发现，并从 5004/5005 开始按序选择可用的连续 UDP 控制/数据端口建立双向会话。发现的 XenSynth、JustPiano 或系统 AppleMIDI 端点会显示在 `AVAILABLE MIDI DEVICES` 中；点击网络设备的 `LINK` 会一次完成输入/输出选择和连接授权，任一端关闭 LINK 后两端都会拒绝未授权的邀请和 MIDI 数据。关闭全局网络 MIDI 开关会停止局域网扫描并立即移除缓存的 LAN 端点，但 USB、蓝牙和本机软件端点仍会保留。重新开启时会先保持局域网列表为空，再以新的 Bonjour 扫描结果填充，避免短暂显示旧端点。不再提供固定 host/port 或裸 UDP 兼容路径。Android 使用内置 RTP-MIDI 会话库，iOS 使用系统 CoreMIDI Network Session。本机软件公开的 MIDI 接收端口也会列出；Android 的虚拟 MIDI 设备和 iOS 的 CoreMIDI 虚拟 destination 会标为 `Software`。
 
 ## 环境要求
 

@@ -50,6 +50,9 @@ final class XenSynthPlatformBridge: NSObject, FlutterStreamHandler, UIDocumentPi
     midiController.onEvent = { [weak self] event in
       self?.midiEventSink?(event)
     }
+    midiController.networkAuthorizationProvider = { [weak self] in
+      self?.midiOutput.hasAuthorizedNetworkConnection ?? false
+    }
     restoreNativeSettings()
   }
 
@@ -530,15 +533,25 @@ final class XenSynthPlatformBridge: NSObject, FlutterStreamHandler, UIDocumentPi
       previewPrograms = Array(repeating: program.clamped(to: 0...127), count: 16)
     }
     setMidiInputEnabled((settings["midiInputEnabled"] as? Bool) ?? true)
-    setMidiInputDeviceIds(stringList(from: settings["midiInputDeviceIds"]) ?? [])
     setMidiOutputEnabled((settings["midiOutputEnabled"] as? Bool) ?? true)
     let networkEnabled = (settings["networkMidiEnabled"] as? Bool) ?? true
     midiController.setNetworkInputEnabled(networkEnabled)
     midiOutput.configureNetwork(enabled: networkEnabled)
-    let outputIds = stringList(from: settings["midiOutputDeviceIds"])
+    var inputIds = stringList(from: settings["midiInputDeviceIds"]) ?? []
+    var outputIds = stringList(from: settings["midiOutputDeviceIds"])
       ?? stringList(from: settings["networkMidiDestinationIds"])
       ?? stringList(from: settings["bluetoothMidiOutputIds"])
       ?? []
+    let inputNetworkId = inputIds.first { $0.hasPrefix("applemidi:") }
+    let outputNetworkId = outputIds.first { $0.hasPrefix("applemidi:") }
+    if let outputNetworkId, inputIds.isEmpty || inputNetworkId != nil {
+      inputIds = [outputNetworkId]
+      outputIds = [outputNetworkId]
+    } else if let inputNetworkId, outputIds.isEmpty {
+      inputIds = [inputNetworkId]
+      outputIds = [inputNetworkId]
+    }
+    setMidiInputDeviceIds(inputIds)
     setMidiOutputDeviceIds(outputIds)
   }
 

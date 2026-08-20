@@ -59,6 +59,7 @@ internal object MidiOutputRouter {
         safetySender?.invoke(
             (0 until CHANNEL_COUNT).flatMap { channel ->
                 listOf(
+                    controlChange(channel, 64, 0),
                     controlChange(channel, 120, 0),
                     controlChange(channel, 123, 0),
                 )

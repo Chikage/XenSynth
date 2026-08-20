@@ -172,6 +172,9 @@ object AppleMidiControlCodec {
         writer.writeUInt32(packet.protocolVersion)
         writer.writeUInt32(packet.initiatorToken)
         writer.writeUInt32(packet.ssrc)
+        // Apple omits the session name from a rejection response. Accepting a name here is
+        // harmless for legacy peers, but emitting the protocol form is required by CoreMIDI.
+        if (packet.command == AppleMidiInvitationCommand.NO) return
         writer.writeBytes(nameBytes)
         writer.writeUInt8(0)
     }
@@ -180,7 +183,7 @@ object AppleMidiControlCodec {
         reader: BigEndianPacketReader,
         wireCommand: Int,
     ): AppleMidiControlPacket.Invitation {
-        if (reader.packetLength < INVITATION_FIXED_SIZE + 1) {
+        if (reader.packetLength < INVITATION_FIXED_SIZE) {
             throw AppleMidiProtocolException("Truncated AppleMIDI invitation")
         }
         val protocolVersion = reader.readUInt32()
@@ -191,6 +194,17 @@ object AppleMidiControlCodec {
         }
         val initiatorToken = reader.readUInt32()
         val ssrc = reader.readUInt32()
+        val command = AppleMidiInvitationCommand.entries.first { it.wireCode == wireCommand }
+        // The name is optional on the wire (in particular for NO responses).
+        if (reader.remaining == 0) {
+            return AppleMidiControlPacket.Invitation(
+                command = command,
+                initiatorToken = initiatorToken,
+                ssrc = ssrc,
+                name = "",
+                protocolVersion = protocolVersion,
+            )
+        }
         val terminatorOffset = reader.indexOf(0)
         if (terminatorOffset < 0) {
             throw AppleMidiProtocolException("AppleMIDI session name is not NUL terminated")
@@ -208,7 +222,6 @@ object AppleMidiControlCodec {
         }
         reader.readUInt8()
         reader.requireFinished("Unexpected bytes after AppleMIDI session name")
-        val command = AppleMidiInvitationCommand.entries.first { it.wireCode == wireCommand }
         return AppleMidiControlPacket.Invitation(
             command = command,
             initiatorToken = initiatorToken,

@@ -103,20 +103,20 @@ class SettingsPanel extends StatelessWidget {
       _UnifiedMidiDevice device,
       bool connected,
     ) {
-      final inputId = (device.input ?? device.output)?.id;
-      final outputId = (device.output ?? device.input)?.id;
-      if (inputId == null || outputId == null) return;
+      // Input and output scans can expose different transient Bonjour IDs for
+      // the same address. Native authorization intentionally requires an exact
+      // duplex ID match, so mirror one canonical peer ID into both directions.
+      final peerId = (device.output ?? device.input)?.id;
+      if (peerId == null) return;
       onChanged(
         settings.copyWith(
           // RTP-MIDI sessions are duplex. One connection owns both directions,
           // while the native receiver accepts the corresponding peer invitation.
           midiInputEnabled: true,
           midiOutputEnabled: true,
-          midiInputDeviceIds: connected ? <String>[inputId] : const <String>[],
+          midiInputDeviceIds: connected ? <String>[peerId] : const <String>[],
           midiInputDeviceSelectionConfigured: true,
-          midiOutputDeviceIds: connected
-              ? <String>[outputId]
-              : const <String>[],
+          midiOutputDeviceIds: connected ? <String>[peerId] : const <String>[],
         ),
       );
     }
@@ -264,14 +264,11 @@ class SettingsPanel extends StatelessWidget {
                                     ),
                                 connectionEnabled:
                                     settings.networkMidiEnabled &&
-                                    (_isUnifiedMidiDeviceSelected(
-                                          settings.midiInputDeviceIds,
-                                          device,
-                                        ) &&
-                                        _isUnifiedMidiDeviceSelected(
-                                          settings.midiOutputDeviceIds,
-                                          device,
-                                        )),
+                                    _isNetworkMidiLinkSelected(
+                                      inputIds: settings.midiInputDeviceIds,
+                                      outputIds: settings.midiOutputDeviceIds,
+                                      device: device,
+                                    ),
                                 onInputChanged: (enabled) =>
                                     setMidiInputForDevice(device, enabled),
                                 onOutputChanged: (enabled) =>
@@ -813,15 +810,15 @@ bool _isMidiDeviceSelected(
   return selectedIds.any((id) => id.trim() == device.id);
 }
 
-bool _isUnifiedMidiDeviceSelected(
-  Iterable<String> selectedIds,
-  _UnifiedMidiDevice device,
-) {
-  final deviceIds = <String>{
-    if (device.input != null) device.input!.id,
-    if (device.output != null) device.output!.id,
-  };
-  return selectedIds.any((id) => deviceIds.contains(id.trim()));
+bool _isNetworkMidiLinkSelected({
+  required Iterable<String> inputIds,
+  required Iterable<String> outputIds,
+  required _UnifiedMidiDevice device,
+}) {
+  final peerId = (device.output ?? device.input)?.id;
+  if (peerId == null) return false;
+  return inputIds.any((id) => id.trim() == peerId) &&
+      outputIds.any((id) => id.trim() == peerId);
 }
 
 class _SliderRow extends StatelessWidget {

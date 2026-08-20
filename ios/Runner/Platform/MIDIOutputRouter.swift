@@ -17,6 +17,16 @@ enum AppleMIDIPortPolicy {
       && networkPort <= lastControlPort
       && (networkPort - fixedControlPort).isMultiple(of: 2)
   }
+
+  /// CoreMIDI may identify a connection by either half of the AppleMIDI UDP pair. A zero port
+  /// means the framework did not expose the remote port, so address/name matching can still be
+  /// used in that case.
+  static func matchesConnectionPort(candidatePort: Int, controlPort: Int) -> Bool {
+    guard controlPort > 0, controlPort < Int(UInt16.max) else { return false }
+    return candidatePort == 0
+      || candidatePort == controlPort
+      || candidatePort == controlPort + 1
+  }
 }
 
 /// Selects the address that should be used for a Bonjour AppleMIDI peer.
@@ -553,6 +563,9 @@ final class MIDIOutputRouter {
   private let midiSendLock = NSLock()
   private var networkEnabled = false
   private var networkDestinationSelected = false
+  private var networkInputSelected = false
+  private var selectedNetworkDestinationIds = Set<String>()
+  private var selectedNetworkInputIds = Set<String>()
 
   init() {
     let buffer = NetworkMIDIOutputBuffer()
@@ -614,19 +627,37 @@ final class MIDIOutputRouter {
     networkSession.scan(completion: completion)
   }
 
+  /// The input controller and output router share CoreMIDI's single network endpoint. Expose the
+  /// same peer authorization snapshot to both paths so a stale connection cannot keep delivering
+  /// input after LINK is revoked.
+  var hasAuthorizedNetworkConnection: Bool {
+    networkSession.hasAuthorizedConnection
+  }
+
   func setNetworkDestinationIds(_ ids: [String]) {
-    networkSession.setDestinationIds(ids)
-    let selected = ids.contains { $0.hasPrefix("applemidi:") }
+    let next = Set(ids.lazy.filter { $0.hasPrefix("applemidi:") }.prefix(1))
     outputStateLock.lock()
-    networkDestinationSelected = selected
+    let changed = selectedNetworkDestinationIds != next
     outputStateLock.unlock()
-    if !selected {
-      networkOutputBuffer.clear()
-    }
+    if changed { prepareForNetworkSelectionChange() }
+    outputStateLock.lock()
+    selectedNetworkDestinationIds = next
+    networkDestinationSelected = !next.isEmpty
+    outputStateLock.unlock()
+    networkSession.setDestinationIds(Array(next))
   }
 
   func setNetworkInputIds(_ ids: [String]) {
-    networkSession.setInputIds(ids)
+    let next = Set(ids.lazy.filter { $0.hasPrefix("applemidi:") }.prefix(1))
+    outputStateLock.lock()
+    let changed = selectedNetworkInputIds != next
+    outputStateLock.unlock()
+    if changed { prepareForNetworkSelectionChange() }
+    outputStateLock.lock()
+    selectedNetworkInputIds = next
+    networkInputSelected = !next.isEmpty
+    outputStateLock.unlock()
+    networkSession.setInputIds(Array(next))
   }
 
   func setOutputEnabled(_ enabled: Bool) {
@@ -652,6 +683,7 @@ final class MIDIOutputRouter {
     outputStateLock.unlock()
     if !enabled {
       networkOutputBuffer.clear()
+      networkSession.invalidateAuthorizedConnectionSnapshot()
     }
     networkSession.setDiscoveryEnabled(enabled)
     networkSession.setEnabled(enabled)
@@ -761,7 +793,9 @@ final class MIDIOutputRouter {
     let state = outputState()
     guard state.outputEnabled,
           state.networkEnabled,
-          (state.networkDestinationSelected || networkSession.hasConnectedPeer) else {
+          state.networkDestinationSelected,
+          state.networkInputSelected,
+          networkSession.hasAuthorizedConnection else {
       networkOutputBuffer.clear()
       return
     }
@@ -777,13 +811,23 @@ final class MIDIOutputRouter {
     sendNetworkMessagesImmediately(messages)
   }
 
+  /// Drops queued note starts, releases the old peer, then closes the authorization gate before
+  /// CoreMIDI processes the asynchronous selection update on its main-thread session.
+  private func prepareForNetworkSelectionChange() {
+    networkOutputBuffer.clear()
+    _ = sendNetworkMessagesImmediately(Self.panicMessages)
+    networkSession.invalidateAuthorizedConnectionSnapshot()
+  }
+
   @discardableResult
   private func sendNetworkMessagesImmediately(_ messages: [[UInt8]]) -> Bool {
     let state = outputState()
     let networkDestination = networkSession.destinationEndpoint
     guard state.outputEnabled,
           state.networkEnabled,
-          (state.networkDestinationSelected || networkSession.hasConnectedPeer),
+          state.networkDestinationSelected,
+          state.networkInputSelected,
+          networkSession.hasAuthorizedConnection,
           networkSession.allowsActiveTransport,
           networkDestination != 0 else { return false }
     return send(messages, to: networkDestination)
@@ -832,11 +876,12 @@ final class MIDIOutputRouter {
   private func outputState() -> (
     outputEnabled: Bool,
     networkEnabled: Bool,
-    networkDestinationSelected: Bool
+    networkDestinationSelected: Bool,
+    networkInputSelected: Bool
   ) {
     outputStateLock.lock()
     defer { outputStateLock.unlock() }
-    return (outputEnabled, networkEnabled, networkDestinationSelected)
+    return (outputEnabled, networkEnabled, networkDestinationSelected, networkInputSelected)
   }
 
   private func prepareOutputPort() -> Bool {
@@ -986,6 +1031,8 @@ final class AppleMIDINetworkSession: NSObject {
   private var discoveryGeneration: UInt64 = 0
   private var enabled = false
   private var closed = false
+  private let authorizationLock = NSLock()
+  private var authorizedConnectionSnapshot = false
 
   var destinationEndpoint: MIDIEndpointRef {
     session.destinationEndpoint()
@@ -998,10 +1045,21 @@ final class AppleMIDINetworkSession: NSObject {
     )
   }
 
-  /// A peer that initiated a CoreMIDI connection is a valid duplex route even
-  /// when this device has not independently selected a directional endpoint.
-  var hasConnectedPeer: Bool {
-    !session.connections().isEmpty
+  /// CoreMIDI exposes one shared endpoint, so a connection count alone is not authorization.
+  /// The connection must match the peer selected by this device's LINK switch.
+  var hasAuthorizedConnection: Bool {
+    authorizationLock.lock()
+    defer { authorizationLock.unlock() }
+    return authorizedConnectionSnapshot
+  }
+
+  /// Selection setters may be called from a Flutter platform callback while CoreMIDI still has
+  /// the previous connection wrapper. Revoke its cross-queue snapshot synchronously so neither
+  /// output nor the shared network input endpoint can use that stale window.
+  func invalidateAuthorizedConnectionSnapshot() {
+    authorizationLock.lock()
+    authorizedConnectionSnapshot = false
+    authorizationLock.unlock()
   }
 
   override init() {
@@ -1020,11 +1078,8 @@ final class AppleMIDINetworkSession: NSObject {
       guard let self, !self.closed else { return }
       self.enabled = enabled
       if enabled {
-        // The system session has one broadcast destination for every peer. Keep the session
-        // open to incoming AppleMIDI connections; each local direction is still restricted by
-        // selectedConnectionIds below. Using `.noOne` here makes a selected peer's addConnection
-        // request fail on the other device, so both apps appear discovered but never exchange MIDI.
-        self.session.connectionPolicy = .anyone
+        // A CoreMIDI invitation is accepted only while a complete local LINK selection exists.
+        self.updateConnectionPolicy()
         self.session.isEnabled = true
         self.startBrowserIfNeeded()
         self.reconcileConnections()
@@ -1032,18 +1087,22 @@ final class AppleMIDINetworkSession: NSObject {
         self.disconnectAll()
         self.session.connectionPolicy = .noOne
         self.session.isEnabled = false
+        self.updateAuthorizedConnectionSnapshot()
       }
     }
   }
 
-  /// Enables or pauses Bonjour discovery independently from the CoreMIDI
-  /// network session. Existing CoreMIDI connections are intentionally kept so
-  /// disabling the device list cannot interrupt inbound MIDI.
+  /// Controls the local AppleMIDI LINK. Disabling it stops Bonjour discovery
+  /// and revokes active CoreMIDI connections in both directions.
   func setDiscoveryEnabled(_ enabled: Bool) {
     onMain { [weak self] in
       guard let self, !self.closed else { return }
       guard self.discoveryEnabled != enabled else {
-        if enabled { self.startBrowserIfNeeded() }
+        if enabled {
+          self.startBrowserIfNeeded()
+          self.updateConnectionPolicy()
+          self.reconcileConnections()
+        }
         return
       }
       self.discoveryEnabled = enabled
@@ -1051,11 +1110,18 @@ final class AppleMIDINetworkSession: NSObject {
       if enabled {
         self.resetBrowser()
         self.startBrowserIfNeeded()
+        self.updateConnectionPolicy()
+        self.reconcileConnections()
         return
       }
 
       self.resetBrowser()
       self.clearDiscoveredServices()
+      // Discovery and transport are separate CoreMIDI concepts, but the app's LINK switch is a
+      // single authorization. Revoking it must tear down passive and active routes alike.
+      self.disconnectAll()
+      self.updateConnectionPolicy()
+      self.updateAuthorizedConnectionSnapshot()
       let scans = self.pendingScans
       self.pendingScans.removeAll()
       scans.forEach { $0([]) }
@@ -1065,14 +1131,12 @@ final class AppleMIDINetworkSession: NSObject {
   func setDestinationIds(_ ids: [String]) {
     onMain { [weak self] in
       guard let self, !self.closed else { return }
+      let previousIds = self.selectedConnectionIds
       let next = Set(ids.lazy.filter { $0.hasPrefix(Self.destinationIdPrefix) }.prefix(1))
       self.selectedDestinationIds = next
+      self.updateConnectionPolicy()
       let selectedIds = self.selectedConnectionIds
-      let obsoleteConnections = self.initiatedConnections.filter { !selectedIds.contains($0.key) }
-      for (id, connection) in obsoleteConnections {
-        _ = self.removeConnection(connection)
-        self.initiatedConnections.removeValue(forKey: id)
-      }
+      self.disconnectConnections(for: previousIds.subtracting(selectedIds))
       self.reconcileConnections()
     }
   }
@@ -1080,16 +1144,14 @@ final class AppleMIDINetworkSession: NSObject {
   func setInputIds(_ ids: [String]) {
     onMain { [weak self] in
       guard let self, !self.closed else { return }
+      let previousIds = self.selectedConnectionIds
       let next = Set(
         ids.lazy.filter { $0.hasPrefix(Self.destinationIdPrefix) }.prefix(1)
       )
       self.selectedInputIds = next
+      self.updateConnectionPolicy()
       let selectedIds = self.selectedConnectionIds
-      let obsoleteConnections = self.initiatedConnections.filter { !selectedIds.contains($0.key) }
-      for (id, connection) in obsoleteConnections {
-        _ = self.removeConnection(connection)
-        self.initiatedConnections.removeValue(forKey: id)
-      }
+      self.disconnectConnections(for: previousIds.subtracting(selectedIds))
       self.reconcileConnections()
     }
   }
@@ -1134,6 +1196,7 @@ final class AppleMIDINetworkSession: NSObject {
       disconnectAll()
       session.connectionPolicy = .noOne
       session.isEnabled = false
+      updateAuthorizedConnectionSnapshot()
       clearDiscoveredServices()
       let scans = pendingScans
       pendingScans.removeAll()
@@ -1289,30 +1352,18 @@ final class AppleMIDINetworkSession: NSObject {
   }
 
   private func reconcileConnections() {
+    defer { updateAuthorizedConnectionSnapshot() }
     guard !closed, enabled, discoveryEnabled, session.isEnabled else { return }
     guard allowsActiveTransport else {
-      disconnectInitiatedConnections()
+      disconnectAll()
       return
     }
-    let selectedIds = selectedConnectionIds
-    let locallyInitiatedConnectionKeys = Set(
-      initiatedConnections.values.map { connectionKey($0) }
-    )
     let initialConnections = session.connections()
     for connection in initialConnections {
-      let retained = selectedIds.contains { id in
-        guard let service = preferredService(for: id), !isLocalService(service) else {
-          return false
-        }
-        return connectionMatches(connection, service: service, id: id)
-      }
-      // MIDINetworkSession accepts incoming connections under its open policy.
-      // Do not immediately remove passive connections merely because this
-      // device has not selected the peer yet: the invitation is the one-step
-      // duplex pairing action. Locally initiated connections remain governed
-      // by the selection and are removed on disconnect.
-      if !retained,
-         locallyInitiatedConnectionKeys.contains(connectionKey(connection)) {
+      let retained = connectionMatchesSelectedPeer(connection)
+      // The shared CoreMIDI policy cannot filter invitations by peer. Remove every passive or
+      // active connection that does not match the locally selected LINK before it can be used.
+      if !retained {
         _ = session.removeConnection(connection)
       }
     }
@@ -1351,7 +1402,36 @@ final class AppleMIDINetworkSession: NSObject {
   }
 
   private var selectedConnectionIds: Set<String> {
-    selectedDestinationIds.union(selectedInputIds)
+    Self.duplexConnectionIds(
+      destinationIds: selectedDestinationIds,
+      inputIds: selectedInputIds
+    )
+  }
+
+  static func duplexConnectionIds(
+    destinationIds: Set<String>,
+    inputIds: Set<String>
+  ) -> Set<String> {
+    destinationIds.intersection(inputIds)
+  }
+
+  /// A selected peer alone is not enough while the local LINK is disabled.
+  /// Keeping this predicate separate makes every policy update obey the same
+  /// authorization contract, including a selection change made after LINK off.
+  static func acceptsIncomingInvitations(
+    transportEnabled: Bool,
+    discoveryEnabled: Bool,
+    hasSelectedPeer: Bool
+  ) -> Bool {
+    transportEnabled && discoveryEnabled && hasSelectedPeer
+  }
+
+  private func updateConnectionPolicy() {
+    session.connectionPolicy = Self.acceptsIncomingInvitations(
+      transportEnabled: enabled && !closed,
+      discoveryEnabled: discoveryEnabled,
+      hasSelectedPeer: !selectedConnectionIds.isEmpty
+    ) ? .anyone : .noOne
   }
 
   private func disconnectAll() {
@@ -1359,14 +1439,24 @@ final class AppleMIDINetworkSession: NSObject {
       _ = session.removeConnection(connection)
     }
     initiatedConnections.removeAll()
+    updateAuthorizedConnectionSnapshot()
   }
 
-  private func disconnectInitiatedConnections() {
-    let connections = Array(initiatedConnections.values)
-    initiatedConnections.removeAll()
-    for connection in connections {
-      _ = removeConnection(connection)
+  /// Removes both locally initiated and passively accepted CoreMIDI wrappers when this device
+  /// revokes its LINK selection for a peer.
+  private func disconnectConnections(for ids: Set<String>) {
+    guard !ids.isEmpty else { return }
+    for id in ids {
+      if let initiated = initiatedConnections.removeValue(forKey: id) {
+        _ = removeConnection(initiated)
+      }
+      guard let service = preferredService(for: id), !isLocalService(service) else { continue }
+      for connection in session.connections()
+        where connectionMatches(connection, service: service, id: id) {
+        _ = removeConnection(connection)
+      }
     }
+    updateAuthorizedConnectionSnapshot()
   }
 
   /// CoreMIDI may return a new Swift wrapper for an unchanged socket. Resolve
@@ -1386,14 +1476,43 @@ final class AppleMIDINetworkSession: NSObject {
     }
   }
 
+  /// Recomputes the transport authorization on the main queue. Senders run on independent
+  /// queues, so they consume this immutable snapshot instead of synchronously hopping to main.
+  private func updateAuthorizedConnectionSnapshot() {
+    let authorized = !closed && enabled && discoveryEnabled && allowsActiveTransport &&
+      session.connections().contains(where: connectionMatchesSelectedPeer)
+    authorizationLock.lock()
+    authorizedConnectionSnapshot = authorized
+    authorizationLock.unlock()
+  }
+
+  private func connectionMatchesSelectedPeer(_ connection: MIDINetworkConnection) -> Bool {
+    selectedConnectionIds.contains { id in
+      guard let service = preferredService(for: id), !isLocalService(service) else {
+        return false
+      }
+      return connectionMatches(connection, service: service, id: id)
+    }
+  }
+
   private func connectionMatches(
     _ connection: MIDINetworkConnection,
     service: NetService,
     id: String
   ) -> Bool {
-    guard let ipv4Host = host(for: service, id: id) else { return false }
     let candidate = connection.host
-    if candidate.hasSameAddress(as: ipv4Host) { return true }
+    let expectedControlPort = host(for: service, id: id)?.port
+      ?? (service.port > 0 ? service.port : AppleMIDIPortPolicy.fixedControlPort)
+    let candidatePortMatches = AppleMIDIPortPolicy.matchesConnectionPort(
+      candidatePort: candidate.port,
+      controlPort: expectedControlPort
+    )
+    if let ipv4Host = host(for: service, id: id), candidate.hasSameAddress(as: ipv4Host) {
+      // `hasSameAddress` intentionally ignores the port. Keep a same-host connection only when
+      // CoreMIDI reports the advertised control/data pair (or an unspecified port), otherwise a
+      // second RTP-MIDI service on the same device could be treated as the selected peer.
+      return candidatePortMatches
+    }
 
     // Passive CoreMIDI invitations can retain an IPv6 connection object even
     // when Bonjour resolves the same participant to IPv4. Match its service
@@ -1402,13 +1521,7 @@ final class AppleMIDINetworkSession: NSObject {
     guard !candidateName.isEmpty else { return false }
     let sameName = logicalServiceName(candidateName)
       .caseInsensitiveCompare(logicalServiceName(service.name)) == .orderedSame
-    let controlPort = ipv4Host.port
-    let dataPort = controlPort < Int(UInt16.max) ? controlPort + 1 : controlPort
-    return sameName && (
-      candidate.port == 0
-        || candidate.port == controlPort
-        || candidate.port == dataPort
-    )
+    return sameName && candidatePortMatches
   }
 
   private func connectionKey(_ connection: MIDINetworkConnection) -> String {
@@ -1621,6 +1734,9 @@ extension AppleMIDINetworkSession: NetServiceBrowserDelegate {
        let connection = initiatedConnections.removeValue(forKey: id) {
       _ = removeConnection(connection)
     }
+    // A remote LINK can disappear without a CoreMIDI wrapper change. Reconcile immediately so
+    // the authorization snapshot cannot keep the shared endpoint writable until the next scan.
+    reconcileConnections()
   }
 
   func netServiceBrowser(

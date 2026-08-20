@@ -57,14 +57,15 @@ class AppleMidiManager(
     )
     private val pendingOutputLock = Any()
     private val pendingOutput = MidiOutputAccumulator()
+    private var pendingOutputAuthorizationEpoch: Long? = null
     private var outputFlushFuture: ScheduledFuture<*>? = null
     private var outputFlushDeadlineNanos: Long? = null
     private val discovered = AppleMidiServiceRegistry()
     private val sessions = LinkedHashMap<String, AppleMidiSession>()
     private val queuedJournalHeartbeats = LinkedHashSet<String>()
-    /** Peers that may receive locally generated RTP-MIDI output. */
+    /** Output half of the app's single per-peer LINK selection. */
     private val selectedPeerIds = LinkedHashSet<String>()
-    /** Peers that may initiate/keep an input session. */
+    /** Input half of the app's single per-peer LINK selection. */
     private val selectedInputPeerIds = LinkedHashSet<String>()
     private var inputSelectionConfigured = false
     private val scanWaiters = CopyOnWriteArrayList<CountDownLatch>()
@@ -76,6 +77,8 @@ class AppleMidiManager(
     private var nextGapWakeupNanos: Long? = null
     /** Bounds retry traffic when a selected CoreMIDI peer replaces its session. */
     private var lastOutgoingSessionReconciliationNanos: Long? = null
+    /** Invalidates outbound work captured before a LINK or session transition. */
+    private var outputAuthorizationEpoch = 0L
     private var outputDiagnosticCount = 0
     private var inputDiagnosticCount = 0
 
@@ -207,39 +210,76 @@ class AppleMidiManager(
         }
     }
 
-    /** Controls Bonjour browsing without tearing down active AppleMIDI sessions. */
+    /**
+     * Controls the local AppleMIDI link.
+     *
+     * Disabling the link must revoke both discovery and every existing session. Keeping a
+     * passive session alive here would allow the remote device to continue sending after this
+     * device's LINK switch had been turned off.
+     */
     fun setDiscoveryEnabled(enabled: Boolean) {
-        val (activeDirectory, waitersToRelease) = synchronized(lock) {
+        val activeDirectory: NsdDirectory?
+        val waitersToRelease: List<CountDownLatch>
+        val sessionsToClose: List<AppleMidiSession>
+        synchronized(lock) {
             if (closed) return
+            if (discoveryEnabled != enabled) outputAuthorizationEpoch++
             discoveryEnabled = enabled
             if (!enabled) discovered.clear()
-            val waiters = if (enabled) {
+            activeDirectory = directory
+            waitersToRelease = if (enabled) {
                 emptyList()
             } else {
                 scanWaiters.toList().also { scanWaiters.clear() }
             }
-            directory to waiters
+            sessionsToClose = if (enabled) {
+                emptyList()
+            } else {
+                sessions.values.toList()
+            }
         }
         activeDirectory?.setDiscoveryEnabled(enabled)
         waitersToRelease.forEach(CountDownLatch::countDown)
+        if (!enabled) clearPendingOutput()
+        sessionsToClose.forEach { closeSession(it, notifyRemote = true) }
         publishPeers()
     }
 
     /**
-     * Selects the peers that may receive locally generated RTP-MIDI output.
-     * Input selection is managed independently by [setInputIds].
+     * Updates the output half of the duplex LINK selection. A session is authorized only after
+     * [setInputIds] contains the same peer, which prevents a half-enabled UI state from carrying
+     * MIDI while retaining one connection switch for the user.
      */
     fun setDestinationIds(ids: Collection<String>) {
+        val nextPeerIds = ids.asSequence()
+            .filter { it.startsWith(DESTINATION_PREFIX) }
+            .take(1)
+            .toCollection(LinkedHashSet())
+        val plannedConnections = synchronized(lock) {
+            val previous = selectedConnectionPeerIdsLocked()
+            val next = appleMidiDuplexPeerIds(
+                outputPeerIds = nextPeerIds,
+                inputPeerIds = selectedInputPeerIds,
+                inputSelectionConfigured = inputSelectionConfigured,
+            )
+            previous to next
+        }
+        releaseNetworkNotesBeforeAuthorizationChange(
+            previousConnections = plannedConnections.first,
+            nextConnections = plannedConnections.second,
+        )
+
         val servicesToConnect: List<AppleMidiServiceSnapshot>
         val sessionsToClose: List<AppleMidiSession>
+        var selectionChanged = false
         synchronized(lock) {
+            val previousConnections = selectedConnectionPeerIdsLocked()
             selectedPeerIds.clear()
-            selectedPeerIds += ids.asSequence()
-                .filter { it.startsWith(DESTINATION_PREFIX) }
-                .take(1)
-                .toList()
+            selectedPeerIds += nextPeerIds
             val connectedEndpoints = connectedEndpointsLocked()
             val selectedConnections = selectedConnectionPeerIdsLocked()
+            selectionChanged = previousConnections != selectedConnections
+            if (selectionChanged) outputAuthorizationEpoch++
             servicesToConnect = if (activeMidiTransportAllowedLocked()) {
                 selectedConnections
                     .mapNotNull { discovered.snapshot(it, connectedEndpoints) }
@@ -247,11 +287,10 @@ class AppleMidiManager(
                 emptyList()
             }
             sessionsToClose = sessions.values.filter { session ->
-                session.initiatedLocally &&
-                    session.peerId != null &&
-                    session.peerId !in selectedConnections
+                session.peerId == null || session.peerId !in selectedConnections
             }
         }
+        if (selectionChanged) clearPendingOutput()
         sessionsToClose.forEach { closeSession(it, notifyRemote = true) }
         servicesToConnect.forEach(::ensureOutgoingSession)
         logOutputDiagnostic {
@@ -262,27 +301,44 @@ class AppleMidiManager(
     }
 
     /**
-     * Selects locally initiated peers that may deliver MIDI into the app.
-     *
-     * A peer which invited this device is already an explicit AppleMIDI
-     * connection request, so it remains duplex without requiring a second UI
-     * confirmation on this device. This gives a selected LAN peer the same
-     * one-action connection behavior as a Bluetooth device.
+     * Updates the input half of the duplex LINK selection. An incoming AppleMIDI invitation never
+     * grants local authorization by itself.
      */
     @JvmOverloads
     fun setInputIds(ids: Collection<String>, configured: Boolean = true) {
+        val nextInputPeerIds = if (configured) {
+            ids.asSequence()
+                .filter { it.startsWith(DESTINATION_PREFIX) }
+                .take(1)
+                .toCollection(LinkedHashSet())
+        } else {
+            linkedSetOf()
+        }
+        val plannedConnections = synchronized(lock) {
+            val previous = selectedConnectionPeerIdsLocked()
+            val next = appleMidiDuplexPeerIds(
+                outputPeerIds = selectedPeerIds,
+                inputPeerIds = nextInputPeerIds,
+                inputSelectionConfigured = configured,
+            )
+            previous to next
+        }
+        releaseNetworkNotesBeforeAuthorizationChange(
+            previousConnections = plannedConnections.first,
+            nextConnections = plannedConnections.second,
+        )
+
         val servicesToConnect: List<AppleMidiServiceSnapshot>
         val sessionsToClose: List<AppleMidiSession>
+        var selectionChanged = false
         synchronized(lock) {
+            val previousConnections = selectedConnectionPeerIdsLocked()
             inputSelectionConfigured = configured
             selectedInputPeerIds.clear()
-            if (configured) {
-                selectedInputPeerIds += ids.asSequence()
-                    .filter { it.startsWith(DESTINATION_PREFIX) }
-                    .take(1)
-                    .toList()
-            }
+            selectedInputPeerIds += nextInputPeerIds
             val selectedConnections = selectedConnectionPeerIdsLocked()
+            selectionChanged = previousConnections != selectedConnections
+            if (selectionChanged) outputAuthorizationEpoch++
             val connectedEndpoints = connectedEndpointsLocked()
             servicesToConnect = if (activeMidiTransportAllowedLocked()) {
                 selectedConnections.mapNotNull { discovered.snapshot(it, connectedEndpoints) }
@@ -290,10 +346,10 @@ class AppleMidiManager(
                 emptyList()
             }
             sessionsToClose = sessions.values.filter { session ->
-                session.initiatedLocally &&
-                    session.peerId != null && session.peerId !in selectedConnections
+                session.peerId == null || session.peerId !in selectedConnections
             }
         }
+        if (selectionChanged) clearPendingOutput()
         sessionsToClose.forEach { closeSession(it, notifyRemote = true) }
         servicesToConnect.forEach(::ensureOutgoingSession)
         publishPeers()
@@ -305,18 +361,28 @@ class AppleMidiManager(
         val safeMessages = messages
             .filter(::isSupportedChannelMessage)
             .map { it.copyOf() }
-        if (safeMessages.isEmpty() ||
-            !synchronized(lock) { activeMidiTransportAllowedLocked() }
-        ) {
+        if (safeMessages.isEmpty()) return
+        val authorizationEpoch = synchronized(lock) { outputAuthorizationEpochLocked() }
+        if (authorizationEpoch == null) {
             logOutputDiagnostic {
-                "Dropped outbound MIDI before queueing; supported=${safeMessages.size} " +
-                    "transportActive=${synchronized(lock) { activeMidiTransportAllowedLocked() }}"
+                "Dropped outbound MIDI before queueing; supported=${safeMessages.size} authorized=false"
             }
             return
         }
         logOutputDiagnostic { "Queued ${safeMessages.size} outbound MIDI message(s)" }
         synchronized(pendingOutputLock) {
-            if (!running) return
+            // LINK can be revoked after the fast-path check above. Recheck while holding the
+            // queue lock so setDiscoveryEnabled(false) either blocks this enqueue or clears it.
+            if (!synchronized(lock) {
+                    outputAuthorizationEpochLocked() == authorizationEpoch
+                }
+            ) return
+            if (pendingOutput.size == 0) {
+                pendingOutputAuthorizationEpoch = authorizationEpoch
+            } else if (pendingOutputAuthorizationEpoch != authorizationEpoch) {
+                pendingOutput.clear()
+                pendingOutputAuthorizationEpoch = authorizationEpoch
+            }
             val now = System.nanoTime()
             val result = pendingOutput.offer(safeMessages, timestampNanos, now)
             val desiredDeadline = if (result.flushImmediately) {
@@ -343,6 +409,7 @@ class AppleMidiManager(
                     outputFlushFuture = null
                     outputFlushDeadlineNanos = null
                     pendingOutput.clear()
+                    pendingOutputAuthorizationEpoch = null
                     if (running) Log.w(TAG, "Could not queue RTP-MIDI output", error)
                 }
             }
@@ -352,13 +419,103 @@ class AppleMidiManager(
     /** Coalesces the burst of key events arriving within one audio-sized frame. */
     private fun flushPendingOutput() {
         val output: MidiOutputDrain
+        val authorizationEpoch: Long
         synchronized(pendingOutputLock) {
             outputFlushFuture = null
             outputFlushDeadlineNanos = null
             if (pendingOutput.size == 0) return
+            authorizationEpoch = pendingOutputAuthorizationEpoch ?: run {
+                pendingOutput.clear()
+                return
+            }
             output = pendingOutput.drain()
+            pendingOutputAuthorizationEpoch = null
         }
-        sendRtpMidi(output)
+        sendRtpMidi(output, authorizationEpoch)
+    }
+
+    /** Revoking LINK invalidates queued packets before a session can be re-established. */
+    private fun clearPendingOutput() {
+        synchronized(pendingOutputLock) {
+            outputFlushFuture?.cancel(false)
+            outputFlushFuture = null
+            outputFlushDeadlineNanos = null
+            pendingOutput.clear()
+            pendingOutputAuthorizationEpoch = null
+        }
+    }
+
+    /**
+     * Flushes the currently coalesced MIDI batch before a LINK is revoked.
+     *
+     * The platform router sends an all-notes-off batch immediately before it disables the
+     * network.  A normal [send] call is intentionally asynchronous, so clearing the queue as
+     * part of LINK shutdown could otherwise discard that release batch before it reaches UDP.
+     */
+    fun flushPendingOutputSynchronously(timeoutMillis: Long = CONTROL_FLUSH_TIMEOUT_MILLIS): Boolean {
+        val output: MidiOutputDrain
+        val authorizationEpoch: Long
+        synchronized(pendingOutputLock) {
+            outputFlushFuture?.cancel(false)
+            outputFlushFuture = null
+            outputFlushDeadlineNanos = null
+            if (pendingOutput.size == 0) return true
+            authorizationEpoch = pendingOutputAuthorizationEpoch ?: run {
+                pendingOutput.clear()
+                return true
+            }
+            output = pendingOutput.drain()
+            pendingOutputAuthorizationEpoch = null
+        }
+
+        return sendOutputSynchronously(output, authorizationEpoch, timeoutMillis)
+    }
+
+    /** Sends a final release packet while the old duplex selection is still authorized. */
+    private fun releaseNetworkNotesBeforeAuthorizationChange(
+        previousConnections: Set<String>,
+        nextConnections: Set<String>,
+    ) {
+        if (previousConnections.isEmpty() || previousConnections == nextConnections) return
+
+        // Queued Note Ons no longer need delivery once their route is being revoked. Dropping
+        // them before the panic also guarantees no future-timestamp Note On can follow it.
+        clearPendingOutput()
+        val authorizationEpoch = synchronized(lock) {
+            outputAuthorizationEpochLocked()?.takeIf {
+                selectedConnectionPeerIdsLocked() == previousConnections
+            }
+        } ?: return
+        val now = System.nanoTime()
+        val panic = MidiOutputDrain(
+            messages = MidiOutputAccumulator.fullPanic(now),
+            batchWindowNanos = MidiOutputAccumulator.NORMAL_BATCH_WINDOW_NANOS,
+        )
+        sendOutputSynchronously(panic, authorizationEpoch, CONTROL_FLUSH_TIMEOUT_MILLIS)
+    }
+
+    private fun sendOutputSynchronously(
+        output: MidiOutputDrain,
+        authorizationEpoch: Long,
+        timeoutMillis: Long,
+    ): Boolean {
+        // Keep the same serial data writer used by normal output so an already submitted note
+        // batch cannot overtake the final release controllers.
+        val completed = CountDownLatch(1)
+        val accepted = rtpSendExecutor.execute(
+            critical = true,
+            onDiscard = completed::countDown,
+        ) {
+            try {
+                sendRtpMidiNow(output, authorizationEpoch)
+            } finally {
+                completed.countDown()
+            }
+        }
+        if (!accepted) return false
+        return runCatching {
+            completed.await(timeoutMillis.coerceAtLeast(1L), TimeUnit.MILLISECONDS)
+        }.getOrDefault(false)
     }
 
     private fun onServiceResolved(service: ResolvedAppleMidiService) {
@@ -379,16 +536,26 @@ class AppleMidiManager(
     private fun onServiceLost(instanceId: String) {
         val fallback: AppleMidiServiceSnapshot?
         val shouldConnect: Boolean
+        val sessionsToClose: List<AppleMidiSession>
         synchronized(lock) {
             if (!running || !discoveryEnabled) return
             val peerId = discovered.peerIdForInstance(instanceId)
             discovered.remove(instanceId)
             fallback = peerId?.let { discovered.snapshot(it, connectedEndpointsLocked()) }
+            sessionsToClose = if (peerId != null && fallback == null) {
+                sessions.values.filter { it.peerId == peerId }
+            } else {
+                emptyList()
+            }
             shouldConnect = fallback != null && peerId in selectedConnectionPeerIdsLocked() &&
                 sessions.values.none {
                     it.peerId == peerId && it.state == AppleMidiSessionState.CONNECTED
                 } && activeMidiTransportAllowedLocked()
         }
+        // Treat removal of the last Bonjour alias as a remote LINK revocation. AppleMIDI BY is
+        // UDP and can be lost, so waiting for the inactivity timeout would leave a stale route
+        // writable after the peer has explicitly stopped publishing itself.
+        sessionsToClose.forEach { closeSession(it, notifyRemote = false) }
         publishPeers()
         if (shouldConnect) fallback?.let(::ensureOutgoingSession)
     }
@@ -489,6 +656,7 @@ class AppleMidiManager(
             outputFlushFuture = null
             outputFlushDeadlineNanos = null
             pendingOutput.clear()
+            pendingOutputAuthorizationEpoch = null
         }
         Log.e(TAG, "AppleMIDI UDP transport failed; all sessions are being closed", error)
         affectedSessions.forEach { closeSession(it, notifyRemote = false) }
@@ -503,7 +671,7 @@ class AppleMidiManager(
         when (packet) {
             is AppleMidiControlPacket.Invitation -> handleInvitation(packet, remote, dataChannel)
             is AppleMidiControlPacket.EndSession -> {
-                findSession(remote.address, packet.initiatorToken, packet.ssrc)
+                findEndSession(remote, packet.initiatorToken, packet.ssrc)
                     ?.let { closeSession(it, notifyRemote = false) }
             }
             is AppleMidiControlPacket.ClockSynchronization -> handleClockSynchronization(packet, remote)
@@ -513,7 +681,7 @@ class AppleMidiManager(
                         sessions.values,
                         remote,
                         packet.ssrc,
-                    )?.let { session ->
+                    )?.takeIf(::activeSessionTransportControlAllowedLocked)?.let { session ->
                         session.lastActivityNanos = System.nanoTime()
                         session.acknowledgeOutgoingSequence(packet.sequenceNumber)
                     }
@@ -547,13 +715,15 @@ class AppleMidiManager(
         remote: InetSocketAddress,
         dataChannel: Boolean,
     ) {
-       var rejected = false
-       val session = synchronized(lock) {
-            if (!running || !discoveryEnabled) {
+        var rejected = false
+        var detachedSimultaneousSession: AppleMidiSession? = null
+        val session = synchronized(lock) {
+            if (!running || !discoveryEnabled || !activeMidiTransportAllowedLocked()) {
                 rejected = true
                 return@synchronized null
             }
-           var match = findSessionLocked(remote.address, packet.initiatorToken, packet.ssrc)
+
+            var match = findSessionLocked(remote.address, packet.initiatorToken, packet.ssrc)
             if (!dataChannel && match == null) {
                 val simultaneous = sessions.values.firstOrNull {
                     it.initiatedLocally &&
@@ -563,20 +733,26 @@ class AppleMidiManager(
                 if (simultaneous != null) {
                     if (localSsrc < packet.ssrc) {
                         rejected = true
-                        return@synchronized simultaneous
+                        return@synchronized null
                     }
-                    sessions.remove(simultaneous.id)
+                    // Resolve simultaneous invitations by fully retiring the losing local
+                    // session. Removing it from the map alone leaves its delivery gate, active
+                    // notes, and recovery/output state alive.
+                    detachedSimultaneousSession = sessions.remove(simultaneous.id)?.also {
+                        outputAuthorizationEpoch++
+                    }
                 }
                 if (sessions.size >= configuration.maximumSessions) {
                     rejected = true
                     return@synchronized null
                 }
-                val peer = discovered.findByEndpoint(
+                var peer = discovered.findByEndpoint(
                     host = remote.address,
                     controlPort = remote.port,
                     connectedEndpoints = connectedEndpointsLocked(),
-                ) ?: run {
-                    val service = ResolvedAppleMidiService(
+                )
+                val invitationService = if (peer == null) {
+                    ResolvedAppleMidiService(
                         id = NsdDirectory.serviceIdentity(
                             packet.name.ifBlank { remote.address.hostAddress },
                             NsdDirectory.SERVICE_TYPE,
@@ -587,14 +763,39 @@ class AppleMidiManager(
                         controlPort = remote.port,
                         model = null,
                     )
-                    val peerId = discovered.upsert(service)
-                    discovered.snapshot(peerId, connectedEndpointsLocked())
-                        ?: return@synchronized null
+                } else {
+                    null
+                }
+                val candidatePeerId = peer?.id
+                    ?: invitationService?.let(discovered::peerIdFor)
+                val authorizedPeerId = candidatePeerId
+                    ?.takeIf(::isConnectionPeerSelectedLocked)
+                    ?: selectedConnectionPeerIdForEndpointLocked(
+                        remote = remote,
+                        advertisedName = packet.name,
+                    )
+                if (authorizedPeerId == null) {
+                    rejected = true
+                    return@synchronized null
+                }
+                if (peer == null && invitationService != null) {
+                    val insertedPeerId = discovered.upsert(invitationService)
+                    if (insertedPeerId != authorizedPeerId) {
+                        discovered.remove(invitationService.id)
+                        rejected = true
+                        return@synchronized null
+                    }
+                }
+                peer = discovered.snapshot(authorizedPeerId, connectedEndpointsLocked()) ?: peer
+                val authorizedPeer = peer
+                if (authorizedPeer == null) {
+                    rejected = true
+                    return@synchronized null
                 }
                 match = AppleMidiSession(
                     id = "applemidi-session:${UUID.randomUUID()}",
-                    peerId = peer.id,
-                    peerName = packet.name.ifBlank { peer.service.name },
+                    peerId = authorizedPeerId,
+                    peerName = packet.name.ifBlank { authorizedPeer.service.name },
                     advertisedAddress = remote.address,
                     remoteControlPort = remote.port,
                     remoteDataPort = remote.port + 1,
@@ -610,19 +811,32 @@ class AppleMidiManager(
                     jitterBufferMillis = configuration.jitterBufferMillis,
                 ).also { sessions[it.id] = it }
             }
-            if (dataChannel && match != null) {
-                match.remoteDataPort = remote.port
-                match.dataAccepted = true
-                // A completed data invitation is sufficient for duplex MIDI.
-                // Keep CK synchronization opportunistic so a CoreMIDI peer
-                // that delays CK2 cannot leave this session permanently muted.
-                match.state = AppleMidiSessionState.CONNECTED
-            } else if (!dataChannel && match != null) {
-                match.remoteControlPort = remote.port
-                match.controlAccepted = true
+
+            val authorizedSession = match
+            val authorizedPeerId = authorizedSession?.peerId
+                ?.takeIf(::isConnectionPeerSelectedLocked)
+                ?: selectedConnectionPeerIdForEndpointLocked(
+                    remote = remote,
+                    advertisedName = packet.name,
+                )
+            if (authorizedSession == null || authorizedPeerId == null) {
+                rejected = true
+                return@synchronized null
             }
-            match?.lastActivityNanos = System.nanoTime()
-            match
+            authorizedSession.peerId = authorizedPeerId
+            if (dataChannel) {
+                authorizedSession.remoteDataPort = remote.port
+                authorizedSession.dataAccepted = true
+                authorizedSession.state = AppleMidiSessionState.CONNECTED
+            } else {
+                authorizedSession.remoteControlPort = remote.port
+                authorizedSession.controlAccepted = true
+            }
+            authorizedSession.lastActivityNanos = System.nanoTime()
+            authorizedSession
+        }
+        detachedSimultaneousSession?.let {
+            closeSession(it, notifyRemote = true, sessionAlreadyRemoved = true)
         }
         val response = AppleMidiControlPacket.Invitation(
             command = if (rejected || session == null) {
@@ -634,7 +848,18 @@ class AppleMidiManager(
             ssrc = localSsrc,
             name = configuration.serviceName,
         )
-        sendControl(response, remote, dataChannel)
+        sendControl(
+            response,
+            remote,
+            dataChannel,
+            sendAllowedLocked = {
+                if (session == null) {
+                    activeMidiTransportAllowed(running, portPair, transportHealthy)
+                } else {
+                    activeSessionTransportControlAllowedLocked(session)
+                }
+            },
+        )
         if (!rejected && session != null) publishPeers()
     }
 
@@ -644,13 +869,14 @@ class AppleMidiManager(
         dataChannel: Boolean,
     ) {
         val session = synchronized(lock) {
+            if (!activeMidiTransportAllowedLocked()) return@synchronized null
             val match = selectInvitationResponseSession(
                 sessions = sessions.values,
                 remote = remote,
                 initiatorToken = packet.initiatorToken,
                 responseSsrc = packet.ssrc,
                 dataChannel = dataChannel,
-            ) ?: run {
+            )?.takeIf(::activeSessionControlAllowedLocked) ?: run {
                 Log.d(
                     TAG,
                     "Ignored AppleMIDI invitation response from " +
@@ -673,7 +899,7 @@ class AppleMidiManager(
                 nowNanos = System.nanoTime(),
             )
             match
-        }
+        } ?: return
         if (dataChannel) {
             sendClockRequest(session)
         } else {
@@ -707,7 +933,8 @@ class AppleMidiManager(
         remote: InetSocketAddress,
     ) {
         val session = synchronized(lock) {
-            selectRtpMidiSession(sessions.values, remote, packet.ssrc)
+            selectClockSynchronizationSession(sessions.values, remote, packet.ssrc)
+                ?.takeIf(::activeSessionTransportControlAllowedLocked)
         } ?: return
         val nowTicks = clockTicks()
         when (packet.count) {
@@ -722,7 +949,7 @@ class AppleMidiManager(
                     ),
                     session.dataAddress,
                     dataChannel = true,
-                    sendAllowedLocked = { sessions[session.id] === session },
+                    sendAllowedLocked = { activeSessionTransportControlAllowedLocked(session) },
                 )
             }
             1 -> {
@@ -758,7 +985,7 @@ class AppleMidiManager(
             }
             2 -> {
                 synchronized(lock) {
-                    if (sessions[session.id] !== session) return
+                    if (!activeSessionTransportControlAllowedLocked(session)) return
                     val sample = session.sessionClock.updateFromResponderExchange(
                         t1Remote = packet.timestamp1,
                         t2Local = packet.timestamp2,
@@ -951,9 +1178,22 @@ class AppleMidiManager(
         session: AppleMidiSession,
         notifyRemote: Boolean,
         preserveFailedPeerState: Boolean = false,
+        sessionAlreadyRemoved: Boolean = false,
     ) {
-        val removed = synchronized(lock) { sessions.remove(session.id) != null }
+        val removed = if (sessionAlreadyRemoved) {
+            true
+        } else {
+            synchronized(lock) {
+                if (sessions.remove(session.id) == null) {
+                    false
+                } else {
+                    outputAuthorizationEpoch++
+                    true
+                }
+            }
+        }
         if (!removed) return
+        clearPendingOutput()
         if (notifyRemote) {
             val by = AppleMidiControlPacket.EndSession(session.initiatorToken, localSsrc)
             sendControl(by, session.controlAddress, dataChannel = false)
@@ -995,6 +1235,24 @@ class AppleMidiManager(
     private fun findSession(address: InetAddress, token: Long?, ssrc: Long?): AppleMidiSession? =
         synchronized(lock) { findSessionLocked(address, token, ssrc) }
 
+    /**
+     * BY packets are sent by both AppleMIDI participants, and CoreMIDI does not always use the
+     * same SSRC field as the invitation that created the local session. Match the initiator token
+     * first, then SSRC, and finally a unique host so a lost BY cannot leave a stale route writable.
+     */
+    private fun findEndSession(
+        remote: InetSocketAddress,
+        initiatorToken: Long,
+        ssrc: Long,
+    ): AppleMidiSession? = synchronized(lock) {
+        val hostCandidates = sessions.values.filter {
+            it.transportAddress.sameNetworkHost(remote.address)
+        }
+        hostCandidates.firstOrNull { it.initiatorToken == initiatorToken }
+            ?: hostCandidates.firstOrNull { it.remoteSsrc == ssrc }
+            ?: hostCandidates.singleOrNull()
+    }
+
     private fun findInvitationResponseSession(
         remote: InetSocketAddress,
         initiatorToken: Long,
@@ -1030,7 +1288,12 @@ class AppleMidiManager(
         }
 
     private fun activeMidiTransportAllowedLocked(): Boolean =
-        activeMidiTransportAllowed(running, portPair, transportHealthy)
+        discoveryEnabled && activeMidiTransportAllowed(running, portPair, transportHealthy)
+
+    private fun outputAuthorizationEpochLocked(): Long? =
+        outputAuthorizationEpoch.takeIf {
+            activeMidiTransportAllowedLocked() && sessions.values.any(::midiOutputAllowedLocked)
+        }
 
     private fun activeSessionControlAllowedLocked(session: AppleMidiSession): Boolean =
         activeMidiTransportAllowedLocked() &&
@@ -1038,35 +1301,56 @@ class AppleMidiManager(
             session.initiatedLocally &&
             session.peerId?.let(::isConnectionPeerSelectedLocked) == true
 
+    /** Allows CK replies from a responder while keeping them bound to an authorized LINK. */
+    private fun activeSessionTransportControlAllowedLocked(session: AppleMidiSession): Boolean =
+        activeMidiTransportAllowedLocked() &&
+            sessions[session.id] === session &&
+            session.state in LIVE_SESSION_STATES &&
+            session.peerId?.let(::isConnectionPeerSelectedLocked) == true
+
     private fun midiOutputAllowedLocked(session: AppleMidiSession): Boolean =
         activeMidiTransportAllowedLocked() &&
             sessions[session.id] === session &&
             session.state == AppleMidiSessionState.CONNECTED &&
-            appleMidiSessionOutputAllowed(
-                initiatedLocally = session.initiatedLocally,
-                selectedForOutput = session.peerId?.let(selectedPeerIds::contains) == true,
-            )
+            session.peerId?.let(::isConnectionPeerSelectedLocked) == true
 
     private fun midiInputAllowedLocked(session: AppleMidiSession): Boolean =
-        appleMidiSessionInputAllowed(
-            inputSelectionConfigured = inputSelectionConfigured,
-            initiatedLocally = session.initiatedLocally,
-            selectedForInput = session.peerId in selectedInputPeerIds,
-        )
+        activeMidiTransportAllowedLocked() &&
+            sessions[session.id] === session &&
+            session.state == AppleMidiSessionState.CONNECTED &&
+            session.peerId?.let(::isConnectionPeerSelectedLocked) == true
 
     private fun isConnectionPeerSelectedLocked(peerId: String): Boolean =
-        peerId in selectedPeerIds ||
-            !inputSelectionConfigured ||
-            peerId in selectedInputPeerIds
+        peerId in selectedConnectionPeerIdsLocked()
+
+    /**
+     * Resolves a selected peer by its transport endpoint when a Bonjour callback has not yet
+     * associated the incoming invitation with the same registry identity. Android and iOS can
+     * deliver the invitation before DNS-SD finishes resolving the service, so requiring the
+     * synthetic invitation identity here would reject an otherwise authorized connection.
+     */
+    private fun selectedConnectionPeerIdForEndpointLocked(
+        remote: InetSocketAddress,
+        advertisedName: String,
+    ): String? {
+        val normalizedName = advertisedName.trim()
+        return selectedConnectionPeerIdsLocked().firstOrNull { peerId ->
+            val snapshot = discovered.snapshot(peerId, connectedEndpointsLocked()) ?: return@firstOrNull false
+            val service = snapshot.service
+            if (!service.host.sameNetworkHost(remote.address)) return@firstOrNull false
+            val controlPort = service.controlPort
+            val dataPort = if (controlPort < 0xFFFF) controlPort + 1 else controlPort
+            if (remote.port != controlPort && remote.port != dataPort) return@firstOrNull false
+            if (normalizedName.isEmpty()) return@firstOrNull true
+            AppleMidiServiceRegistry.logicalName(service.name)
+                .equals(AppleMidiServiceRegistry.logicalName(normalizedName), ignoreCase = true)
+        }
+    }
 
     private fun selectedConnectionPeerIdsLocked(): LinkedHashSet<String> =
         LinkedHashSet<String>().apply {
-            addAll(selectedPeerIds)
-            if (!inputSelectionConfigured) {
-                // No explicit input selection means passive receive only. Do
-                // not actively connect every discovered peer on startup.
-            } else {
-                addAll(selectedInputPeerIds)
+            if (inputSelectionConfigured) {
+                addAll(selectedPeerIds.intersect(selectedInputPeerIds))
             }
         }
 
@@ -1118,6 +1402,7 @@ class AppleMidiManager(
             outputFlushFuture = null
             outputFlushDeadlineNanos = null
             pendingOutput.clear()
+            pendingOutputAuthorizationEpoch = null
         }
         rtpSendExecutor.close()
         active.forEach { closeSession(it, notifyRemote = true) }
@@ -1155,14 +1440,16 @@ class AppleMidiManager(
         val bytes: ByteArray,
     )
 
-    private fun sendRtpMidi(output: MidiOutputDrain) {
+    private fun sendRtpMidi(output: MidiOutputDrain, authorizationEpoch: Long) {
         val critical = output.messages.any { isCriticalMidiRelease(it.bytes) }
-        rtpSendExecutor.execute(critical = critical) { sendRtpMidiNow(output) }
+        rtpSendExecutor.execute(critical = critical) {
+            sendRtpMidiNow(output, authorizationEpoch)
+        }
     }
 
-    private fun sendRtpMidiNow(output: MidiOutputDrain) {
+    private fun sendRtpMidiNow(output: MidiOutputDrain, authorizationEpoch: Long) {
         val targets = synchronized(lock) {
-            if (!activeMidiTransportAllowedLocked()) return
+            if (outputAuthorizationEpochLocked() != authorizationEpoch) return
             sessions.values
                 .filter { midiOutputAllowedLocked(it) }
                 .groupBy { it.peerId ?: it.id }
@@ -1189,7 +1476,10 @@ class AppleMidiManager(
         session: AppleMidiSession,
         output: MidiOutputDrain,
     ) {
-        // Apple CoreMIDI expects RTP-MIDI command packets with the RTP marker bit clear.
+        // RFC 6295 specifies M=1 for a non-empty command section, but Apple's CoreMIDI network
+        // driver and widely deployed AppleMIDI peers discard command packets with that value.
+        // Keep M=0 on this AppleMIDI transport for wire compatibility; the command LEN remains
+        // the authoritative discriminator.
         var cursor = 0
         while (cursor < output.messages.size) {
             if (!synchronized(lock) { midiOutputAllowedLocked(session) }) return
@@ -1414,7 +1704,7 @@ class AppleMidiManager(
         val targets = synchronized(lock) {
             if (!activeMidiTransportAllowedLocked()) return
             sessions.values
-                .filter { it.state == AppleMidiSessionState.CONNECTED }
+                .filter(::midiOutputAllowedLocked)
                 .groupBy { it.peerId ?: it.id }
                 .values
                 .map { peerSessions -> peerSessions.maxBy(AppleMidiSession::lastActivityNanos) }
@@ -1426,9 +1716,13 @@ class AppleMidiManager(
     private fun handleRtpMidi(payload: ByteArray, remote: InetSocketAddress) {
         val packetSsrc = RtpMidiCodec.readSsrcOrNull(payload) ?: return
         val selection = synchronized(lock) {
-            val exact = selectRtpMidiSession(sessions.values, remote, packetSsrc)
+            // Do not let a packet from a deselected/stale session mutate its negotiated data
+            // port or reorder/recovery state. Authorization is part of session lookup, not only
+            // a check after the packet has already been accepted.
+            val authorizedSessions = sessions.values.filter(::midiInputAllowedLocked)
+            val exact = selectRtpMidiSession(authorizedSessions, remote, packetSsrc)
             val session = exact ?: selectRtpMidiSessionByHostAndSsrc(
-                sessions = sessions.values,
+                sessions = authorizedSessions,
                 remote = remote,
                 remoteSsrc = packetSsrc,
             )
@@ -1461,7 +1755,7 @@ class AppleMidiManager(
         val arrival = System.nanoTime()
         val release = synchronized(lock) {
             session.takeIf { current ->
-                sessions[current.id] === current && current.remoteSsrc == packet.ssrc
+                midiInputAllowedLocked(current) && current.remoteSsrc == packet.ssrc
             }?.let { current ->
                 current.lastActivityNanos = arrival
                 current.offerRtpPacket(packet, arrival)
@@ -1478,7 +1772,7 @@ class AppleMidiManager(
         if (release.packets.isEmpty()) return
         var feedbackSequenceNumber: Int? = null
         synchronized(lock) {
-            if (sessions[session.id] !== session) return
+            if (!midiInputAllowedLocked(session)) return
             session.queueReceiverFeedback(release.packets.last().extendedSequenceNumber)
             val recovery = when {
                 release.loss != null -> session.recoverFromPacketLoss(release.loss)
@@ -1521,11 +1815,7 @@ class AppleMidiManager(
             AppleMidiControlPacket.ReceiverFeedback(localSsrc, sequenceNumber),
             session.controlAddress,
             dataChannel = false,
-            sendAllowedLocked = {
-                running && transportHealthy && portPair != null &&
-                    sessions[session.id] === session &&
-                    session.state == AppleMidiSessionState.CONNECTED
-            },
+            sendAllowedLocked = { activeSessionTransportControlAllowedLocked(session) },
             onSentLocked = {
                 if (sessions[session.id] === session) session.recordReceiverFeedbackSent()
             },
@@ -1538,7 +1828,9 @@ class AppleMidiManager(
             lookaheadNanos = eventDeliveryLookaheadNanos,
         )
         val ready = synchronized(lock) {
-            sessions.values.flatMap { session -> session.drainMidi(drainThroughNanos) }
+            sessions.values
+                .filter(::midiInputAllowedLocked)
+                .flatMap { session -> session.drainMidi(drainThroughNanos) }
         }
         ready.sortedBy { it.targetTimeNanos }.forEach { event ->
             val session = synchronized(lock) {
@@ -1572,7 +1864,7 @@ class AppleMidiManager(
         var schedulingError: Throwable? = null
         synchronized(lock) {
             if (!running) return
-            val earliest = sessions.values
+            val earliest = sessions.values.filter(::midiInputAllowedLocked)
                 .mapNotNull(AppleMidiSession::nextMidiTargetTimeNanos)
                 .minOrNull()
             if (earliest == null) {
@@ -1635,7 +1927,7 @@ class AppleMidiManager(
         var schedulingError: Throwable? = null
         synchronized(lock) {
             if (!running) return
-            val earliest = sessions.values
+            val earliest = sessions.values.filter(::midiInputAllowedLocked)
                 .mapNotNull(AppleMidiSession::nextRtpGapDeadlineNanos)
                 .minOrNull()
             if (earliest == null) {
@@ -1678,7 +1970,7 @@ class AppleMidiManager(
             if (!running || generation != gapWakeupGeneration) return
             gapWakeupFuture = null
             nextGapWakeupNanos = null
-            sessions.values.mapNotNull { session ->
+            sessions.values.filter(::midiInputAllowedLocked).mapNotNull { session ->
                 val release = session.expireRtpGap(now)
                 release.takeIf { it.packets.isNotEmpty() }?.let { session to it }
             }
@@ -1744,21 +2036,24 @@ internal fun activeMidiTransportAllowed(
     transportHealthy: Boolean,
 ): Boolean = running && transportHealthy && portPair != null
 
-/**
- * An incoming AppleMIDI invitation is a deliberate peer connection request.
- * It is therefore allowed to use the established RTP media session in both
- * directions even when this device has no separately selected network row.
- */
+/** The UI's one LINK switch is mirrored into both native directions before it is authorized. */
+internal fun appleMidiDuplexPeerIds(
+    outputPeerIds: Set<String>,
+    inputPeerIds: Set<String>,
+    inputSelectionConfigured: Boolean,
+): Set<String> = if (inputSelectionConfigured) outputPeerIds.intersect(inputPeerIds) else emptySet()
+
+/** Directional gates retained for callers/tests; a remote invitation never grants authorization. */
 internal fun appleMidiSessionOutputAllowed(
-    initiatedLocally: Boolean,
+    @Suppress("UNUSED_PARAMETER") initiatedLocally: Boolean,
     selectedForOutput: Boolean,
-): Boolean = !initiatedLocally || selectedForOutput
+): Boolean = selectedForOutput
 
 internal fun appleMidiSessionInputAllowed(
     inputSelectionConfigured: Boolean,
-    initiatedLocally: Boolean,
+    @Suppress("UNUSED_PARAMETER") initiatedLocally: Boolean,
     selectedForInput: Boolean,
-): Boolean = !inputSelectionConfigured || !initiatedLocally || selectedForInput
+): Boolean = inputSelectionConfigured && selectedForInput
 
 internal fun appleMidiDeliveryLookaheadNanos(
     configuration: AppleMidiConfiguration,
@@ -1798,6 +2093,24 @@ internal fun selectRtpMidiSession(
         session.transportAddress.sameNetworkHost(remote.address) &&
             session.remoteDataPort == remote.port &&
             session.remoteSsrc == remoteSsrc
+    }
+    .maxByOrNull(AppleMidiSession::lastActivityNanos)
+
+/** AppleMIDI CK synchronization is carried on the RTP data (odd) port. */
+internal fun selectClockSynchronizationSession(
+    sessions: Collection<AppleMidiSession>,
+    remote: InetSocketAddress,
+    remoteSsrc: Long,
+): AppleMidiSession? = sessions.asSequence()
+    .filter { session ->
+        session.transportAddress.sameNetworkHost(remote.address) &&
+            session.remoteDataPort == remote.port &&
+            session.remoteSsrc == remoteSsrc &&
+            session.state in setOf(
+                AppleMidiSessionState.INVITING,
+                AppleMidiSessionState.SYNCHRONIZING,
+                AppleMidiSessionState.CONNECTED,
+            )
     }
     .maxByOrNull(AppleMidiSession::lastActivityNanos)
 

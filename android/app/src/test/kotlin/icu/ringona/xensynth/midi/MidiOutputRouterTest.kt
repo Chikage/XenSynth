@@ -29,10 +29,10 @@ class MidiOutputRouterTest {
             MidiOutputRouter.setNetworkOutputEnabled(true)
             MidiOutputRouter.setNetworkOutputEnabled(false)
 
-            assertEquals(32, sent.size)
+            assertEquals(48, sent.size)
             assertTrue(sent.all { message ->
                 (message[0].toInt() and 0xF0) == 0xB0 &&
-                    (message[1].toInt() and 0xFF) in setOf(120, 123)
+                    (message[1].toInt() and 0xFF) in setOf(64, 120, 123)
             })
         } finally {
             MidiOutputRouter.setNetworkSender(null)
