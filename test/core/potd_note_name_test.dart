@@ -30,7 +30,7 @@ void main() {
         'A4',
         'vB4',
         'B4',
-        'vC4',
+        'vC5',
       ],
       21: <String>[
         'C4',
@@ -53,7 +53,7 @@ void main() {
         'vB4',
         'B4',
         '^B4',
-        'vC4',
+        'vC5',
       ],
       28: <String>[
         'C4',
@@ -83,7 +83,7 @@ void main() {
         'B4',
         '^B4',
         '^^B4',
-        'vC4',
+        'vC5',
       ],
       35: <String>[
         'C4',
@@ -119,8 +119,8 @@ void main() {
         'B4',
         '^B4',
         '^^B4',
-        'vvC4',
-        'vC4',
+        'vvC5',
+        'vC5',
       ],
     };
 
@@ -133,6 +133,15 @@ void main() {
           ),
       ];
       expect(names, entry.value, reason: '${entry.key} EDO');
+    }
+  });
+
+  test('uses the upcoming C octave for lowered C in 7n EDO', () {
+    for (final edo in <int>[14, 21, 28, 35]) {
+      final stepBelowC4 = edo * 5 - 1;
+      final pitchBelowC4 = stepBelowC4 * 12 / edo;
+
+      expect(potdNoteNameForPitch(pitch: pitchBelowC4, edo: edo), 'vC4');
     }
   });
 }

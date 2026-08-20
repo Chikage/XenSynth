@@ -16,7 +16,7 @@ const _diatonicNames = <String>['C', 'D', 'E', 'F', 'G', 'A', 'B'];
 // The first half uses sharps on the lower degree; the remainder uses flats
 // on the next degree.  At the 14-EDO midpoint the established spelling is
 // the upper (flat) degree, while the 28-EDO midpoint stays on the lower one.
-String? _sevenNedoName(int octaveStep, int edo) {
+({String name, int octaveOffset})? _sevenNedoName(int octaveStep, int edo) {
   if (edo % 7 != 0) return null;
   final subdivisions = edo ~/ 7;
   if (subdivisions < 1 || subdivisions > 5) return null;
@@ -24,15 +24,19 @@ String? _sevenNedoName(int octaveStep, int edo) {
   final degree = octaveStep ~/ subdivisions;
   final offset = octaveStep % subdivisions;
   final lowerName = _diatonicNames[degree];
-  if (offset == 0) return lowerName;
+  if (offset == 0) return (name: lowerName, octaveOffset: 0);
 
   final sharpLimit = subdivisions == 2 ? 0 : subdivisions ~/ 2;
   if (offset <= sharpLimit) {
-    return '${_repeat('^', offset)}$lowerName';
+    return (name: '${_repeat('^', offset)}$lowerName', octaveOffset: 0);
   }
 
-  final upperName = _diatonicNames[(degree + 1) % _diatonicNames.length];
-  return '${_repeat('v', subdivisions - offset)}$upperName';
+  final upperDegree = degree + 1;
+  final upperName = _diatonicNames[upperDegree % _diatonicNames.length];
+  return (
+    name: '${_repeat('v', subdivisions - offset)}$upperName',
+    octaveOffset: upperDegree == _diatonicNames.length ? 1 : 0,
+  );
 }
 
 String potdNoteNameForPitch({required double pitch, required int edo}) {
@@ -42,7 +46,7 @@ String potdNoteNameForPitch({required double pitch, required int edo}) {
   final octaveStep = _floorMod(step, normalizedEdo);
   final simpleName = _sevenNedoName(octaveStep, normalizedEdo);
   if (simpleName != null) {
-    return '$simpleName$octave';
+    return '${simpleName.name}${octave + simpleName.octaveOffset}';
   }
   final numericName = _potdNumericName(octaveStep, normalizedEdo);
   final parsed = _parseNumericName(numericName);
